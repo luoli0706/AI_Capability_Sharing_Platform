@@ -131,7 +131,7 @@ async function handleConfirmPublish() {
       version: publishForm.version.trim() || undefined,
       changelog: publishForm.changelog.trim() || undefined
     })
-    ElMessage.success('发布成功，已生成版本快照')
+    ElMessage.success('已提交发布申请，请等待域所有者或管理员在审批中心审批')
     publishModalOpen.value = false
     fetchWorkspaceAssets()
   } catch {
@@ -247,6 +247,7 @@ onMounted(() => {
           @change="handleSearch"
         >
           <el-option label="草稿" value="draft" />
+          <el-option label="待审批" value="pending" />
           <el-option label="已发布" value="published" />
           <el-option label="已下线" value="deprecated" />
         </el-select>
@@ -322,16 +323,25 @@ onMounted(() => {
               <el-button link type="primary" size="small" @click="openDetail(row)">详情</el-button>
               <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
               <el-button
-                v-if="row.status !== 'published'"
+                v-if="row.status === 'draft' || row.status === 'deprecated'"
                 link
                 type="success"
                 size="small"
                 @click="openPublishModal(row)"
               >
-                发布
+                提交发布
               </el-button>
               <el-button
-                v-else
+                v-else-if="row.status === 'pending'"
+                link
+                type="warning"
+                size="small"
+                disabled
+              >
+                待审批
+              </el-button>
+              <el-button
+                v-else-if="row.status === 'published'"
                 link
                 type="warning"
                 size="small"
@@ -401,7 +411,7 @@ onMounted(() => {
     />
 
     <!-- Publish Modal -->
-    <el-dialog v-model="publishModalOpen" title="发布资产版本" width="460px" destroy-on-close>
+    <el-dialog v-model="publishModalOpen" title="提交发布申请" width="460px" destroy-on-close>
       <el-form label-position="top">
         <el-form-item label="发布版本号">
           <el-input
@@ -415,14 +425,14 @@ onMounted(() => {
             v-model="publishForm.changelog"
             type="textarea"
             :rows="3"
-            placeholder="说明本次发布新增或修复的能力..."
+            placeholder="说明本次发布新增或修复的能力，将提交给域所有者/管理员审批..."
           />
         </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="publishModalOpen = false">取消</el-button>
         <el-button type="primary" :loading="publishing" @click="handleConfirmPublish">
-          确认发布
+          确认提交
         </el-button>
       </template>
     </el-dialog>

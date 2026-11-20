@@ -279,7 +279,19 @@ func (s *assetService) DeleteAsset(userID uint64, isSuperAdmin bool, id uint64) 
 }
 
 func (s *assetService) PublishAsset(userID uint64, isSuperAdmin bool, id uint64, version, changelog string) (*model.AssetDetail, error) {
-	if _, err := s.ensureManagePermission(userID, isSuperAdmin, id); err != nil {
+	asset, err := s.ensureManagePermission(userID, isSuperAdmin, id)
+	if err != nil {
+		return nil, err
+	}
+	if asset.Status == model.AssetStatusPending {
+		return nil, NewConflict("资产已在发布审批中，请勿重复提交")
+	}
+
+	domain, err := s.domainRepo.FindByID(asset.DomainID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, NewNotFound("domain not found")
+		}
 		return nil, err
 	}
 
@@ -293,7 +305,7 @@ func (s *assetService) PublishAsset(userID uint64, isSuperAdmin bool, id uint64,
 		nextVersion = bumpVersion(detail.CurrentVersion)
 	}
 	if changelog == "" {
-		changelog = "Publish version " + nextVersion
+		changelog = "申请发布资产上线"
 	}
 
 	detail.Status = model.AssetStatusPublished
@@ -304,7 +316,17 @@ func (s *assetService) PublishAsset(userID uint64, isSuperAdmin bool, id uint64,
 		return nil, err
 	}
 
-	if err := s.assetRepo.PublishWithSnapshot(id, nextVersion, changelog, model.JSONRaw(snapshotBytes), userID); err != nil {
+	requestNo := fmt.Sprintf("APR-%s-%04d", time.Now().Format("20060102150405"), time.Now().Nanosecond()%10000)
+	if err := s.assetRepo.SubmitPublishApproval(
+		id,
+		asset.DomainID,
+		nextVersion,
+		changelog,
+		model.JSONRaw(snapshotBytes),
+		userID,
+		domain.OwnerID,
+		requestNo,
+	); err != nil {
 		return nil, err
 	}
 	return s.assetRepo.GetDetailByID(id)

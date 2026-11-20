@@ -260,11 +260,27 @@ func (r *domainRepository) GetUserDomainIDs(userID uint64) ([]uint64, error) {
 }
 
 func (r *domainRepository) GetUserAdminDomainIDs(userID uint64) ([]uint64, error) {
-	var ids []uint64
-	err := r.db.Model(&model.DomainMember{}).
+	var memberIDs []uint64
+	if err := r.db.Model(&model.DomainMember{}).
 		Where("user_id = ? AND domain_role IN ?", userID, []string{model.DomainRoleOwner, model.DomainRoleAdmin}).
-		Pluck("domain_id", &ids).Error
-	return ids, err
+		Pluck("domain_id", &memberIDs).Error; err != nil {
+		return nil, err
+	}
+	var ownerIDs []uint64
+	if err := r.db.Model(&model.BizDomain{}).
+		Where("owner_id = ?", userID).
+		Pluck("id", &ownerIDs).Error; err != nil {
+		return nil, err
+	}
+	seen := make(map[uint64]bool, len(memberIDs)+len(ownerIDs))
+	ids := make([]uint64, 0, len(memberIDs)+len(ownerIDs))
+	for _, id := range append(memberIDs, ownerIDs...) {
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
 }
 
 func (r *domainRepository) GetAccessibleDomainIDs(userID uint64, userOrgIDs []uint64) ([]uint64, error) {

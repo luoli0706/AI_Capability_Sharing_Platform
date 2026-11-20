@@ -21,6 +21,7 @@ type AssetRepository interface {
 	DeleteAsset(id uint64) error
 	UpdateStatus(id uint64, status string, version string) error
 	PublishWithSnapshot(assetID uint64, version, changelog string, snapshot model.JSONRaw, publisherID uint64) error
+	SubmitPublishApproval(assetID, domainID uint64, version, changelog string, snapshot model.JSONRaw, applicantID, approverID uint64, requestNo string) error
 	ListVersions(assetID uint64) ([]model.AIAssetVersion, error)
 	FindVersionByID(assetID, versionID uint64) (*model.AIAssetVersion, error)
 	RestoreFromSnapshot(asset *model.AIAsset, ext interface{}, versionID uint64, version string) error
@@ -260,6 +261,66 @@ func (r *assetRepository) PublishWithSnapshot(assetID uint64, version, changelog
 			"status":          model.AssetStatusPublished,
 			"current_version": version,
 		}).Error
+	})
+}
+
+func (r *assetRepository) SubmitPublishApproval(
+	assetID, domainID uint64,
+	version, changelog string,
+	snapshot model.JSONRaw,
+	applicantID, approverID uint64,
+	requestNo string,
+) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		ver := model.AIAssetVersion{
+			AssetID:      assetID,
+			Version:      version,
+			Changelog:    changelog,
+			SnapshotJSON: snapshot,
+			PublisherID:  applicantID,
+			IsActive:     0,
+		}
+		if err := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "asset_id"}, {Name: "version"}},
+			DoUpdates: clause.AssignmentColumns([]string{"changelog", "snapshot_json", "publisher_id", "is_active"}),
+		}).Create(&ver).Error; err != nil {
+			return err
+		}
+
+		if err := tx.Model(&model.AIAsset{}).Where("id = ?", assetID).
+			Update("status", model.AssetStatusPending).Error; err != nil {
+			return err
+		}
+
+		reason := changelog
+		if reason == "" {
+			reason = "申请发布资产上线"
+		}
+		req := model.ApprovalRequest{
+			RequestNo:         requestNo,
+			ApplicantID:       applicantID,
+			ApplicantDomainID: domainID,
+			TargetType:        model.ApprovalTargetPublish,
+			AssetID:           assetID,
+			RequestedPerm:     version,
+			DurationDays:      0,
+			Reason:            reason,
+			CurrentStep:       1,
+			TotalSteps:        1,
+			Status:            model.ApprovalStatusPending,
+		}
+		if err := tx.Create(&req).Error; err != nil {
+			return err
+		}
+
+		rec := model.ApprovalRecord{
+			RequestID:  req.ID,
+			StepNo:     1,
+			StepName:   "域所有者/管理员发布审批",
+			ApproverID: approverID,
+			Action:     model.ApprovalActionPending,
+		}
+		return tx.Create(&rec).Error
 	})
 }
 

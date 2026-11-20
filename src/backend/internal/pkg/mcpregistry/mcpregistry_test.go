@@ -75,3 +75,83 @@ func TestParseMCPConfigJSON_MCPServersMap(t *testing.T) {
 		t.Fatalf("unexpected remote-docs item: %+v", items[1])
 	}
 }
+
+func TestParseMCPConfigJSON_AllOfficialAndClientShapes(t *testing.T) {
+	t.Run("official registry wrapped single entry", func(t *testing.T) {
+		raw := `{
+  "server": {
+    "name": "io.github/wrapped-mcp",
+    "title": "Wrapped MCP",
+    "remotes": [{"type": "sse", "url": "https://wrapped.example.com/sse"}]
+  },
+  "_meta": {"io.modelcontextprotocol.registry/official": {"isLatest": true}}
+}`
+		items, err := ParseMCPConfigJSON(raw)
+		if err != nil || len(items) != 1 {
+			t.Fatalf("expected 1 item, got %+v, err=%v", items, err)
+		}
+		if items[0].Slug != "wrapped-mcp" || items[0].TransportType != "sse" || items[0].EndpointURL != "https://wrapped.example.com/sse" {
+			t.Fatalf("unexpected wrapped entry: %+v", items[0])
+		}
+	})
+
+	t.Run("official registry servers array", func(t *testing.T) {
+		raw := `{
+  "servers": [
+    {
+      "server": {
+        "name": "io.github/array-mcp",
+        "version": "1.0.0",
+        "packages": [{"registryType": "npm", "identifier": "@org/array-mcp"}]
+      },
+      "_meta": {"io.modelcontextprotocol.registry/official": {"isLatest": false}}
+    },
+    {
+      "server": {
+        "name": "io.github/array-mcp",
+        "version": "1.1.0",
+        "packages": [{"registryType": "npm", "identifier": "@org/array-mcp-v2"}]
+      },
+      "_meta": {"io.modelcontextprotocol.registry/official": {"isLatest": true}}
+    }
+  ]
+}`
+		items, err := ParseMCPConfigJSON(raw)
+		if err != nil || len(items) != 1 {
+			t.Fatalf("expected 1 deduplicated item, got %+v, err=%v", items, err)
+		}
+		if items[0].Version != "1.1.0" || items[0].PackageCommand != "npx -y @org/array-mcp-v2" {
+			t.Fatalf("expected latest version, got %+v", items[0])
+		}
+	})
+
+	t.Run("vscode servers map", func(t *testing.T) {
+		raw := `{
+  "servers": {
+    "my-mcp": {
+      "type": "http",
+      "url": "https://vscode.example.com/mcp",
+      "headers": {"Authorization": "Bearer abc"}
+    }
+  }
+}`
+		items, err := ParseMCPConfigJSON(raw)
+		if err != nil || len(items) != 1 {
+			t.Fatalf("expected 1 item, got %+v, err=%v", items, err)
+		}
+		if items[0].Slug != "my-mcp" || items[0].TransportType != "streamable_http" || items[0].AuthType != "bearer" {
+			t.Fatalf("unexpected vscode item: %+v", items[0])
+		}
+	})
+
+	t.Run("single flat client entry", func(t *testing.T) {
+		raw := `{"command": "uvx", "args": ["mcp-server-git"]}`
+		items, err := ParseMCPConfigJSON(raw)
+		if err != nil || len(items) != 1 {
+			t.Fatalf("expected 1 item, got %+v, err=%v", items, err)
+		}
+		if items[0].Slug != "mcp-server" || items[0].TransportType != "stdio" || items[0].PackageCommand != "uvx mcp-server-git" {
+			t.Fatalf("unexpected flat entry: %+v", items[0])
+		}
+	})
+}

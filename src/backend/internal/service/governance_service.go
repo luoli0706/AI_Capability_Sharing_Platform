@@ -154,7 +154,11 @@ func (s *governanceService) ListMyRequests(userID uint64) ([]model.ApprovalReque
 }
 
 func (s *governanceService) ListPendingRequests(userID uint64, isSuperAdmin bool) ([]model.ApprovalRequestView, error) {
-	return s.govRepo.ListPendingRequests(userID, isSuperAdmin)
+	adminDomainIDs, err := s.domainRepo.GetUserAdminDomainIDs(userID)
+	if err != nil {
+		return nil, err
+	}
+	return s.govRepo.ListPendingRequests(userID, isSuperAdmin, adminDomainIDs)
 }
 
 func (s *governanceService) ListHandledRequests(userID uint64) ([]model.ApprovalRequestView, error) {
@@ -187,6 +191,31 @@ func (s *governanceService) HandleApproval(userID uint64, isSuperAdmin bool, req
 	}
 	if currentRecord == nil {
 		return nil, NewBadRequest("current approval step not found")
+	}
+
+	if approvalReq.TargetType == model.ApprovalTargetPublish {
+		asset, err := s.assetRepo.FindByID(approvalReq.AssetID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, NewNotFound("asset not found")
+			}
+			return nil, err
+		}
+		domain, err := s.domainRepo.FindByID(asset.DomainID)
+		if err != nil {
+			return nil, err
+		}
+		role, err := s.domainRepo.GetMemberRole(asset.DomainID, userID)
+		if err != nil {
+			return nil, err
+		}
+		if domain.OwnerID != userID && role != model.DomainRoleOwner && role != model.DomainRoleAdmin {
+			return nil, NewForbidden("only domain owner or domain admin can handle publish approval")
+		}
+		if err := s.govRepo.HandlePublishApproval(approvalReq, currentRecord.ID, userID, req.Action, req.Comment); err != nil {
+			return nil, err
+		}
+		return s.govRepo.FindApprovalByID(requestID)
 	}
 
 	if !isSuperAdmin && currentRecord.ApproverID != userID {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   getHandledApprovals,
@@ -11,8 +11,14 @@ import type { ApprovalRequest } from '@/types/api'
 import { formatDateTime, getApprovalStatusMeta, normalizeList } from '@/utils/format'
 
 const activeTab = ref<'pending' | 'my' | 'handled'>('pending')
+const targetTypeFilter = ref<'' | 'asset_publish' | 'asset_access'>('')
 const loading = ref(false)
 const list = ref<ApprovalRequest[]>([])
+
+const filteredList = computed(() => {
+  if (!targetTypeFilter.value) return list.value
+  return list.value.filter((item) => item.target_type === targetTypeFilter.value)
+})
 
 const detailDrawerOpen = ref(false)
 const activeRequest = ref<ApprovalRequest | null>(null)
@@ -108,25 +114,45 @@ onMounted(() => {
     <div class="page-header">
       <div>
         <h1 class="page-title">审批中心</h1>
-        <p class="page-subtitle">处理受控 AI 资产的跨团队权限申请，追踪多级审批进度与历史记录</p>
+        <p class="page-subtitle">处理资产发布申请与受控 AI 资产跨团队权限申请，追踪多级审批进度与历史记录</p>
       </div>
     </div>
 
     <div class="surface-card approvals-card">
-      <el-tabs v-model="activeTab" @tab-change="handleTabChange">
-        <el-tab-pane label="待我审批" name="pending" />
-        <el-tab-pane label="我发起的申请" name="my" />
-        <el-tab-pane label="已处理记录" name="handled" />
-      </el-tabs>
+      <div class="approvals-toolbar">
+        <el-tabs v-model="activeTab" @tab-change="handleTabChange">
+          <el-tab-pane label="待我审批" name="pending" />
+          <el-tab-pane label="我发起的申请" name="my" />
+          <el-tab-pane label="已处理记录" name="handled" />
+        </el-tabs>
 
-      <el-table v-loading="loading" :data="list" stripe style="width: 100%">
+        <el-radio-group v-model="targetTypeFilter" size="small" class="type-filter">
+          <el-radio-button value="">全部类型</el-radio-button>
+          <el-radio-button value="asset_publish">发布审批</el-radio-button>
+          <el-radio-button value="asset_access">权限申请</el-radio-button>
+        </el-radio-group>
+      </div>
+
+      <el-table v-loading="loading" :data="filteredList" stripe style="width: 100%">
         <el-table-column label="申请单号" width="175">
           <template #default="{ row }">
             <span class="mono-text req-no">{{ row.request_no }}</span>
           </template>
         </el-table-column>
 
-        <el-table-column label="目标资产" min-width="180">
+        <el-table-column label="审批类型" width="105">
+          <template #default="{ row }">
+            <el-tag
+              :type="row.target_type === 'asset_publish' ? 'primary' : 'warning'"
+              size="small"
+              effect="light"
+            >
+              {{ row.target_type === 'asset_publish' ? '发布审批' : '权限申请' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="目标资产" min-width="175">
           <template #default="{ row }">
             <div class="asset-col">
               <span class="asset-name">{{ row.asset_name || `资产 #${row.asset_id}` }}</span>
@@ -135,16 +161,22 @@ onMounted(() => {
           </template>
         </el-table-column>
 
-        <el-table-column label="申请人" width="120">
+        <el-table-column label="申请人" width="115">
           <template #default="{ row }">
             {{ row.applicant_name || `用户 #${row.applicant_id}` }}
           </template>
         </el-table-column>
 
-        <el-table-column label="申请权限 / 时长" width="140">
+        <el-table-column label="申请内容" min-width="190">
           <template #default="{ row }">
-            <span class="mono-text">{{ row.requested_perm }}</span>
-            <span class="duration-text"> ({{ row.duration_days }}天)</span>
+            <div v-if="row.target_type === 'asset_publish'" class="publish-info">
+              <span class="mono-text version-badge">{{ row.requested_perm || 'v0.1.0' }}</span>
+              <span class="reason-text">{{ row.reason || '无变更说明' }}</span>
+            </div>
+            <div v-else>
+              <span class="mono-text">{{ row.requested_perm }}</span>
+              <span class="duration-text"> ({{ row.duration_days }}天)</span>
+            </div>
           </template>
         </el-table-column>
 
@@ -202,13 +234,30 @@ onMounted(() => {
           <el-descriptions-item label="申请单号">
             <span class="mono-text">{{ activeRequest.request_no }}</span>
           </el-descriptions-item>
+          <el-descriptions-item label="审批类型">
+            <el-tag
+              :type="activeRequest.target_type === 'asset_publish' ? 'primary' : 'warning'"
+              size="small"
+              effect="light"
+            >
+              {{ activeRequest.target_type === 'asset_publish' ? '发布审批' : '权限申请' }}
+            </el-tag>
+          </el-descriptions-item>
           <el-descriptions-item label="目标资产">
             {{ activeRequest.asset_name || `资产 #${activeRequest.asset_id}` }}
           </el-descriptions-item>
-          <el-descriptions-item label="申请权限">
+          <el-descriptions-item
+            v-if="activeRequest.target_type === 'asset_publish'"
+            label="目标发布版本"
+          >
+            <span class="mono-text">{{ activeRequest.requested_perm || '-' }}</span>
+          </el-descriptions-item>
+          <el-descriptions-item v-else label="申请权限">
             <span class="mono-text">{{ activeRequest.requested_perm }}</span>（有效期 {{ activeRequest.duration_days }} 天）
           </el-descriptions-item>
-          <el-descriptions-item label="申请理由">
+          <el-descriptions-item
+            :label="activeRequest.target_type === 'asset_publish' ? '变更说明' : '申请理由'"
+          >
             {{ activeRequest.reason || '-' }}
           </el-descriptions-item>
           <el-descriptions-item label="当前状态">
@@ -285,6 +334,42 @@ onMounted(() => {
 <style scoped>
 .approvals-card {
   padding: 16px 24px 24px;
+}
+
+.approvals-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.type-filter {
+  margin-bottom: 12px;
+}
+
+.publish-info {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.version-badge {
+  font-size: 12px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: #f1f5f9;
+  color: var(--ascp-text-primary);
+  flex-shrink: 0;
+}
+
+.reason-text {
+  font-size: 13px;
+  color: var(--ascp-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .req-no {

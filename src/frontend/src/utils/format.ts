@@ -60,7 +60,7 @@ export interface StatusMeta {
 const ASSET_STATUS_MAP: Record<string, StatusMeta> = {
   published: { label: '已发布', tagType: 'success' },
   draft: { label: '草稿', tagType: 'info' },
-  pending: { label: '审批中', tagType: 'warning' },
+  pending: { label: '待审批', tagType: 'warning' },
   deprecated: { label: '已下线', tagType: 'danger' },
   offline: { label: '已下线', tagType: 'danger' }
 }
@@ -107,7 +107,7 @@ export function formatFileSize(bytes?: number): string {
 
 export function getApprovalStatusMeta(status: string): StatusMeta {
   const map: Record<string, StatusMeta> = {
-    pending: { label: '审批中', tagType: 'warning' },
+    pending: { label: '待审批', tagType: 'warning' },
     approved: { label: '已通过', tagType: 'success' },
     rejected: { label: '已驳回', tagType: 'danger' },
     cancelled: { label: '已取消', tagType: 'info' }

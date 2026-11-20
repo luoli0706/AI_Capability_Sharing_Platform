@@ -80,14 +80,22 @@ func (m *mockP1DomainRepo) UpsertMember(member *model.DomainMember) error     { 
 func (m *mockP1DomainRepo) RemoveMember(domainID, userID uint64) error        { return nil }
 func (m *mockP1DomainRepo) GetUserDomainIDs(userID uint64) ([]uint64, error)  { return []uint64{}, nil }
 func (m *mockP1DomainRepo) GetUserAdminDomainIDs(userID uint64) ([]uint64, error) {
-	return []uint64{}, nil
+	var ids []uint64
+	for did, roles := range m.members {
+		if r := roles[userID]; r == model.DomainRoleOwner || r == model.DomainRoleAdmin {
+			ids = append(ids, did)
+		}
+	}
+	return ids, nil
 }
 func (m *mockP1DomainRepo) GetAccessibleDomainIDs(userID uint64, userOrgIDs []uint64) ([]uint64, error) {
 	return []uint64{}, nil
 }
 
 type mockP1AssetRepo struct {
-	assets map[uint64]*model.AIAsset
+	assets   map[uint64]*model.AIAsset
+	versions map[uint64][]*model.AIAssetVersion
+	govRepo  *mockP1GovRepo
 }
 
 func (m *mockP1AssetRepo) ListAssets(q model.AssetQuery, userID uint64, isSuperAdmin bool, memberDomainIDs, adminDomainIDs, permittedAssetIDs []uint64) ([]model.AssetListItem, int64, error) {
@@ -137,8 +145,44 @@ func (m *mockP1AssetRepo) UpdateStatus(id uint64, status string, version string)
 func (m *mockP1AssetRepo) PublishWithSnapshot(assetID uint64, version, changelog string, snapshot model.JSONRaw, publisherID uint64) error {
 	return nil
 }
+func (m *mockP1AssetRepo) SubmitPublishApproval(assetID, domainID uint64, version, changelog string, snapshot model.JSONRaw, applicantID, approverID uint64, requestNo string) error {
+	if m.versions == nil {
+		m.versions = make(map[uint64][]*model.AIAssetVersion)
+	}
+	m.versions[assetID] = append(m.versions[assetID], &model.AIAssetVersion{
+		ID:           uint64(len(m.versions[assetID]) + 1),
+		AssetID:      assetID,
+		Version:      version,
+		Changelog:    changelog,
+		SnapshotJSON: snapshot,
+		PublisherID:  applicantID,
+		IsActive:     0,
+	})
+	m.assets[assetID].Status = model.AssetStatusPending
+	if m.govRepo != nil {
+		return m.govRepo.CreateApprovalWithRecords(&model.ApprovalRequest{
+			RequestNo:         requestNo,
+			ApplicantID:       applicantID,
+			ApplicantDomainID: domainID,
+			TargetType:        model.ApprovalTargetPublish,
+			AssetID:           assetID,
+			RequestedPerm:     version,
+			Reason:            changelog,
+			CurrentStep:       1,
+			TotalSteps:        1,
+			Status:            model.ApprovalStatusPending,
+		}, []model.ApprovalRecord{
+			{StepNo: 1, StepName: "域所有者/管理员发布审批", ApproverID: approverID, Action: model.ApprovalActionPending},
+		})
+	}
+	return nil
+}
 func (m *mockP1AssetRepo) ListVersions(assetID uint64) ([]model.AIAssetVersion, error) {
-	return nil, nil
+	var out []model.AIAssetVersion
+	for _, v := range m.versions[assetID] {
+		out = append(out, *v)
+	}
+	return out, nil
 }
 func (m *mockP1AssetRepo) FindVersionByID(assetID, versionID uint64) (*model.AIAssetVersion, error) {
 	return nil, gorm.ErrRecordNotFound
@@ -168,6 +212,7 @@ type mockP1GovRepo struct {
 	reqs      map[uint64]*model.ApprovalRequest
 	recs      map[uint64][]model.ApprovalRecord
 	perms     []*model.AssetPermission
+	assetRepo *mockP1AssetRepo
 }
 
 func newMockP1GovRepo() *mockP1GovRepo {
@@ -225,8 +270,24 @@ func (m *mockP1GovRepo) ListApprovalRecords(requestID uint64) ([]model.ApprovalR
 func (m *mockP1GovRepo) ListMyRequests(applicantID uint64) ([]model.ApprovalRequestView, error) {
 	return nil, nil
 }
-func (m *mockP1GovRepo) ListPendingRequests(approverID uint64, isSuperAdmin bool) ([]model.ApprovalRequestView, error) {
-	return nil, nil
+func (m *mockP1GovRepo) ListPendingRequests(approverID uint64, isSuperAdmin bool, adminDomainIDs []uint64) ([]model.ApprovalRequestView, error) {
+	var out []model.ApprovalRequestView
+	adminSet := toUint64Set(adminDomainIDs)
+	for _, r := range m.reqs {
+		if r.Status != model.ApprovalStatusPending {
+			continue
+		}
+		if r.TargetType == model.ApprovalTargetPublish {
+			if m.assetRepo != nil && m.assetRepo.assets[r.AssetID] != nil && adminSet[m.assetRepo.assets[r.AssetID].DomainID] {
+				out = append(out, model.ApprovalRequestView{ApprovalRequest: *r})
+			}
+			continue
+		}
+		if isSuperAdmin {
+			out = append(out, model.ApprovalRequestView{ApprovalRequest: *r})
+		}
+	}
+	return out, nil
 }
 func (m *mockP1GovRepo) ListHandledRequests(approverID uint64) ([]model.ApprovalRequestView, error) {
 	return nil, nil
@@ -248,6 +309,36 @@ func (m *mockP1GovRepo) HandleApprovalStep(req *model.ApprovalRequest, recordID 
 	}
 	if grantPerm != nil {
 		m.perms = append(m.perms, grantPerm)
+	}
+	return nil
+}
+func (m *mockP1GovRepo) HandlePublishApproval(req *model.ApprovalRequest, recordID, approverID uint64, action, comment string) error {
+	stored := m.reqs[req.ID]
+	for i := range m.recs[req.ID] {
+		if m.recs[req.ID][i].ID == recordID {
+			m.recs[req.ID][i].ApproverID = approverID
+			m.recs[req.ID][i].Action = action
+			m.recs[req.ID][i].Comment = comment
+		}
+	}
+	if action == model.ApprovalActionReject {
+		stored.Status = model.ApprovalStatusRejected
+		if m.assetRepo != nil && m.assetRepo.assets[req.AssetID] != nil {
+			m.assetRepo.assets[req.AssetID].Status = model.AssetStatusDraft
+		}
+		return nil
+	}
+	stored.Status = model.ApprovalStatusApproved
+	if m.assetRepo != nil && m.assetRepo.assets[req.AssetID] != nil {
+		m.assetRepo.assets[req.AssetID].Status = model.AssetStatusPublished
+		m.assetRepo.assets[req.AssetID].CurrentVersion = req.RequestedPerm
+		for _, v := range m.assetRepo.versions[req.AssetID] {
+			if v.Version == req.RequestedPerm {
+				v.IsActive = 1
+			} else {
+				v.IsActive = 0
+			}
+		}
 	}
 	return nil
 }
@@ -452,5 +543,97 @@ func TestMultiStepApprovalAndInvokeGuard(t *testing.T) {
 	_ = handler(c3)
 	if rec3.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 after key revocation, got %d", rec3.Code)
+	}
+}
+
+func TestAssetPublishApprovalWorkflow(t *testing.T) {
+	govRepo := newMockP1GovRepo()
+	assetRepo := &mockP1AssetRepo{
+		assets: map[uint64]*model.AIAsset{
+			200: {
+				ID:             200,
+				AssetCode:      "mcp-approval",
+				AssetType:      model.AssetTypeMCP,
+				Name:           "Approval MCP",
+				DomainID:       1,
+				OwnerID:        10,
+				Visibility:     model.VisibilityDomain,
+				CurrentVersion: "v0.1.0",
+				Status:         model.AssetStatusDraft,
+			},
+		},
+		govRepo: govRepo,
+	}
+	govRepo.assetRepo = assetRepo
+
+	domainRepo := &mockP1DomainRepo{
+		domains: map[uint64]*model.BizDomain{
+			1: {ID: 1, DomainCode: "core", DomainName: "Core", OwnerID: 30},
+		},
+		members: map[uint64]map[uint64]string{
+			1: {
+				10: model.DomainRoleMember,
+				30: model.DomainRoleOwner,
+				31: model.DomainRoleAdmin,
+			},
+		},
+	}
+
+	assetSvc := NewAssetService(assetRepo, domainRepo, govRepo, nil, "")
+	govSvc := NewGovernanceService(govRepo, assetRepo, domainRepo, nil)
+
+	// 1. Submit publish -> status becomes pending, version created with is_active=0
+	detail, err := assetSvc.PublishAsset(10, false, 200, "", "Release v1")
+	if err != nil {
+		t.Fatalf("PublishAsset failed: %v", err)
+	}
+	if detail.Status != model.AssetStatusPending {
+		t.Fatalf("expected status pending, got %s", detail.Status)
+	}
+
+	// 2. Duplicate publish while pending -> 409 Conflict
+	if _, err := assetSvc.PublishAsset(10, false, 200, "", "dup"); err == nil {
+		t.Fatal("expected 409 conflict on duplicate publish")
+	}
+
+	// 3. Domain admin (31) sees pending publish request; regular member (10) does not
+	pendingAdmin, err := govSvc.ListPendingRequests(31, false)
+	if err != nil || len(pendingAdmin) != 1 || pendingAdmin[0].TargetType != model.ApprovalTargetPublish {
+		t.Fatalf("expected domain admin to see 1 pending publish request, got %+v, err=%v", pendingAdmin, err)
+	}
+	reqID := pendingAdmin[0].ID
+
+	// Regular member (10) cannot handle publish approval
+	if _, err := govSvc.HandleApproval(10, false, reqID, model.HandleApprovalRequest{Action: "approve"}); err == nil {
+		t.Fatal("expected 403 when non-domain-admin tries to approve publish")
+	}
+
+	// 4. Domain admin (31) rejects -> asset reverts to draft
+	rej, err := govSvc.HandleApproval(31, false, reqID, model.HandleApprovalRequest{Action: "reject", Comment: "needs docs"})
+	if err != nil {
+		t.Fatalf("HandleApproval reject failed: %v", err)
+	}
+	if rej.Status != model.ApprovalStatusRejected || assetRepo.assets[200].Status != model.AssetStatusDraft {
+		t.Fatalf("expected rejected -> draft, got req=%s asset=%s", rej.Status, assetRepo.assets[200].Status)
+	}
+
+	// 5. Re-submit publish & approve by domain owner (30) -> published + active version
+	if _, err := assetSvc.PublishAsset(10, false, 200, "v1.0.0", "Docs added"); err != nil {
+		t.Fatalf("re-publish failed: %v", err)
+	}
+	pendingOwner, err := govSvc.ListPendingRequests(30, false)
+	if err != nil || len(pendingOwner) != 1 {
+		t.Fatalf("expected 1 pending request for owner, got %+v", pendingOwner)
+	}
+	app, err := govSvc.HandleApproval(30, false, pendingOwner[0].ID, model.HandleApprovalRequest{Action: "approve", Comment: "LGTM"})
+	if err != nil {
+		t.Fatalf("HandleApproval approve failed: %v", err)
+	}
+	if app.Status != model.ApprovalStatusApproved || assetRepo.assets[200].Status != model.AssetStatusPublished || assetRepo.assets[200].CurrentVersion != "v1.0.0" {
+		t.Fatalf("expected published v1.0.0, got req=%s asset=%+v", app.Status, assetRepo.assets[200])
+	}
+	vers, _ := assetRepo.ListVersions(200)
+	if len(vers) == 0 || vers[len(vers)-1].IsActive != 1 {
+		t.Fatalf("expected latest version to be active, got %+v", vers)
 	}
 }

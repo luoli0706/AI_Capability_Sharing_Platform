@@ -309,6 +309,9 @@ func (m *memAssetRepo) GetDetailByCode(code string) (*model.AssetDetail, error) 
 func (m *memAssetRepo) PublishWithSnapshot(assetID uint64, version, changelog string, snapshot model.JSONRaw, publisherID uint64) error {
 	return m.UpdateStatus(assetID, model.AssetStatusPublished, version)
 }
+func (m *memAssetRepo) SubmitPublishApproval(assetID, domainID uint64, version, changelog string, snapshot model.JSONRaw, applicantID, approverID uint64, requestNo string) error {
+	return m.UpdateStatus(assetID, model.AssetStatusPending, "")
+}
 func (m *memAssetRepo) ListVersions(assetID uint64) ([]model.AIAssetVersion, error) {
 	return []model.AIAssetVersion{}, nil
 }

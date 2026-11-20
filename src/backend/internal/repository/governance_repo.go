@@ -17,9 +17,10 @@ type GovernanceRepository interface {
 	FindApprovalByID(id uint64) (*model.ApprovalRequest, error)
 	ListApprovalRecords(requestID uint64) ([]model.ApprovalRecordView, error)
 	ListMyRequests(applicantID uint64) ([]model.ApprovalRequestView, error)
-	ListPendingRequests(approverID uint64, isSuperAdmin bool) ([]model.ApprovalRequestView, error)
+	ListPendingRequests(approverID uint64, isSuperAdmin bool, adminDomainIDs []uint64) ([]model.ApprovalRequestView, error)
 	ListHandledRequests(approverID uint64) ([]model.ApprovalRequestView, error)
 	HandleApprovalStep(req *model.ApprovalRequest, recordID uint64, action, comment string, grantPerm *model.AssetPermission) error
+	HandlePublishApproval(req *model.ApprovalRequest, recordID, approverID uint64, action, comment string) error
 }
 
 type governanceRepository struct {
@@ -129,15 +130,31 @@ func (r *governanceRepository) ListMyRequests(applicantID uint64) ([]model.Appro
 	return r.hydrateApprovalViews(reqs)
 }
 
-func (r *governanceRepository) ListPendingRequests(approverID uint64, isSuperAdmin bool) ([]model.ApprovalRequestView, error) {
+func (r *governanceRepository) ListPendingRequests(approverID uint64, isSuperAdmin bool, adminDomainIDs []uint64) ([]model.ApprovalRequestView, error) {
 	var reqs []model.ApprovalRequest
 	tx := r.db.Table("approval_request").
 		Select("approval_request.*").
 		Joins("INNER JOIN approval_record ON approval_record.request_id = approval_request.id AND approval_record.step_no = approval_request.current_step").
+		Joins("LEFT JOIN ai_asset ON ai_asset.id = approval_request.asset_id").
 		Where("approval_request.status = ? AND approval_record.action = ?", model.ApprovalStatusPending, model.ApprovalActionPending)
-	if !isSuperAdmin {
-		tx = tx.Where("approval_record.approver_id = ?", approverID)
+
+	var accessCond string
+	var args []interface{}
+	if isSuperAdmin {
+		accessCond = "approval_request.target_type <> ?"
+		args = append(args, model.ApprovalTargetPublish)
+	} else {
+		accessCond = "(approval_request.target_type <> ? AND approval_record.approver_id = ?)"
+		args = append(args, model.ApprovalTargetPublish, approverID)
 	}
+
+	if len(adminDomainIDs) > 0 {
+		tx = tx.Where("("+accessCond+" OR (approval_request.target_type = ? AND ai_asset.domain_id IN ?))",
+			append(args, model.ApprovalTargetPublish, adminDomainIDs)...)
+	} else {
+		tx = tx.Where(accessCond, args...)
+	}
+
 	if err := tx.Order("approval_request.id DESC").Find(&reqs).Error; err != nil {
 		return nil, err
 	}
@@ -278,5 +295,46 @@ func (r *governanceRepository) HandleApprovalStep(req *model.ApprovalRequest, re
 			return upsertPermissionTx(tx, grantPerm)
 		}
 		return nil
+	})
+}
+
+func (r *governanceRepository) HandlePublishApproval(req *model.ApprovalRequest, recordID, approverID uint64, action, comment string) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		now := time.Now()
+		if err := tx.Model(&model.ApprovalRecord{}).Where("id = ?", recordID).Updates(map[string]interface{}{
+			"approver_id": approverID,
+			"action":      action,
+			"comment":     comment,
+			"handled_at":  now,
+		}).Error; err != nil {
+			return err
+		}
+
+		if action == model.ApprovalActionReject {
+			if err := tx.Model(&model.ApprovalRequest{}).Where("id = ?", req.ID).
+				Update("status", model.ApprovalStatusRejected).Error; err != nil {
+				return err
+			}
+			return tx.Model(&model.AIAsset{}).Where("id = ?", req.AssetID).
+				Update("status", model.AssetStatusDraft).Error
+		}
+
+		if err := tx.Model(&model.ApprovalRequest{}).Where("id = ?", req.ID).
+			Update("status", model.ApprovalStatusApproved).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&model.AIAssetVersion{}).Where("asset_id = ?", req.AssetID).
+			Update("is_active", 0).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&model.AIAssetVersion{}).
+			Where("asset_id = ? AND version = ?", req.AssetID, req.RequestedPerm).
+			Update("is_active", 1).Error; err != nil {
+			return err
+		}
+		return tx.Model(&model.AIAsset{}).Where("id = ?", req.AssetID).Updates(map[string]interface{}{
+			"status":          model.AssetStatusPublished,
+			"current_version": req.RequestedPerm,
+		}).Error
 	})
 }

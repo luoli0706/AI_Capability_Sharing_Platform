@@ -270,6 +270,40 @@ const mcpRegistryResults = ref<McpImportItem[]>([])
 const showMcpJsonImport = ref(false)
 const mcpJsonContent = ref('')
 const parsingMcpJson = ref(false)
+const mcpParsedCandidates = ref<McpImportItem[]>([])
+const mcpEndpointPlaceholder = ref('https://mcp.example.com/sse（Stdio 类型可留空）')
+
+type McpPresetKey = 'streamable_http' | 'sse' | 'stdio_npx' | 'stdio_uvx'
+
+function applyMcpPreset(preset: McpPresetKey) {
+  if (preset === 'streamable_http') {
+    form.mcp_config.transport_type = 'streamable_http'
+    form.mcp_config.auth_type = 'none'
+    form.mcp_config.endpoint_url = ''
+    mcpEndpointPlaceholder.value = 'https://api.example.com/mcp'
+    ElMessage.success('已应用「Streamable HTTP 服务」模板')
+  } else if (preset === 'sse') {
+    form.mcp_config.transport_type = 'sse'
+    form.mcp_config.auth_type = 'bearer'
+    form.mcp_config.endpoint_url = ''
+    mcpEndpointPlaceholder.value = 'https://api.example.com/sse'
+    ElMessage.success('已应用「SSE 流式服务」模板')
+  } else if (preset === 'stdio_npx') {
+    form.mcp_config.transport_type = 'stdio'
+    form.mcp_config.package_command = 'npx -y @modelcontextprotocol/server-github'
+    form.mcp_config.endpoint_url = 'stdio://server-github'
+    form.mcp_config.auth_type = 'none'
+    mcpEndpointPlaceholder.value = 'stdio://server-github'
+    ElMessage.success('已应用「Stdio npx 命令」模板')
+  } else if (preset === 'stdio_uvx') {
+    form.mcp_config.transport_type = 'stdio'
+    form.mcp_config.package_command = 'uvx mcp-server-fetch'
+    form.mcp_config.endpoint_url = 'stdio://mcp-server-fetch'
+    form.mcp_config.auth_type = 'none'
+    mcpEndpointPlaceholder.value = 'stdio://mcp-server-fetch'
+    ElMessage.success('已应用「Stdio uvx 命令」模板')
+  }
+}
 
 async function handleSearchMcpRegistry() {
   const q = mcpRegistryQuery.value.trim()
@@ -313,19 +347,26 @@ function applyMcpImportItem(item: McpImportItem) {
 async function handleParseMcpJson() {
   const content = mcpJsonContent.value.trim()
   if (!content) {
-    ElMessage.warning('请先粘贴 mcpServers 或 server.json 配置内容')
+    ElMessage.warning('请先粘贴官方 Registry 条目、server.json、mcpServers 或 VS Code servers 配置')
     return
   }
   parsingMcpJson.value = true
+  mcpParsedCandidates.value = []
   try {
     const res = await parseMcpJson(content)
-    const item = Array.isArray(res) ? res[0] : res
-    if (!item) {
+    const items = Array.isArray(res) ? res : res ? [res] : []
+    if (items.length === 0) {
       ElMessage.warning('未能解析出有效的 MCP 服务配置')
       return
     }
-    applyMcpImportItem(item)
-    showMcpJsonImport.value = false
+    if (items.length > 1) {
+      mcpParsedCandidates.value = items
+      applyMcpImportItem(items[0])
+      ElMessage.info(`共解析出 ${items.length} 个服务，已默认填入第 1 个，可在下方切换选择`)
+    } else {
+      applyMcpImportItem(items[0])
+      showMcpJsonImport.value = false
+    }
   } catch {
     // Handled by interceptor
   } finally {
@@ -434,6 +475,8 @@ function resetForm() {
   mcpRegistryResults.value = []
   showMcpJsonImport.value = false
   mcpJsonContent.value = ''
+  mcpParsedCandidates.value = []
+  mcpEndpointPlaceholder.value = 'https://mcp.example.com/sse（Stdio 类型可留空）'
   agentImportUrl.value = ''
   showAgentTextImport.value = false
   agentTextContent.value = ''
@@ -707,11 +750,14 @@ async function handleSubmit() {
           </div>
 
           <div v-if="showMcpJsonImport" class="json-import-panel">
+            <div class="json-helper-text">
+              支持格式：官方 MCP Registry 条目 (<code class="mono-text">{"server": {...}}</code>)、<code class="mono-text">server.json</code>、<code class="mono-text">mcpServers</code> 以及 VS Code <code class="mono-text">servers</code> 格式
+            </div>
             <el-input
               v-model="mcpJsonContent"
               type="textarea"
               :rows="5"
-              placeholder='粘贴 {"mcpServers": { ... }} 或 server.json 内容...'
+              placeholder='支持官方 MCP Registry 条目 ({"server": {...}})、server.json、mcpServers 或 VS Code servers 格式...'
               class="mono-text"
             />
             <div class="json-import-actions">
@@ -724,6 +770,46 @@ async function handleSubmit() {
                 解析并填入
               </el-button>
             </div>
+            <div v-if="mcpParsedCandidates.length > 1" class="registry-results">
+              <div
+                v-for="cand in mcpParsedCandidates"
+                :key="cand.slug || cand.name"
+                class="registry-item"
+              >
+                <div class="registry-info">
+                  <div class="registry-title-row">
+                    <span class="registry-name">{{ cand.name || cand.slug }}</span>
+                    <el-tag size="small" type="info" effect="plain" class="mono-text">
+                      {{ cand.transport_type }}
+                    </el-tag>
+                  </div>
+                  <div class="registry-desc mono-text">
+                    {{ cand.package_command || cand.endpoint_url || '-' }}
+                  </div>
+                </div>
+                <el-button type="primary" size="small" plain @click="applyMcpImportItem(cand)">
+                  填入表单
+                </el-button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="preset-bar">
+          <span class="preset-label">快速配置模板：</span>
+          <div class="preset-btns">
+            <el-button size="small" plain @click="applyMcpPreset('streamable_http')">
+              Streamable HTTP 服务
+            </el-button>
+            <el-button size="small" plain @click="applyMcpPreset('sse')">
+              SSE 流式服务
+            </el-button>
+            <el-button size="small" plain @click="applyMcpPreset('stdio_npx')">
+              Stdio npx 命令
+            </el-button>
+            <el-button size="small" plain @click="applyMcpPreset('stdio_uvx')">
+              Stdio uvx 命令
+            </el-button>
           </div>
         </div>
 
@@ -750,7 +836,7 @@ async function handleSubmit() {
         <el-form-item label="服务端点 URL" prop="mcp_config.endpoint_url">
           <el-input
             v-model="form.mcp_config.endpoint_url"
-            placeholder="https://mcp.example.com/sse（Stdio 类型可留空）"
+            :placeholder="mcpEndpointPlaceholder"
             class="mono-text"
           />
         </el-form-item>
@@ -1235,5 +1321,36 @@ async function handleSubmit() {
   display: flex;
   justify-content: flex-end;
   margin-top: 8px;
+}
+
+.json-helper-text {
+  font-size: 12px;
+  color: var(--ascp-text-muted);
+  margin-bottom: 8px;
+  line-height: 1.5;
+}
+
+.preset-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  background: #f8fafc;
+  border: 1px solid var(--ascp-border);
+  border-radius: 8px;
+}
+
+.preset-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ascp-text-secondary);
+}
+
+.preset-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 </style>
