@@ -62,7 +62,7 @@ func (m *memUserRepo) FindByUsername(username string) (*model.SysUser, error) {
 }
 func (m *memUserRepo) FindByEmail(email string) (*model.SysUser, error) {
 	for _, u := range m.users {
-		if u.Email == email {
+		if u.Email != nil && *u.Email == email {
 			cp := *u
 			return &cp, nil
 		}
@@ -72,11 +72,12 @@ func (m *memUserRepo) FindByEmail(email string) (*model.SysUser, error) {
 func (m *memUserRepo) GetUserRoles(userID uint64) ([]string, error) {
 	return m.roles[userID], nil
 }
-func (m *memUserRepo) UpdateProfile(userID uint64, nickname, email, avatar string) error {
+func (m *memUserRepo) UpdateProfile(userID uint64, nickname string, email *string, avatar, bio string) error {
 	if u, ok := m.users[userID]; ok {
 		u.Nickname = nickname
 		u.Email = email
 		u.Avatar = avatar
+		u.Bio = bio
 		return nil
 	}
 	return gorm.ErrRecordNotFound
@@ -112,7 +113,7 @@ func newMemDomainRepo() *memDomainRepo {
 	}
 }
 
-func (m *memDomainRepo) ListDomains(userID uint64, q model.DomainQuery, userOrgIDs []uint64) ([]model.DomainListItem, error) {
+func (m *memDomainRepo) ListDomains(userID uint64, q model.DomainQuery, userOrgIDs, adminOrgIDs []uint64) ([]model.DomainListItem, int64, error) {
 	var list []model.DomainListItem
 	for _, d := range m.domains {
 		list = append(list, model.DomainListItem{
@@ -132,7 +133,7 @@ func (m *memDomainRepo) ListDomains(userID uint64, q model.DomainQuery, userOrgI
 			CreatedAt:   d.CreatedAt,
 		})
 	}
-	return list, nil
+	return list, int64(len(list)), nil
 }
 func (m *memDomainRepo) FindByID(id uint64) (*model.BizDomain, error) {
 	if d, ok := m.domains[id]; ok {
@@ -166,6 +167,10 @@ func (m *memDomainRepo) CreateWithOwner(domain *model.BizDomain) error {
 }
 func (m *memDomainRepo) UpdateDomain(domain *model.BizDomain) error {
 	m.domains[domain.ID] = domain
+	return nil
+}
+func (m *memDomainRepo) DeleteDomain(id uint64) error {
+	delete(m.domains, id)
 	return nil
 }
 func (m *memDomainRepo) ListMembers(domainID uint64) ([]model.DomainMemberItem, error) {
@@ -213,7 +218,7 @@ func (m *memDomainRepo) GetUserAdminDomainIDs(userID uint64) ([]uint64, error) {
 	}
 	return ids, nil
 }
-func (m *memDomainRepo) GetAccessibleDomainIDs(userID uint64, userOrgIDs []uint64) ([]uint64, error) {
+func (m *memDomainRepo) GetAccessibleDomainIDs(userID uint64, userOrgIDs, adminOrgIDs []uint64) ([]uint64, error) {
 	return m.GetUserDomainIDs(userID)
 }
 
@@ -361,6 +366,7 @@ func setupTestEcho() *echo.Echo {
 	protected := v1.Group("", middleware.AuthMiddleware(jwtCfg.Secret, userRepo))
 	protected.POST("/auth/logout", authH.Logout)
 	protected.GET("/user/profile", authH.GetProfile)
+	protected.PUT("/user/profile", authH.UpdateProfile)
 	protected.POST("/domains", domainH.CreateDomain)
 	protected.POST("/domains/:id/members", domainH.AddMember)
 	protected.POST("/assets", assetH.CreateAsset)
@@ -474,4 +480,53 @@ func TestP0EndToEndFlow(t *testing.T) {
 
 	recProf := doJSON(e, http.MethodGet, "/api/v1/user/profile", token, nil)
 	assertStatus(t, recProf.Code, http.StatusUnauthorized, recProf.Body.String())
+}
+
+func TestOptionalEmailAndBioAvatarProfile(t *testing.T) {
+	e := setupTestEcho()
+
+	// Register two users without email (should not collide on NULL email)
+	rec1 := doJSON(e, http.MethodPost, "/api/v1/auth/register", "", map[string]string{
+		"username": "noemail1",
+		"password": "password123",
+	})
+	assertStatus(t, rec1.Code, http.StatusOK, rec1.Body.String())
+
+	rec2 := doJSON(e, http.MethodPost, "/api/v1/auth/register", "", map[string]string{
+		"username": "noemail2",
+		"password": "password123",
+	})
+	assertStatus(t, rec2.Code, http.StatusOK, rec2.Body.String())
+
+	recLogin := doJSON(e, http.MethodPost, "/api/v1/auth/login", "", map[string]string{
+		"username": "noemail1",
+		"password": "password123",
+	})
+	assertStatus(t, recLogin.Code, http.StatusOK, recLogin.Body.String())
+	var loginRes struct {
+		Data model.LoginResponse `json:"data"`
+	}
+	if err := json.Unmarshal(recLogin.Body.Bytes(), &loginRes); err != nil {
+		t.Fatalf("unmarshal login failed: %v", err)
+	}
+	token := loginRes.Data.Token
+
+	// Update profile with custom data-URL avatar and bio
+	avatarData := "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+	recUpd := doJSON(e, http.MethodPut, "/api/v1/user/profile", token, map[string]interface{}{
+		"nickname": "NoEmail One",
+		"avatar":   avatarData,
+		"bio":      "Building AI capabilities",
+	})
+	assertStatus(t, recUpd.Code, http.StatusOK, recUpd.Body.String())
+
+	var profRes struct {
+		Data model.UserInfo `json:"data"`
+	}
+	if err := json.Unmarshal(recUpd.Body.Bytes(), &profRes); err != nil {
+		t.Fatalf("unmarshal profile failed: %v", err)
+	}
+	if profRes.Data.Email != "" || profRes.Data.Bio != "Building AI capabilities" || profRes.Data.Avatar != avatarData {
+		t.Fatalf("unexpected updated profile: %+v", profRes.Data)
+	}
 }

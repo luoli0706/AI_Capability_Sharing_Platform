@@ -219,7 +219,7 @@ onMounted(() => {
           域内资产工作台
           <span v-if="currentDomain" class="domain-tag">{{ currentDomain.domain_name }}</span>
         </h1>
-        <p class="page-subtitle">在当前业务域内创建、配置与发布 MCP 服务、Skills 技能、Agent 与私有知识库</p>
+        <p class="page-subtitle">在当前域内创建、配置与发布 MCP 服务、Skills 技能、Agent 与私有知识库</p>
       </div>
       <el-button type="primary" :icon="Plus" @click="openCreate">新建资产</el-button>
     </div>
@@ -373,17 +373,19 @@ onMounted(() => {
         </el-table-column>
 
         <template #empty>
-          <el-empty description="当前业务域暂无 AI 资产，点击右上角「新建资产」开始创建" />
+          <el-empty description="当前域暂无 AI 资产，点击右上角「新建资产」开始创建" />
         </template>
       </el-table>
 
-      <div v-if="total > filters.page_size" class="table-pagination">
+      <div v-if="total > 0" class="table-pagination">
         <el-pagination
           v-model:current-page="filters.page"
-          :page-size="filters.page_size"
+          v-model:page-size="filters.page_size"
+          :page-sizes="[10, 20, 50]"
           :total="total"
-          layout="total, prev, pager, next"
+          layout="total, sizes, prev, pager, next"
           background
+          @size-change="handleSearch"
           @current-change="fetchWorkspaceAssets"
         />
       </div>

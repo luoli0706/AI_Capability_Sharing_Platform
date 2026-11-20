@@ -18,6 +18,7 @@ type GovernanceService interface {
 	ListPendingRequests(userID uint64, isSuperAdmin bool) ([]model.ApprovalRequestView, error)
 	ListHandledRequests(userID uint64) ([]model.ApprovalRequestView, error)
 	HandleApproval(userID uint64, isSuperAdmin bool, requestID uint64, req model.HandleApprovalRequest) (*model.ApprovalRequest, error)
+	SetAuditRepos(auditRepo repository.AuditLogRepository, userRepo repository.UserRepository)
 }
 
 type governanceService struct {
@@ -25,6 +26,13 @@ type governanceService struct {
 	assetRepo  repository.AssetRepository
 	domainRepo repository.DomainRepository
 	orgRepo    repository.OrgRepository
+	auditRepo  repository.AuditLogRepository
+	userRepo   repository.UserRepository
+}
+
+func (s *governanceService) SetAuditRepos(auditRepo repository.AuditLogRepository, userRepo repository.UserRepository) {
+	s.auditRepo = auditRepo
+	s.userRepo = userRepo
 }
 
 func NewGovernanceService(
@@ -215,6 +223,11 @@ func (s *governanceService) HandleApproval(userID uint64, isSuperAdmin bool, req
 		if err := s.govRepo.HandlePublishApproval(approvalReq, currentRecord.ID, userID, req.Action, req.Comment); err != nil {
 			return nil, err
 		}
+		actionName := model.AuditActionAssetPublishApprove
+		if req.Action == model.ApprovalActionReject {
+			actionName = model.AuditActionAssetPublishReject
+		}
+		recordAudit(s.auditRepo, s.userRepo, userID, domain.ID, domain.DomainName, asset.ID, asset.AssetCode, asset.Name, asset.AssetType, actionName, approvalReq.RequestedPerm, req.Comment)
 		return s.govRepo.FindApprovalByID(requestID)
 	}
 

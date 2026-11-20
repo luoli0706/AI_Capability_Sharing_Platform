@@ -24,6 +24,12 @@ const isOwner = computed(() => currentDomain.value?.my_role === 'owner')
 
 const loading = ref(false)
 const members = ref<DomainMember[]>([])
+const memberPage = ref(1)
+const memberPageSize = ref(10)
+const pagedMembers = computed(() => {
+  const start = (memberPage.value - 1) * memberPageSize.value
+  return members.value.slice(start, start + memberPageSize.value)
+})
 
 const formRef = ref<FormInstance>()
 const adding = ref(false)
@@ -90,7 +96,7 @@ async function handleRemoveMember(member: DomainMember) {
   if (!domainId.value) return
   try {
     await ElMessageBox.confirm(
-      `确认将成员「${member.nickname || member.username}」移出当前业务域吗？`,
+      `确认将成员「${member.nickname || member.username}」移出当前域吗？`,
       '移除成员确认',
       {
         confirmButtonText: '确认移除',
@@ -131,7 +137,7 @@ onMounted(() => {
           域成员管理
           <span v-if="currentDomain" class="domain-tag">{{ currentDomain.domain_name }}</span>
         </h1>
-        <p class="page-subtitle">查看当前业务域内的成员列表与角色权限</p>
+        <p class="page-subtitle">查看当前域内的成员列表与角色权限</p>
       </div>
     </div>
 
@@ -176,7 +182,7 @@ onMounted(() => {
     </div>
 
     <div class="surface-card table-card">
-      <el-table v-loading="loading" :data="members" stripe style="width: 100%">
+      <el-table v-loading="loading" :data="pagedMembers" stripe style="width: 100%">
         <el-table-column label="成员姓名 / 用户名" min-width="200">
           <template #default="{ row }">
             <div class="member-user">
@@ -232,9 +238,19 @@ onMounted(() => {
         </el-table-column>
 
         <template #empty>
-          <el-empty description="当前业务域暂无成员记录" />
+          <el-empty description="当前域暂无成员记录" />
         </template>
       </el-table>
+
+      <div v-if="members.length > 0" class="table-pagination">
+        <el-pagination
+          v-model:current-page="memberPage"
+          :page-size="memberPageSize"
+          :total="members.length"
+          layout="total, prev, pager, next"
+          background
+        />
+      </div>
     </div>
   </div>
 </template>
@@ -293,5 +309,12 @@ onMounted(() => {
 .member-username {
   font-size: 12px;
   color: var(--ascp-text-muted);
+}
+
+.table-pagination {
+  padding: 14px 18px;
+  display: flex;
+  justify-content: flex-end;
+  border-top: 1px solid var(--ascp-border);
 }
 </style>

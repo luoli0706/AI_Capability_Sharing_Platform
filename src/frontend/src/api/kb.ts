@@ -59,6 +59,29 @@ export function deleteDocument(kbId: number, docId: number): Promise<null> {
   return apiDelete<null>(`/kb/${kbId}/documents/${docId}`)
 }
 
+export function moveDocument(
+  kbId: number,
+  docId: number,
+  target_folder_path: string
+): Promise<KbDocument> {
+  return apiPost<KbDocument, { target_folder_path: string }>(
+    `/kb/${kbId}/documents/${docId}/move`,
+    { target_folder_path }
+  )
+}
+
+export function copyDocument(
+  kbId: number,
+  docId: number,
+  target_folder_path: string,
+  new_name?: string
+): Promise<KbDocument> {
+  return apiPost<KbDocument, { target_folder_path: string; new_name?: string }>(
+    `/kb/${kbId}/documents/${docId}/copy`,
+    { target_folder_path, new_name }
+  )
+}
+
 export function searchKB(
   kbId: number,
   data: { query: string; top_k?: number }

@@ -10,19 +10,20 @@ import (
 )
 
 type DomainRepository interface {
-	ListDomains(userID uint64, q model.DomainQuery, userOrgIDs []uint64) ([]model.DomainListItem, error)
+	ListDomains(userID uint64, q model.DomainQuery, userOrgIDs, adminOrgIDs []uint64) ([]model.DomainListItem, int64, error)
 	FindByID(id uint64) (*model.BizDomain, error)
 	FindByCode(code string) (*model.BizDomain, error)
 	FindByUID(uid string) (*model.BizDomain, error)
 	CreateWithOwner(domain *model.BizDomain) error
 	UpdateDomain(domain *model.BizDomain) error
+	DeleteDomain(id uint64) error
 	ListMembers(domainID uint64) ([]model.DomainMemberItem, error)
 	GetMemberRole(domainID, userID uint64) (string, error)
 	UpsertMember(member *model.DomainMember) error
 	RemoveMember(domainID, userID uint64) error
 	GetUserDomainIDs(userID uint64) ([]uint64, error)
 	GetUserAdminDomainIDs(userID uint64) ([]uint64, error)
-	GetAccessibleDomainIDs(userID uint64, userOrgIDs []uint64) ([]uint64, error)
+	GetAccessibleDomainIDs(userID uint64, userOrgIDs, adminOrgIDs []uint64) ([]uint64, error)
 }
 
 type domainRepository struct {
@@ -33,7 +34,7 @@ func NewDomainRepository(db *gorm.DB) DomainRepository {
 	return &domainRepository{db: db}
 }
 
-func (r *domainRepository) ListDomains(userID uint64, q model.DomainQuery, userOrgIDs []uint64) ([]model.DomainListItem, error) {
+func (r *domainRepository) ListDomains(userID uint64, q model.DomainQuery, userOrgIDs, adminOrgIDs []uint64) ([]model.DomainListItem, int64, error) {
 	tx := r.db.Model(&model.BizDomain{})
 	if q.OrgID > 0 {
 		tx = tx.Where("org_id = ?", q.OrgID)
@@ -59,17 +60,26 @@ func (r *domainRepository) ListDomains(userID uint64, q model.DomainQuery, userO
 	case "mine":
 		memberIDs, err := r.GetUserDomainIDs(userID)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-		if len(memberIDs) > 0 && len(userOrgIDs) > 0 {
-			tx = tx.Where("(id IN ? OR (visibility = ? AND org_id IN ?))", memberIDs, model.DomainVisibilityPublic, userOrgIDs)
-		} else if len(memberIDs) > 0 {
-			tx = tx.Where("id IN ?", memberIDs)
-		} else if len(userOrgIDs) > 0 {
-			tx = tx.Where("(visibility = ? AND org_id IN ?)", model.DomainVisibilityPublic, userOrgIDs)
-		} else {
-			return []model.DomainListItem{}, nil
+		var conds []string
+		var args []interface{}
+		if len(memberIDs) > 0 {
+			conds = append(conds, "id IN ?")
+			args = append(args, memberIDs)
 		}
+		if len(userOrgIDs) > 0 {
+			conds = append(conds, "(visibility = ? AND org_id IN ?)")
+			args = append(args, model.DomainVisibilityPublic, userOrgIDs)
+		}
+		if len(adminOrgIDs) > 0 {
+			conds = append(conds, "(visibility = ? AND org_id IN ?)")
+			args = append(args, model.DomainVisibilityOrgPrivate, adminOrgIDs)
+		}
+		if len(conds) == 0 {
+			return []model.DomainListItem{}, 0, nil
+		}
+		tx = tx.Where("("+strings.Join(conds, " OR ")+")", args...)
 		if kw != "" {
 			like := "%" + kw + "%"
 			tx = tx.Where("(domain_name LIKE ? OR domain_code LIKE ? OR domain_uid = ?)", like, like, strings.ToUpper(kw))
@@ -80,13 +90,19 @@ func (r *domainRepository) ListDomains(userID uint64, q model.DomainQuery, userO
 		} else {
 			memberIDs, err := r.GetUserDomainIDs(userID)
 			if err != nil {
-				return nil, err
+				return nil, 0, err
 			}
+			conds := []string{"visibility = ?"}
+			args := []interface{}{model.DomainVisibilityPublic}
 			if len(memberIDs) > 0 {
-				tx = tx.Where("(visibility = ? OR id IN ?)", model.DomainVisibilityPublic, memberIDs)
-			} else {
-				tx = tx.Where("visibility = ?", model.DomainVisibilityPublic)
+				conds = append(conds, "id IN ?")
+				args = append(args, memberIDs)
 			}
+			if len(adminOrgIDs) > 0 {
+				conds = append(conds, "(visibility = ? AND org_id IN ?)")
+				args = append(args, model.DomainVisibilityOrgPrivate, adminOrgIDs)
+			}
+			tx = tx.Where("("+strings.Join(conds, " OR ")+")", args...)
 			if kw != "" {
 				like := "%" + kw + "%"
 				tx = tx.Where("(domain_name LIKE ? OR domain_code LIKE ?)", like, like)
@@ -94,14 +110,34 @@ func (r *domainRepository) ListDomains(userID uint64, q model.DomainQuery, userO
 		}
 	}
 
-	var domains []model.BizDomain
-	if err := tx.Order("id DESC").Find(&domains).Error; err != nil {
-		return nil, err
+	var total int64
+	if err := tx.Count(&total).Error; err != nil {
+		return nil, 0, err
 	}
-	return hydrateDomainListItems(r.db, domains, userID, userOrgIDs)
+
+	page := q.Page
+	if page <= 0 {
+		page = 1
+	}
+	pageSize := q.PageSize
+	if pageSize <= 0 {
+		pageSize = 12
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+
+	var domains []model.BizDomain
+	offset := (page - 1) * pageSize
+	if err := tx.Order("id DESC").Offset(offset).Limit(pageSize).Find(&domains).Error; err != nil {
+		return nil, 0, err
+	}
+
+	items, err := hydrateDomainListItems(r.db, domains, userID, userOrgIDs, adminOrgIDs)
+	return items, total, err
 }
 
-func hydrateDomainListItems(db *gorm.DB, domains []model.BizDomain, userID uint64, userOrgIDs []uint64) ([]model.DomainListItem, error) {
+func hydrateDomainListItems(db *gorm.DB, domains []model.BizDomain, userID uint64, userOrgIDs, adminOrgIDs []uint64) ([]model.DomainListItem, error) {
 	if len(domains) == 0 {
 		return []model.DomainListItem{}, nil
 	}
@@ -135,11 +171,20 @@ func hydrateDomainListItems(db *gorm.DB, domains []model.BizDomain, userID uint6
 	for _, oid := range userOrgIDs {
 		orgSet[oid] = true
 	}
+	adminOrgSet := make(map[uint64]bool, len(adminOrgIDs))
+	for _, oid := range adminOrgIDs {
+		adminOrgSet[oid] = true
+	}
 
 	items := make([]model.DomainListItem, 0, len(domains))
 	for _, d := range domains {
 		myRole := roleMap[d.ID]
-		canManage := d.OwnerID == userID || myRole == model.DomainRoleOwner || myRole == model.DomainRoleAdmin
+		var canManage bool
+		if d.Visibility == model.DomainVisibilityOrgPrivate && d.OrgID > 0 {
+			canManage = adminOrgSet[d.OrgID]
+		} else {
+			canManage = d.OwnerID == userID || myRole == model.DomainRoleOwner || myRole == model.DomainRoleAdmin
+		}
 		hasOrgAccess := d.Visibility == model.DomainVisibilityPublic && d.OrgID > 0 && orgSet[d.OrgID]
 		items = append(items, model.DomainListItem{
 			ID:           d.ID,
@@ -202,6 +247,10 @@ func (r *domainRepository) CreateWithOwner(domain *model.BizDomain) error {
 
 func (r *domainRepository) UpdateDomain(domain *model.BizDomain) error {
 	return r.db.Save(domain).Error
+}
+
+func (r *domainRepository) DeleteDomain(id uint64) error {
+	return r.db.Delete(&model.BizDomain{}, id).Error
 }
 
 func (r *domainRepository) ListMembers(domainID uint64) ([]model.DomainMemberItem, error) {
@@ -283,7 +332,7 @@ func (r *domainRepository) GetUserAdminDomainIDs(userID uint64) ([]uint64, error
 	return ids, nil
 }
 
-func (r *domainRepository) GetAccessibleDomainIDs(userID uint64, userOrgIDs []uint64) ([]uint64, error) {
+func (r *domainRepository) GetAccessibleDomainIDs(userID uint64, userOrgIDs, adminOrgIDs []uint64) ([]uint64, error) {
 	memberIDs, err := r.GetUserDomainIDs(userID)
 	if err != nil {
 		return nil, err
@@ -304,6 +353,20 @@ func (r *domainRepository) GetAccessibleDomainIDs(userID uint64, userOrgIDs []ui
 			return nil, err
 		}
 		for _, id := range orgDomainIDs {
+			if !seen[id] {
+				seen[id] = true
+				result = append(result, id)
+			}
+		}
+	}
+	if len(adminOrgIDs) > 0 {
+		var orgPrivDomainIDs []uint64
+		if err := r.db.Model(&model.BizDomain{}).
+			Where("visibility = ? AND org_id IN ?", model.DomainVisibilityOrgPrivate, adminOrgIDs).
+			Pluck("id", &orgPrivDomainIDs).Error; err != nil {
+			return nil, err
+		}
+		for _, id := range orgPrivDomainIDs {
 			if !seen[id] {
 				seen[id] = true
 				result = append(result, id)

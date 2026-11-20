@@ -46,31 +46,52 @@ func (h *GovernanceHandler) CreateApproval(c echo.Context) error {
 }
 
 func (h *GovernanceHandler) ListMyRequests(c echo.Context) error {
+	page, pageSize := parsePageParams(c)
 	userID := middleware.GetUserID(c)
 	list, err := h.govSvc.ListMyRequests(userID)
 	if err != nil {
 		return service.HandleError(c, err)
 	}
-	return response.Success(c, map[string]interface{}{"list": list})
+	paged, total := paginateSlice(list, page, pageSize)
+	return response.Success(c, map[string]interface{}{
+		"list":      paged,
+		"total":     total,
+		"page":      page,
+		"page_size": pageSize,
+	})
 }
 
 func (h *GovernanceHandler) ListPendingRequests(c echo.Context) error {
+	page, pageSize := parsePageParams(c)
 	userID := middleware.GetUserID(c)
 	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
 	list, err := h.govSvc.ListPendingRequests(userID, isSuperAdmin)
 	if err != nil {
 		return service.HandleError(c, err)
 	}
-	return response.Success(c, map[string]interface{}{"list": list})
+	paged, total := paginateSlice(list, page, pageSize)
+	return response.Success(c, map[string]interface{}{
+		"list":      paged,
+		"total":     total,
+		"page":      page,
+		"page_size": pageSize,
+	})
 }
 
 func (h *GovernanceHandler) ListHandledRequests(c echo.Context) error {
+	page, pageSize := parsePageParams(c)
 	userID := middleware.GetUserID(c)
 	list, err := h.govSvc.ListHandledRequests(userID)
 	if err != nil {
 		return service.HandleError(c, err)
 	}
-	return response.Success(c, map[string]interface{}{"list": list})
+	paged, total := paginateSlice(list, page, pageSize)
+	return response.Success(c, map[string]interface{}{
+		"list":      paged,
+		"total":     total,
+		"page":      page,
+		"page_size": pageSize,
+	})
 }
 
 func (h *GovernanceHandler) HandleApproval(c echo.Context) error {

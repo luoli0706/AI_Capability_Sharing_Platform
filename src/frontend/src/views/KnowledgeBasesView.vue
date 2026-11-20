@@ -3,8 +3,10 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   Collection,
+  CopyDocument,
   Delete,
   Document,
+  DocumentCopy,
   Download,
   Folder,
   FolderAdd,
@@ -16,10 +18,12 @@ import {
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getAssets } from '@/api/asset'
 import {
+  copyDocument,
   createKbFolder,
   deleteDocument,
   getDocumentContent,
   getDocuments,
+  moveDocument,
   searchKB,
   uploadDocument
 } from '@/api/kb'
@@ -38,6 +42,9 @@ const currentDomain = computed(() => domainStore.getDomainById(domainId.value))
 
 const loadingKbs = ref(false)
 const kbList = ref<AssetItem[]>([])
+const kbTotal = ref(0)
+const kbPage = ref(1)
+const kbPageSize = ref(20)
 const selectedKbId = ref<number | null>(null)
 const selectedKb = computed(
   () => kbList.value.find((k) => k.id === selectedKbId.value) ?? null
@@ -48,6 +55,9 @@ const documents = ref<KbDocument[]>([])
 const treeNodes = computed(() => buildKbTree(documents.value))
 
 const selectedFolderPath = ref('')
+const selectedFileNode = ref<KbTreeNode | null>(null)
+const clipboardFile = ref<{ kbId: number; docId: number; fileName: string } | null>(null)
+const pasting = ref(false)
 const uploading = ref(false)
 const fileInputRef = ref<HTMLInputElement | null>(null)
 const folderInputRef = ref<HTMLInputElement | null>(null)
@@ -72,6 +82,12 @@ const searchTopK = ref(5)
 const searching = ref(false)
 const searchResults = ref<KbChunk[]>([])
 const hasSearched = ref(false)
+const searchPage = ref(1)
+const searchPageSize = ref(5)
+const pagedSearchResults = computed(() => {
+  const start = (searchPage.value - 1) * searchPageSize.value
+  return searchResults.value.slice(start, start + searchPageSize.value)
+})
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
@@ -102,10 +118,12 @@ async function fetchKbs() {
       scope: 'workspace',
       domain_id: domainId.value,
       asset_type: 'kb',
-      page: 1,
-      page_size: 100
+      page: kbPage.value,
+      page_size: kbPageSize.value
     })
-    kbList.value = normalizeList(res).items
+    const normalized = normalizeList(res)
+    kbList.value = normalized.items
+    kbTotal.value = normalized.total
     if (kbList.value.length > 0) {
       if (!kbList.value.some((k) => k.id === selectedKbId.value)) {
         selectedKbId.value = kbList.value[0].id
@@ -117,6 +135,7 @@ async function fetchKbs() {
     }
   } catch {
     kbList.value = []
+    kbTotal.value = 0
     selectedKbId.value = null
     documents.value = []
   } finally {
@@ -248,9 +267,11 @@ async function handleFolderSelected(event: Event) {
 async function handleNodeClick(node: KbTreeNode) {
   if (node.isFolder) {
     selectedFolderPath.value = node.folderPath
+    selectedFileNode.value = null
     return
   }
   if (!node.doc || !selectedKbId.value) return
+  selectedFileNode.value = node
   rightTab.value = 'preview'
   loadingPreview.value = true
   try {
@@ -259,6 +280,92 @@ async function handleNodeClick(node: KbTreeNode) {
     previewDoc.value = null
   } finally {
     loadingPreview.value = false
+  }
+}
+
+function allowDrag(draggingNode: { data: KbTreeNode }): boolean {
+  return !draggingNode.data.isFolder && Boolean(draggingNode.data.doc)
+}
+
+function allowDrop(
+  _draggingNode: { data: KbTreeNode },
+  dropNode: { data: KbTreeNode; level: number },
+  type: 'prev' | 'inner' | 'next'
+): boolean {
+  if (type === 'inner') {
+    return dropNode.data.isFolder
+  }
+  return dropNode.level === 1
+}
+
+async function handleNodeDrop(
+  draggingNode: { data: KbTreeNode },
+  dropNode: { data: KbTreeNode; level: number },
+  dropType: string
+) {
+  const doc = draggingNode.data.doc
+  if (!doc || !selectedKbId.value) return
+  const targetFolderPath = dropType === 'inner' ? dropNode.data.folderPath : ''
+  try {
+    await moveDocument(selectedKbId.value, doc.id, targetFolderPath)
+    ElMessage.success(
+      targetFolderPath ? `已移动「${doc.file_name}」至 ${targetFolderPath}` : `已移动「${doc.file_name}」至根目录`
+    )
+    await fetchDocuments()
+  } catch {
+    await fetchDocuments()
+  }
+}
+
+function setClipboard(node: KbTreeNode) {
+  if (node.isFolder || !node.doc || !selectedKbId.value) return
+  clipboardFile.value = {
+    kbId: selectedKbId.value,
+    docId: node.doc.id,
+    fileName: node.doc.file_name
+  }
+  ElMessage.success(`已复制「${node.doc.file_name}」，可选择目录后点击粘贴或按 Ctrl+V`)
+}
+
+async function handlePaste(targetFolder?: string) {
+  if (!clipboardFile.value || !selectedKbId.value) return
+  const targetPath = typeof targetFolder === 'string' ? targetFolder : selectedFolderPath.value
+  pasting.value = true
+  try {
+    await copyDocument(
+      clipboardFile.value.kbId,
+      clipboardFile.value.docId,
+      targetPath || ''
+    )
+    ElMessage.success(
+      targetPath ? `已粘贴至目录 ${targetPath}` : '已粘贴至根目录'
+    )
+    await fetchDocuments()
+  } catch {
+    // Handled by interceptor
+  } finally {
+    pasting.value = false
+  }
+}
+
+function handleKeydown(e: KeyboardEvent) {
+  const target = e.target as HTMLElement | null
+  if (
+    target &&
+    (target.tagName === 'INPUT' ||
+      target.tagName === 'TEXTAREA' ||
+      target.isContentEditable)
+  ) {
+    return
+  }
+  if (!(e.ctrlKey || e.metaKey)) return
+  const key = e.key.toLowerCase()
+  if (key === 'c' && selectedFileNode.value && !selectedFileNode.value.isFolder) {
+    e.preventDefault()
+    setClipboard(selectedFileNode.value)
+  } else if (key === 'v' && clipboardFile.value) {
+    e.preventDefault()
+    handlePaste()
   }
 }
 
@@ -317,6 +424,7 @@ async function handleSearchTest() {
   }
   searching.value = true
   hasSearched.value = true
+  searchPage.value = 1
   try {
     const res = await searchKB(selectedKbId.value, {
       query: searchQuery.value.trim(),
@@ -338,10 +446,12 @@ watch(domainId, () => {
 onMounted(() => {
   domainStore.fetchDomains()
   fetchKbs()
+  window.addEventListener('keydown', handleKeydown)
 })
 
 onBeforeUnmount(() => {
   stopPolling()
+  window.removeEventListener('keydown', handleKeydown)
 })
 </script>
 
@@ -365,7 +475,7 @@ onBeforeUnmount(() => {
     </div>
 
     <div v-else-if="kbList.length === 0" class="surface-card empty-box">
-      <el-empty description="当前业务域尚未创建私有知识库资产">
+      <el-empty description="当前域尚未创建私有知识库资产">
         <el-button type="primary" @click="router.push(`/domains/${domainId}/assets`)">
           去创建知识库资产
         </el-button>
@@ -381,7 +491,7 @@ onBeforeUnmount(() => {
             <span class="selector-label">当前知识库：</span>
             <el-select
               :model-value="selectedKbId"
-              style="width: 280px"
+              style="width: 260px"
               @change="handleSelectKb"
             >
               <el-option
@@ -391,6 +501,15 @@ onBeforeUnmount(() => {
                 :value="kb.id"
               />
             </el-select>
+            <el-pagination
+              v-if="kbTotal > kbPageSize"
+              v-model:current-page="kbPage"
+              :page-size="kbPageSize"
+              :total="kbTotal"
+              size="small"
+              layout="prev, pager, next"
+              @current-change="fetchKbs"
+            />
           </div>
 
           <div class="toolbar-actions">
@@ -410,6 +529,14 @@ onBeforeUnmount(() => {
               @click="triggerFolderUpload"
             >
               上传文件夹
+            </el-button>
+            <el-button
+              :icon="DocumentCopy"
+              :disabled="!clipboardFile"
+              :loading="pasting"
+              @click="handlePaste()"
+            >
+              {{ clipboardFile ? `粘贴 (${clipboardFile.fileName})` : '粘贴' }}
             </el-button>
             <el-button
               type="primary"
@@ -485,8 +612,12 @@ onBeforeUnmount(() => {
               node-key="key"
               default-expand-all
               highlight-current
+              draggable
+              :allow-drag="allowDrag"
+              :allow-drop="allowDrop"
               :expand-on-click-node="false"
               @node-click="handleNodeClick"
+              @node-drop="handleNodeDrop"
             >
               <template #default="{ data }">
                 <div class="tree-node-row">
@@ -511,6 +642,15 @@ onBeforeUnmount(() => {
 
                   <div class="tree-node-actions">
                     <el-button
+                      v-if="data.isFolder && clipboardFile"
+                      link
+                      type="success"
+                      size="small"
+                      @click.stop="handlePaste(data.folderPath)"
+                    >
+                      粘贴
+                    </el-button>
+                    <el-button
                       v-if="data.isFolder"
                       link
                       type="primary"
@@ -519,15 +659,24 @@ onBeforeUnmount(() => {
                     >
                       下载
                     </el-button>
-                    <el-button
-                      v-else-if="data.doc"
-                      link
-                      type="primary"
-                      size="small"
-                      @click.stop="handleDownloadFile(data.doc.id, data.doc.file_name)"
-                    >
-                      下载
-                    </el-button>
+                    <template v-else-if="data.doc">
+                      <el-button
+                        link
+                        type="info"
+                        size="small"
+                        :icon="CopyDocument"
+                        title="复制文件 (Ctrl+C)"
+                        @click.stop="setClipboard(data)"
+                      />
+                      <el-button
+                        link
+                        type="primary"
+                        size="small"
+                        @click.stop="handleDownloadFile(data.doc.id, data.doc.file_name)"
+                      >
+                        下载
+                      </el-button>
+                    </template>
                     <el-button
                       v-if="data.doc"
                       link
@@ -618,15 +767,28 @@ onBeforeUnmount(() => {
               </div>
 
               <div v-else-if="searchResults.length > 0" class="recall-results">
-                <div v-for="(chunk, idx) in searchResults" :key="chunk.id || idx" class="chunk-card">
+                <div v-for="(chunk, idx) in pagedSearchResults" :key="chunk.id || idx" class="chunk-card">
                   <div class="chunk-head">
-                    <span class="chunk-idx mono-text">#{{ idx + 1 }} (Chunk {{ chunk.chunk_index }})</span>
+                    <span class="chunk-idx mono-text">
+                      #{{ (searchPage - 1) * searchPageSize + idx + 1 }} (Chunk {{ chunk.chunk_index }})
+                    </span>
                     <span v-if="chunk.file_name" class="chunk-file">{{ chunk.file_name }}</span>
                     <el-tag v-if="chunk.score !== undefined" size="small" type="success" effect="plain">
                       匹配度 {{ Number(chunk.score).toFixed(3) }}
                     </el-tag>
                   </div>
                   <p class="chunk-content">{{ chunk.content }}</p>
+                </div>
+
+                <div class="search-pagination">
+                  <el-pagination
+                    v-model:current-page="searchPage"
+                    :page-size="searchPageSize"
+                    :total="searchResults.length"
+                    layout="total, prev, pager, next"
+                    size="small"
+                    background
+                  />
                 </div>
               </div>
 
@@ -945,6 +1107,12 @@ onBeforeUnmount(() => {
   color: var(--ascp-text-secondary);
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.search-pagination {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 6px;
 }
 
 @media (max-width: 1080px) {

@@ -1,16 +1,18 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { Delete, Grid, OfficeBuilding, Plus, Right, UserFilled } from '@element-plus/icons-vue'
+import { Delete, Edit, Grid, OfficeBuilding, Plus, Right, Search, UserFilled } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { getDomains } from '@/api/domain'
 import {
   addOrgMember,
   createOrg,
+  deleteOrg,
   getOrgDetail,
   getOrgMembers,
   getOrgs,
-  removeOrgMember
+  removeOrgMember,
+  updateOrg
 } from '@/api/org'
 import { useDomainStore } from '@/stores/domain'
 import type { DomainItem, OrgDetail, OrgItem, OrgMember } from '@/types/api'
@@ -21,6 +23,10 @@ const domainStore = useDomainStore()
 
 const loading = ref(false)
 const orgs = ref<OrgItem[]>([])
+const total = ref(0)
+const page = ref(1)
+const pageSize = ref(12)
+const keyword = ref('')
 
 const createModalOpen = ref(false)
 const createFormRef = ref<FormInstance>()
@@ -39,12 +45,32 @@ const createRules: FormRules = {
   ]
 }
 
+// Edit Modal
+const editModalOpen = ref(false)
+const editFormRef = ref<FormInstance>()
+const editing = ref(false)
+const editOrgId = ref<number | null>(null)
+const editForm = reactive({
+  org_name: '',
+  description: ''
+})
+
+const editRules: FormRules = {
+  org_name: [{ required: true, message: '请输入组织名称', trigger: 'blur' }]
+}
+
 // Detail Drawer
 const drawerOpen = ref(false)
 const activeTab = ref<'members' | 'domains'>('members')
 const loadingDetail = ref(false)
 const activeOrg = ref<OrgDetail | null>(null)
 const orgMembers = ref<OrgMember[]>([])
+const memberPage = ref(1)
+const memberPageSize = ref(10)
+const pagedOrgMembers = computed(() => {
+  const start = (memberPage.value - 1) * memberPageSize.value
+  return orgMembers.value.slice(start, start + memberPageSize.value)
+})
 const orgPublicDomains = ref<DomainItem[]>([])
 
 const canManageActiveOrg = computed(
@@ -69,13 +95,30 @@ const memberRules: FormRules = {
 async function fetchOrgs() {
   loading.value = true
   try {
-    const res = await getOrgs({ page: 1, page_size: 100 })
-    orgs.value = normalizeList(res).items
+    const res = await getOrgs({
+      keyword: keyword.value.trim() || undefined,
+      page: page.value,
+      page_size: pageSize.value
+    })
+    const normalized = normalizeList(res)
+    orgs.value = normalized.items
+    total.value = normalized.total
   } catch {
     orgs.value = []
+    total.value = 0
   } finally {
     loading.value = false
   }
+}
+
+function handleSearch() {
+  page.value = 1
+  fetchOrgs()
+}
+
+function handlePageChange(newPage: number) {
+  page.value = newPage
+  fetchOrgs()
 }
 
 function openCreateModal() {
@@ -108,9 +151,64 @@ async function handleCreateOrg() {
   }
 }
 
+function openEditModal(org: OrgItem) {
+  editOrgId.value = org.id
+  editForm.org_name = org.org_name
+  editForm.description = org.description || ''
+  editFormRef.value?.clearValidate()
+  editModalOpen.value = true
+}
+
+async function handleUpdateOrg() {
+  if (!editFormRef.value || !editOrgId.value) return
+  const valid = await editFormRef.value.validate().catch(() => false)
+  if (!valid) return
+
+  editing.value = true
+  try {
+    await updateOrg(editOrgId.value, {
+      org_name: editForm.org_name.trim(),
+      description: editForm.description.trim()
+    })
+    ElMessage.success('组织信息已更新')
+    editModalOpen.value = false
+    await fetchOrgs()
+    if (activeOrg.value?.id === editOrgId.value) {
+      await loadOrgDetailData(editOrgId.value)
+    }
+  } catch {
+    // Handled by interceptor
+  } finally {
+    editing.value = false
+  }
+}
+
+async function handleDeleteOrg(org: OrgItem) {
+  try {
+    await ElMessageBox.confirm(
+      `确认删除组织「${org.org_name}」吗？删除后该组织及其成员关系将被清除。`,
+      '删除组织确认',
+      {
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消',
+        type: 'error'
+      }
+    )
+    await deleteOrg(org.id)
+    ElMessage.success('组织已删除')
+    if (activeOrg.value?.id === org.id) {
+      drawerOpen.value = false
+    }
+    fetchOrgs()
+  } catch {
+    // Cancelled or failed
+  }
+}
+
 async function openOrgDrawer(org: OrgItem) {
   activeOrg.value = org
   activeTab.value = 'members'
+  memberPage.value = 1
   memberForm.username = ''
   memberForm.org_role = 'member'
   drawerOpen.value = true
@@ -203,9 +301,22 @@ onMounted(() => {
     <div class="page-header">
       <div>
         <h1 class="page-title">组织中心</h1>
-        <p class="page-subtitle">管理研发团队组织架构，组织内所有成员可自动共享所属组织的公开业务域权限</p>
+        <p class="page-subtitle">管理研发团队组织架构，组织内所有成员可自动共享所属组织的公开域权限</p>
       </div>
       <el-button type="primary" :icon="Plus" @click="openCreateModal">创建组织</el-button>
+    </div>
+
+    <div class="surface-card search-bar-card">
+      <el-input
+        v-model="keyword"
+        placeholder="按组织名称或编码检索..."
+        clearable
+        :prefix-icon="Search"
+        style="max-width: 360px"
+        @keyup.enter="handleSearch"
+        @clear="handleSearch"
+      />
+      <el-button type="primary" plain @click="handleSearch">搜索</el-button>
     </div>
 
     <div v-if="loading" class="org-grid">
@@ -256,9 +367,42 @@ onMounted(() => {
               <span>{{ org.domain_count ?? org.public_domain_count ?? 0 }} 公有域</span>
             </span>
           </div>
-          <span class="view-detail-hint">管理详情 →</span>
+          <div class="org-card-actions" @click.stop>
+            <el-button
+              v-if="org.my_role === 'owner' || org.my_role === 'admin'"
+              link
+              type="primary"
+              size="small"
+              :icon="Edit"
+              @click="openEditModal(org)"
+            >
+              编辑
+            </el-button>
+            <el-button
+              v-if="org.my_role === 'owner'"
+              link
+              type="danger"
+              size="small"
+              :icon="Delete"
+              @click="handleDeleteOrg(org)"
+            >
+              删除
+            </el-button>
+            <span class="view-detail-hint" @click="openOrgDrawer(org)">管理详情 →</span>
+          </div>
         </div>
       </article>
+    </div>
+
+    <div v-if="total > 0" class="pagination-wrap">
+      <el-pagination
+        v-model:current-page="page"
+        :page-size="pageSize"
+        :total="total"
+        layout="total, prev, pager, next"
+        background
+        @current-change="handlePageChange"
+      />
     </div>
 
     <!-- Create Org Modal -->
@@ -292,6 +436,29 @@ onMounted(() => {
         <el-button @click="createModalOpen = false">取消</el-button>
         <el-button type="primary" :loading="creating" @click="handleCreateOrg">
           确认创建
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- Edit Org Modal -->
+    <el-dialog v-model="editModalOpen" title="编辑组织" width="460px" destroy-on-close>
+      <el-form
+        ref="editFormRef"
+        :model="editForm"
+        :rules="editRules"
+        label-position="top"
+      >
+        <el-form-item label="组织名称" prop="org_name">
+          <el-input v-model="editForm.org_name" />
+        </el-form-item>
+        <el-form-item label="组织描述" prop="description">
+          <el-input v-model="editForm.description" type="textarea" :rows="3" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="editModalOpen = false">取消</el-button>
+        <el-button type="primary" :loading="editing" @click="handleUpdateOrg">
+          保存修改
         </el-button>
       </template>
     </el-dialog>
@@ -343,7 +510,7 @@ onMounted(() => {
               </el-form>
             </div>
 
-            <el-table :data="orgMembers" stripe style="width: 100%">
+            <el-table :data="pagedOrgMembers" stripe style="width: 100%">
               <el-table-column label="成员" min-width="150">
                 <template #default="{ row }">
                   <div class="member-cell">
@@ -386,6 +553,16 @@ onMounted(() => {
                 <el-empty description="暂无组织成员" :image-size="60" />
               </template>
             </el-table>
+
+            <div v-if="orgMembers.length > 0" class="drawer-pagination">
+              <el-pagination
+                v-model:current-page="memberPage"
+                :page-size="memberPageSize"
+                :total="orgMembers.length"
+                layout="total, prev, pager, next"
+                background
+              />
+            </div>
           </el-tab-pane>
 
           <el-tab-pane label="组织公有域" name="domains">
@@ -399,7 +576,7 @@ onMounted(() => {
 
             <el-empty
               v-if="orgPublicDomains.length === 0"
-              description="该组织下暂无公有业务域"
+              description="该组织下暂无公有域"
               :image-size="64"
             />
 
@@ -518,6 +695,12 @@ onMounted(() => {
   color: var(--ascp-primary);
 }
 
+.org-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .empty-box {
   padding: 48px 16px;
 }
@@ -619,5 +802,19 @@ onMounted(() => {
   margin-top: 4px;
   font-size: 13px;
   color: var(--ascp-text-secondary);
+}
+
+.search-bar-card {
+  padding: 14px 18px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.pagination-wrap,
+.drawer-pagination {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 12px;
 }
 </style>

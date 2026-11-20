@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { storeToRefs } from 'pinia'
-import { CopyDocument, Key, Plus, Refresh } from '@element-plus/icons-vue'
+import { CopyDocument, Key, Plus, Refresh, Upload } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import {
   createApiKey,
@@ -19,7 +19,6 @@ import {
   formatDateTime,
   getAssetStatusMeta,
   getAssetTypeMeta,
-  getRoleLabel,
   normalizeList
 } from '@/utils/format'
 
@@ -31,16 +30,32 @@ const activeTab = ref('basic')
 // Profile form
 const profileFormRef = ref<FormInstance>()
 const savingProfile = ref(false)
+const avatarInputRef = ref<HTMLInputElement | null>(null)
 const profileForm = reactive({
   nickname: '',
-  email: ''
+  email: '',
+  bio: '',
+  avatar: ''
 })
 
 const profileRules: FormRules = {
   nickname: [{ required: true, message: '请输入显示昵称', trigger: 'blur' }],
   email: [
-    { required: true, message: '请输入邮箱地址', trigger: 'blur' },
-    { type: 'email', message: '请输入有效的邮箱格式', trigger: 'blur' }
+    {
+      validator: (_rule: unknown, value: string, cb: (err?: Error) => void) => {
+        if (!value || !value.trim()) {
+          cb()
+          return
+        }
+        const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+        if (!emailRe.test(value.trim())) {
+          cb(new Error('请输入有效的邮箱格式'))
+          return
+        }
+        cb()
+      },
+      trigger: 'blur'
+    }
   ]
 }
 
@@ -74,15 +89,24 @@ const pwdRules: FormRules = {
   confirm_password: [{ validator: validateConfirmPwd, trigger: 'blur' }]
 }
 
-// My Assets
+// My Assets (paginated)
 const loadingAssets = ref(false)
 const myAssets = ref<AssetItem[]>([])
+const assetsTotal = ref(0)
+const assetsPage = ref(1)
+const assetsPageSize = ref(10)
 const detailDrawerOpen = ref(false)
 const selectedAssetId = ref<number | null>(null)
 
-// API Keys
+// API Keys (paginated)
 const loadingKeys = ref(false)
 const apiKeys = ref<UserApiKey[]>([])
+const keysPage = ref(1)
+const keysPageSize = ref(10)
+const pagedApiKeys = computed(() => {
+  const start = (keysPage.value - 1) * keysPageSize.value
+  return apiKeys.value.slice(start, start + keysPageSize.value)
+})
 const createKeyModalOpen = ref(false)
 const creatingKey = ref(false)
 const keyFormRef = ref<FormInstance>()
@@ -96,18 +120,83 @@ const keyRules: FormRules = {
 const createdPlainKey = ref('')
 const plainKeyModalOpen = ref(false)
 
-// Invoke Logs
+// Invoke Logs (paginated)
 const loadingLogs = ref(false)
 const invokeLogs = ref<InvokeLogItem[]>([])
+const logsTotal = ref(0)
+const logsPage = ref(1)
+const logsPageSize = ref(10)
 
 const displayName = computed(
   () => user.value?.nickname || user.value?.username || '用户'
 )
 const userInitial = computed(() => displayName.value.slice(0, 1).toUpperCase())
+const isSuperAdmin = computed(() => Boolean(user.value?.roles?.includes('super_admin')))
 
 function syncProfileForm() {
   profileForm.nickname = user.value?.nickname || ''
   profileForm.email = user.value?.email || ''
+  profileForm.bio = user.value?.bio || ''
+  profileForm.avatar = user.value?.avatar || ''
+}
+
+function triggerAvatarUpload() {
+  avatarInputRef.value?.click()
+}
+
+function resizeImageToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(new Error('读取图片失败'))
+    reader.onload = () => {
+      const img = new Image()
+      img.onerror = () => reject(new Error('图片格式无效'))
+      img.onload = () => {
+        const maxSide = 256
+        const scale = Math.min(1, maxSide / Math.max(img.width, img.height))
+        const width = Math.max(1, Math.round(img.width * scale))
+        const height = Math.max(1, Math.round(img.height * scale))
+        const canvas = document.createElement('canvas')
+        canvas.width = width
+        canvas.height = height
+        const ctx = canvas.getContext('2d')
+        if (!ctx) {
+          reject(new Error('Canvas 初始化失败'))
+          return
+        }
+        ctx.drawImage(img, 0, 0, width, height)
+        let quality = 0.85
+        let dataUrl = canvas.toDataURL('image/jpeg', quality)
+        // Ensure <= 200KB
+        while (dataUrl.length > 200 * 1024 && quality > 0.3) {
+          quality -= 0.15
+          dataUrl = canvas.toDataURL('image/jpeg', quality)
+        }
+        if (dataUrl.length > 200 * 1024) {
+          reject(new Error('图片体积过大，请选择更小的图片'))
+          return
+        }
+        resolve(dataUrl)
+      }
+      img.src = reader.result as string
+    }
+    reader.readAsDataURL(file)
+  })
+}
+
+async function handleAvatarFileChange(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  try {
+    const dataUrl = await resizeImageToDataUrl(file)
+    profileForm.avatar = dataUrl
+    ElMessage.success('头像已加载，点击「保存基本信息」生效')
+  } catch (err: unknown) {
+    ElMessage.error(err instanceof Error ? err.message : '头像处理失败')
+  } finally {
+    input.value = ''
+  }
 }
 
 async function handleSaveProfile() {
@@ -119,9 +208,12 @@ async function handleSaveProfile() {
   try {
     const updated = await updateProfile({
       nickname: profileForm.nickname.trim(),
-      email: profileForm.email.trim()
+      email: profileForm.email.trim() || undefined,
+      bio: profileForm.bio.trim(),
+      avatar: profileForm.avatar.trim()
     })
     authStore.setUser(updated)
+    syncProfileForm()
     ElMessage.success('个人信息已更新')
   } catch {
     // Handled by interceptor
@@ -156,10 +248,16 @@ async function handleUpdatePassword() {
 async function fetchMyAssets() {
   loadingAssets.value = true
   try {
-    const res = await getMyAssets({ page: 1, page_size: 50 })
-    myAssets.value = normalizeList(res).items
+    const res = await getMyAssets({
+      page: assetsPage.value,
+      page_size: assetsPageSize.value
+    })
+    const normalized = normalizeList(res)
+    myAssets.value = normalized.items
+    assetsTotal.value = normalized.total
   } catch {
     myAssets.value = []
+    assetsTotal.value = 0
   } finally {
     loadingAssets.value = false
   }
@@ -170,6 +268,7 @@ async function fetchApiKeys() {
   try {
     const res = await getApiKeys()
     apiKeys.value = normalizeList(res).items
+    keysPage.value = 1
   } catch {
     apiKeys.value = []
   } finally {
@@ -196,8 +295,7 @@ async function handleCreateKey() {
       expires_days: keyForm.expires_days
     })
     createKeyModalOpen.value = false
-    const plain =
-      typeof res.api_key === 'string' ? res.api_key : res.plain_key || res.key || ''
+    const plain = res.plain_key || res.key || ''
     if (plain) {
       createdPlainKey.value = plain
       plainKeyModalOpen.value = true
@@ -239,10 +337,16 @@ async function handleRevokeKey(item: UserApiKey) {
 async function fetchInvokeLogs() {
   loadingLogs.value = true
   try {
-    const res = await getInvokeLogs({ page: 1, page_size: 50 })
-    invokeLogs.value = normalizeList(res).items
+    const res = await getInvokeLogs({
+      page: logsPage.value,
+      page_size: logsPageSize.value
+    })
+    const normalized = normalizeList(res)
+    invokeLogs.value = normalized.items
+    logsTotal.value = normalized.total
   } catch {
     invokeLogs.value = []
+    logsTotal.value = 0
   } finally {
     loadingLogs.value = false
   }
@@ -277,25 +381,24 @@ onMounted(async () => {
     </div>
 
     <div class="surface-card profile-banner">
-      <el-avatar :size="64" class="profile-avatar">{{ userInitial }}</el-avatar>
+      <el-avatar :size="72" :src="user?.avatar || undefined" class="profile-avatar">
+        {{ userInitial }}
+      </el-avatar>
       <div class="profile-info">
         <div class="profile-name-row">
           <h2 class="profile-name">{{ displayName }}</h2>
-          <el-tag
-            v-for="role in user?.roles || ['developer']"
-            :key="role"
-            size="small"
-            type="primary"
-            effect="light"
-          >
-            {{ getRoleLabel(role) }}
+          <el-tag v-if="isSuperAdmin" size="small" type="primary" effect="light">
+            超级管理员
           </el-tag>
         </div>
         <div class="profile-sub">
           <span class="mono-text">@{{ user?.username }}</span>
-          <span class="dot">·</span>
-          <span>{{ user?.email || '未绑定邮箱' }}</span>
+          <template v-if="user?.email">
+            <span class="dot">·</span>
+            <span>{{ user.email }}</span>
+          </template>
         </div>
+        <div v-if="user?.bio" class="profile-bio">{{ user.bio }}</div>
       </div>
     </div>
 
@@ -311,14 +414,61 @@ onMounted(async () => {
               class="narrow-form"
             >
               <h4 class="sub-heading">基本信息</h4>
+              <el-form-item label="自定义头像">
+                <div class="avatar-editor">
+                  <el-avatar :size="72" :src="profileForm.avatar || undefined" class="profile-avatar">
+                    {{ userInitial }}
+                  </el-avatar>
+                  <div class="avatar-controls">
+                    <div class="avatar-btn-row">
+                      <el-button size="small" :icon="Upload" @click="triggerAvatarUpload">
+                        上传本地图片
+                      </el-button>
+                      <el-button
+                        v-if="profileForm.avatar"
+                        size="small"
+                        link
+                        type="info"
+                        @click="profileForm.avatar = ''"
+                      >
+                        恢复默认
+                      </el-button>
+                    </div>
+                    <el-input
+                      v-model="profileForm.avatar"
+                      size="small"
+                      placeholder="或输入头像图片 URL"
+                      class="mono-text"
+                    />
+                  </div>
+                  <input
+                    ref="avatarInputRef"
+                    type="file"
+                    accept="image/*"
+                    style="display: none"
+                    @change="handleAvatarFileChange"
+                  />
+                </div>
+              </el-form-item>
+
               <el-form-item label="用户名">
                 <el-input :model-value="user?.username || ''" disabled class="mono-text" />
               </el-form-item>
               <el-form-item label="显示昵称" prop="nickname">
                 <el-input v-model="profileForm.nickname" placeholder="请输入显示昵称" />
               </el-form-item>
-              <el-form-item label="工作邮箱" prop="email">
-                <el-input v-model="profileForm.email" placeholder="name@company.com" />
+              <el-form-item label="邮箱（选填）" prop="email">
+                <el-input v-model="profileForm.email" placeholder="选填，例如 name@example.com" />
+              </el-form-item>
+              <el-form-item label="个性签名">
+                <el-input
+                  v-model="profileForm.bio"
+                  type="textarea"
+                  :rows="2"
+                  maxlength="120"
+                  show-word-limit
+                  placeholder="介绍一下自己或常用的 AI 能力方向..."
+                />
               </el-form-item>
               <el-button type="primary" :loading="savingProfile" @click="handleSaveProfile">
                 保存基本信息
@@ -421,6 +571,17 @@ onMounted(async () => {
               <el-empty description="您还没有创建任何 AI 资产" />
             </template>
           </el-table>
+
+          <div v-if="assetsTotal > 0" class="tab-pagination">
+            <el-pagination
+              v-model:current-page="assetsPage"
+              :page-size="assetsPageSize"
+              :total="assetsTotal"
+              layout="total, prev, pager, next"
+              background
+              @current-change="fetchMyAssets"
+            />
+          </div>
         </el-tab-pane>
 
         <el-tab-pane label="API Key 管理" name="apikeys">
@@ -431,7 +592,7 @@ onMounted(async () => {
             </el-button>
           </div>
 
-          <el-table v-loading="loadingKeys" :data="apiKeys" stripe style="width: 100%">
+          <el-table v-loading="loadingKeys" :data="pagedApiKeys" stripe style="width: 100%">
             <el-table-column label="名称" min-width="160">
               <template #default="{ row }">
                 <span class="key-name"><el-icon><Key /></el-icon> {{ row.key_name }}</span>
@@ -477,6 +638,16 @@ onMounted(async () => {
               <el-empty description="暂无 API Key，点击右上角「新建 API Key」生成" />
             </template>
           </el-table>
+
+          <div v-if="apiKeys.length > 0" class="tab-pagination">
+            <el-pagination
+              v-model:current-page="keysPage"
+              :page-size="keysPageSize"
+              :total="apiKeys.length"
+              layout="total, prev, pager, next"
+              background
+            />
+          </div>
         </el-tab-pane>
 
         <el-tab-pane label="调用记录" name="logs">
@@ -533,6 +704,17 @@ onMounted(async () => {
               <el-empty description="暂无调用审计记录" />
             </template>
           </el-table>
+
+          <div v-if="logsTotal > 0" class="tab-pagination">
+            <el-pagination
+              v-model:current-page="logsPage"
+              :page-size="logsPageSize"
+              :total="logsTotal"
+              layout="total, prev, pager, next"
+              background
+              @current-change="fetchInvokeLogs"
+            />
+          </div>
         </el-tab-pane>
       </el-tabs>
     </div>
@@ -621,6 +803,12 @@ onMounted(async () => {
   gap: 8px;
 }
 
+.profile-bio {
+  margin-top: 6px;
+  font-size: 13.5px;
+  color: var(--ascp-text-secondary);
+}
+
 .profile-tabs-card {
   padding: 16px 24px 24px;
 }
@@ -641,6 +829,27 @@ onMounted(async () => {
 
 .narrow-form {
   max-width: 420px;
+}
+
+.avatar-editor {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+}
+
+.avatar-controls {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.avatar-btn-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .tab-toolbar {
@@ -695,5 +904,11 @@ onMounted(async () => {
   color: #f8fafc;
   border-radius: 8px;
   word-break: break-all;
+}
+
+.tab-pagination {
+  margin-top: 16px;
+  display: flex;
+  justify-content: flex-end;
 }
 </style>

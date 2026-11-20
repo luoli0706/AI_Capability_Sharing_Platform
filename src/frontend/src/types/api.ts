@@ -17,8 +17,9 @@ export interface UserInfo {
   id: number
   username: string
   nickname: string
-  email: string
+  email?: string
   avatar: string
+  bio?: string
   roles: string[]
   status?: number
   created_at?: string
@@ -32,7 +33,7 @@ export interface LoginPayload {
 export interface RegisterPayload {
   username: string
   password: string
-  email: string
+  email?: string
   nickname?: string
 }
 
@@ -44,8 +45,9 @@ export interface LoginResult {
 
 export interface UpdateProfilePayload {
   nickname: string
-  email: string
+  email?: string
   avatar?: string
+  bio?: string
 }
 
 export interface UpdatePasswordPayload {
@@ -54,7 +56,7 @@ export interface UpdatePasswordPayload {
 }
 
 export type DomainRole = 'owner' | 'admin' | 'member'
-export type DomainVisibility = 'public' | 'private'
+export type DomainVisibility = 'public' | 'private' | 'org_private'
 
 export interface DomainItem {
   id: number
@@ -87,6 +89,11 @@ export interface UpdateDomainPayload {
   domain_name: string
   description: string
   visibility: DomainVisibility
+}
+
+export interface UpdateOrgPayload {
+  org_name: string
+  description: string
 }
 
 export type OrgRole = 'owner' | 'admin' | 'member'
@@ -448,5 +455,31 @@ export interface InvokeLogItem {
   error_message?: string
   client_ip?: string
   created_at: string
+}
+
+export interface AuditLogItem {
+  id: number
+  created_at: string
+  operator_id: number
+  operator_name: string
+  domain_id: number
+  domain_name: string
+  asset_id?: number
+  asset_code?: string
+  asset_name?: string
+  asset_type: AssetType | string
+  action: string
+  target_name?: string
+  detail?: string
+  client_ip?: string
+}
+
+export interface AuditLogQuery {
+  asset_type?: AssetType | 'domain' | 'org' | ''
+  action?: string
+  keyword?: string
+  domain_id?: number
+  page?: number
+  page_size?: number
 }
 

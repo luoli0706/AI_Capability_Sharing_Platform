@@ -6,7 +6,8 @@ import (
 )
 
 // hasDomainAccess checks if userID is an explicit member of domainID OR
-// if domainID is a public domain belonging to an organization the user is a member of.
+// has organization-derived access (all org members for public org domains;
+// org owner/admin only for org_private domains).
 func hasDomainAccess(
 	domainRepo repository.DomainRepository,
 	orgRepo repository.OrgRepository,
@@ -23,17 +24,21 @@ func hasDomainAccess(
 		return false, nil
 	}
 	domain, err := domainRepo.FindByID(domainID)
-	if err != nil {
+	if err != nil || domain.OrgID == 0 {
 		return false, nil
 	}
-	if domain.Visibility == model.DomainVisibilityPublic && domain.OrgID > 0 {
-		orgRole, err := orgRepo.GetMemberRole(domain.OrgID, userID)
-		if err != nil {
-			return false, err
-		}
-		return orgRole != "", nil
+	orgRole, err := orgRepo.GetMemberRole(domain.OrgID, userID)
+	if err != nil {
+		return false, err
 	}
-	return false, nil
+	switch domain.Visibility {
+	case model.DomainVisibilityPublic:
+		return orgRole != "", nil
+	case model.DomainVisibilityOrgPrivate:
+		return orgRole == model.OrgRoleOwner || orgRole == model.OrgRoleAdmin, nil
+	default:
+		return false, nil
+	}
 }
 
 func getAccessibleDomainIDs(
@@ -41,13 +46,17 @@ func getAccessibleDomainIDs(
 	orgRepo repository.OrgRepository,
 	userID uint64,
 ) ([]uint64, error) {
-	var orgIDs []uint64
+	var userOrgIDs, adminOrgIDs []uint64
 	if orgRepo != nil {
 		var err error
-		orgIDs, err = orgRepo.GetUserOrgIDs(userID)
+		userOrgIDs, err = orgRepo.GetUserOrgIDs(userID)
+		if err != nil {
+			return nil, err
+		}
+		adminOrgIDs, err = orgRepo.GetUserAdminOrgIDs(userID)
 		if err != nil {
 			return nil, err
 		}
 	}
-	return domainRepo.GetAccessibleDomainIDs(userID, orgIDs)
+	return domainRepo.GetAccessibleDomainIDs(userID, userOrgIDs, adminOrgIDs)
 }

@@ -1,11 +1,12 @@
-import { apiDelete, apiGet, apiPost } from './request'
+import { apiDelete, apiGet, apiPost, apiPut } from './request'
 import type {
   AddOrgMemberPayload,
   CreateOrgPayload,
   OrgDetail,
   OrgItem,
   OrgMember,
-  PaginatedData
+  PaginatedData,
+  UpdateOrgPayload
 } from '@/types/api'
 
 export function getOrgs(params?: {
@@ -18,6 +19,14 @@ export function getOrgs(params?: {
 
 export function createOrg(data: CreateOrgPayload): Promise<OrgItem> {
   return apiPost<OrgItem, CreateOrgPayload>('/orgs', data)
+}
+
+export function updateOrg(id: number, data: UpdateOrgPayload): Promise<OrgItem> {
+  return apiPut<OrgItem, UpdateOrgPayload>(`/orgs/${id}`, data)
+}
+
+export function deleteOrg(id: number): Promise<null> {
+  return apiDelete<null>(`/orgs/${id}`)
 }
 
 export function getOrgDetail(id: number): Promise<OrgDetail> {

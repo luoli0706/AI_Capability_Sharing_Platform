@@ -3,6 +3,7 @@ package service
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -70,6 +71,21 @@ func (m *mockFileKBRepo) ListMatchingFiles(kbAssetID uint64, scope string, docID
 		}
 	}
 	return out, nil
+}
+func (m *mockFileKBRepo) FileExistsInFolder(kbAssetID uint64, folderPath, fileName string, excludeDocID uint64) (bool, error) {
+	for _, d := range m.docs {
+		if d.KBAssetID == kbAssetID && !d.IsFolder && d.FolderPath == folderPath && d.FileName == fileName && d.ID != excludeDocID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+func (m *mockFileKBRepo) MoveDocument(kbAssetID, docID uint64, targetFolder string) error {
+	if d, ok := m.docs[docID]; ok && d.KBAssetID == kbAssetID {
+		d.FolderPath = targetFolder
+		return nil
+	}
+	return gorm.ErrRecordNotFound
 }
 func (m *mockFileKBRepo) CompleteDocumentParsing(kbAssetID, docID uint64, chunks []model.KBChunk) error {
 	return nil
@@ -176,5 +192,97 @@ func TestKBDownloadPreviewAndZip(t *testing.T) {
 	}
 	if len(zr.File) != 2 {
 		t.Fatalf("expected 2 files in zip, got %d", len(zr.File))
+	}
+}
+
+type mockAuditRepo struct {
+	logs []model.AssetAuditLog
+}
+
+func (m *mockAuditRepo) Create(ctx context.Context, log *model.AssetAuditLog) error {
+	cp := *log
+	cp.ID = uint64(len(m.logs) + 1)
+	m.logs = append(m.logs, cp)
+	return nil
+}
+
+func (m *mockAuditRepo) ListManagedLogs(ctx context.Context, userID uint64, managedDomainIDs, managedOrgIDs []uint64, q model.AuditLogQuery) ([]model.AssetAuditLog, int64, error) {
+	domSet := toUint64Set(managedDomainIDs)
+	orgSet := toUint64Set(managedOrgIDs)
+	var out []model.AssetAuditLog
+	for _, l := range m.logs {
+		if l.OperatorID == userID || domSet[l.DomainID] || (l.AssetType == "org" && orgSet[l.AssetID]) {
+			out = append(out, l)
+		}
+	}
+	return out, int64(len(out)), nil
+}
+
+func TestKBMoveCopyAndAuditLogs(t *testing.T) {
+	tmpDir := t.TempDir()
+	srcFile := filepath.Join(tmpDir, "intro.md")
+	_ = os.WriteFile(srcFile, []byte("# Intro\nHello world"), 0644)
+
+	kbRepo := newMockFileKBRepo()
+	_ = kbRepo.CreateDocument(&model.KBDocument{
+		KBAssetID: 1, FolderPath: "guides", FileName: "intro.md", FileExt: ".md", FileSize: 19, FilePath: srcFile,
+	})
+	_ = kbRepo.CreateDocument(&model.KBDocument{
+		KBAssetID: 1, FolderPath: "archive", FileName: "intro.md", FileExt: ".md", FileSize: 19, FilePath: srcFile,
+	})
+
+	assetRepo := &mockP1AssetRepo{
+		assets: map[uint64]*model.AIAsset{
+			1: {ID: 1, AssetCode: "kb-docs", Name: "Docs KB", AssetType: model.AssetTypeKB, DomainID: 5, OwnerID: 10},
+		},
+	}
+	domainRepo := &mockP1DomainRepo{
+		members: map[uint64]map[uint64]string{
+			5: {10: model.DomainRoleMember, 30: model.DomainRoleAdmin},
+		},
+	}
+	auditRepo := &mockAuditRepo{}
+
+	kbSvc := NewKBService(kbRepo, assetRepo, domainRepo, nil, nil, tmpDir)
+	kbSvc.SetAuditRepos(auditRepo, nil)
+	auditSvc := NewAuditService(auditRepo, domainRepo, nil)
+
+	// 1. Move to folder with conflict -> error
+	if _, err := kbSvc.MoveDocument(10, false, 1, 1, "archive"); err == nil {
+		t.Fatal("expected conflict error when moving to folder with same filename")
+	}
+
+	// 2. Move to root ("") -> succeeds and logs kb.file_move
+	moved, err := kbSvc.MoveDocument(10, false, 1, 1, "")
+	if err != nil {
+		t.Fatalf("MoveDocument to root failed: %v", err)
+	}
+	if moved.FolderPath != "" {
+		t.Fatalf("expected root folder_path '', got %q", moved.FolderPath)
+	}
+
+	// 3. Copy to "archive" -> auto-deduplicates to "intro-copy.md" and logs kb.file_copy
+	copied, err := kbSvc.CopyDocument(10, false, 1, 1, "archive", "")
+	if err != nil {
+		t.Fatalf("CopyDocument failed: %v", err)
+	}
+	if copied.FileName != "intro-copy.md" || copied.FolderPath != "archive" {
+		t.Fatalf("expected archive/intro-copy.md, got %s/%s", copied.FolderPath, copied.FileName)
+	}
+	if _, err := os.Stat(copied.FilePath); err != nil {
+		t.Fatalf("expected copied file on disk, got err: %v", err)
+	}
+
+	// 4. Verify audit logs & scoping
+	if len(auditRepo.logs) != 2 || auditRepo.logs[0].Action != model.AuditActionKBFileMove || auditRepo.logs[1].Action != model.AuditActionKBFileCopy {
+		t.Fatalf("unexpected audit logs: %+v", auditRepo.logs)
+	}
+	adminLogs, total, err := auditSvc.ListManagedLogs(context.Background(), 30, model.AuditLogQuery{})
+	if err != nil || total != 2 || len(adminLogs) != 2 {
+		t.Fatalf("expected domain admin (30) to see 2 logs, got total=%d len=%d err=%v", total, len(adminLogs), err)
+	}
+	strangerLogs, totalStranger, err := auditSvc.ListManagedLogs(context.Background(), 99, model.AuditLogQuery{})
+	if err != nil || totalStranger != 0 || len(strangerLogs) != 0 {
+		t.Fatalf("expected stranger (99) to see 0 logs, got total=%d", totalStranger)
 	}
 }

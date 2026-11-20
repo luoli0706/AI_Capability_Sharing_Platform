@@ -46,6 +46,7 @@ type AssetService interface {
 	ParseAgentFile(raw, filename string) (*agentpkg.AgentImportResult, error)
 	ImportAgentFromURL(ctx context.Context, rawURL string) (*agentpkg.AgentImportResult, error)
 	DownloadAgentPackage(userID uint64, isSuperAdmin bool, id uint64, format string) (filename, contentType string, data []byte, err error)
+	SetAuditRepos(auditRepo repository.AuditLogRepository, userRepo repository.UserRepository)
 }
 
 type assetService struct {
@@ -53,8 +54,15 @@ type assetService struct {
 	domainRepo repository.DomainRepository
 	govRepo    repository.GovernanceRepository
 	orgRepo    repository.OrgRepository
+	auditRepo  repository.AuditLogRepository
+	userRepo   repository.UserRepository
 	uploadDir  string
 	httpClient *http.Client
+}
+
+func (s *assetService) SetAuditRepos(auditRepo repository.AuditLogRepository, userRepo repository.UserRepository) {
+	s.auditRepo = auditRepo
+	s.userRepo = userRepo
 }
 
 func NewAssetService(assetRepo repository.AssetRepository, domainRepo repository.DomainRepository, govRepo repository.GovernanceRepository, orgRepo repository.OrgRepository, uploadDir string) AssetService {
@@ -241,7 +249,11 @@ func (s *assetService) CreateAsset(userID uint64, isSuperAdmin bool, req model.C
 		return nil, err
 	}
 
-	return s.assetRepo.GetDetailByID(asset.ID)
+	detail, err := s.assetRepo.GetDetailByID(asset.ID)
+	if err == nil {
+		recordAudit(s.auditRepo, s.userRepo, userID, detail.DomainID, detail.DomainName, detail.ID, detail.AssetCode, detail.Name, detail.AssetType, model.AuditActionAssetCreate, detail.Name, "创建资产 "+detail.AssetCode)
+	}
+	return detail, err
 }
 
 func (s *assetService) UpdateAsset(userID uint64, isSuperAdmin bool, id uint64, req model.UpdateAssetRequest) (*model.AssetDetail, error) {
@@ -268,14 +280,23 @@ func (s *assetService) UpdateAsset(userID uint64, isSuperAdmin bool, id uint64, 
 		return nil, err
 	}
 
-	return s.assetRepo.GetDetailByID(id)
+	detail, err := s.assetRepo.GetDetailByID(id)
+	if err == nil {
+		recordAudit(s.auditRepo, s.userRepo, userID, detail.DomainID, detail.DomainName, detail.ID, detail.AssetCode, detail.Name, detail.AssetType, model.AuditActionAssetUpdate, detail.Name, "更新资产配置")
+	}
+	return detail, err
 }
 
 func (s *assetService) DeleteAsset(userID uint64, isSuperAdmin bool, id uint64) error {
-	if _, err := s.ensureManagePermission(userID, isSuperAdmin, id); err != nil {
+	asset, err := s.ensureManagePermission(userID, isSuperAdmin, id)
+	if err != nil {
 		return err
 	}
-	return s.assetRepo.DeleteAsset(id)
+	if err := s.assetRepo.DeleteAsset(id); err != nil {
+		return err
+	}
+	recordAudit(s.auditRepo, s.userRepo, userID, asset.DomainID, "", asset.ID, asset.AssetCode, asset.Name, asset.AssetType, model.AuditActionAssetDelete, asset.Name, "删除资产 "+asset.AssetCode)
+	return nil
 }
 
 func (s *assetService) PublishAsset(userID uint64, isSuperAdmin bool, id uint64, version, changelog string) (*model.AssetDetail, error) {
@@ -329,7 +350,11 @@ func (s *assetService) PublishAsset(userID uint64, isSuperAdmin bool, id uint64,
 	); err != nil {
 		return nil, err
 	}
-	return s.assetRepo.GetDetailByID(id)
+	updated, err := s.assetRepo.GetDetailByID(id)
+	if err == nil {
+		recordAudit(s.auditRepo, s.userRepo, userID, updated.DomainID, updated.DomainName, updated.ID, updated.AssetCode, updated.Name, updated.AssetType, model.AuditActionAssetPublishSubmit, nextVersion, "提交发布审批: "+changelog)
+	}
+	return updated, err
 }
 
 func (s *assetService) OfflineAsset(userID uint64, isSuperAdmin bool, id uint64) (*model.AssetDetail, error) {
@@ -339,7 +364,11 @@ func (s *assetService) OfflineAsset(userID uint64, isSuperAdmin bool, id uint64)
 	if err := s.assetRepo.UpdateStatus(id, model.AssetStatusDeprecated, ""); err != nil {
 		return nil, err
 	}
-	return s.assetRepo.GetDetailByID(id)
+	updated, err := s.assetRepo.GetDetailByID(id)
+	if err == nil {
+		recordAudit(s.auditRepo, s.userRepo, userID, updated.DomainID, updated.DomainName, updated.ID, updated.AssetCode, updated.Name, updated.AssetType, model.AuditActionAssetOffline, updated.Name, "下线资产")
+	}
+	return updated, err
 }
 
 func (s *assetService) ListVersions(userID uint64, isSuperAdmin bool, id uint64) ([]model.AIAssetVersion, error) {
@@ -398,7 +427,11 @@ func (s *assetService) RollbackAsset(userID uint64, isSuperAdmin bool, id, versi
 	if err := s.assetRepo.RestoreFromSnapshot(asset, ext, ver.ID, ver.Version); err != nil {
 		return nil, err
 	}
-	return s.assetRepo.GetDetailByID(id)
+	updated, err := s.assetRepo.GetDetailByID(id)
+	if err == nil {
+		recordAudit(s.auditRepo, s.userRepo, userID, updated.DomainID, updated.DomainName, updated.ID, updated.AssetCode, updated.Name, updated.AssetType, model.AuditActionAssetRollback, ver.Version, "回滚至版本 "+ver.Version)
+	}
+	return updated, err
 }
 
 func (s *assetService) CheckMCPHealth(userID uint64, isSuperAdmin bool, id uint64) (*model.AIAssetMCP, error) {

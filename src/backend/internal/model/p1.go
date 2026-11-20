@@ -203,6 +203,15 @@ type CreateKBFolderRequest struct {
 	FolderPath string `json:"folder_path" validate:"required,max=512"`
 }
 
+type MoveKBDocumentRequest struct {
+	TargetFolderPath string `json:"target_folder_path" validate:"max=512"`
+}
+
+type CopyKBDocumentRequest struct {
+	TargetFolderPath string `json:"target_folder_path" validate:"max=512"`
+	NewName          string `json:"new_name" validate:"max=255"`
+}
+
 type KBPreviewFile struct {
 	Path string `json:"path"`
 	Size int64  `json:"size"`

@@ -16,6 +16,8 @@ type KBRepository interface {
 	ListDocuments(kbAssetID uint64) ([]model.KBDocument, error)
 	FindDocumentByID(kbAssetID, docID uint64) (*model.KBDocument, error)
 	ListMatchingFiles(kbAssetID uint64, scope string, docID uint64, folderPath string) ([]model.KBDocument, error)
+	FileExistsInFolder(kbAssetID uint64, folderPath, fileName string, excludeDocID uint64) (bool, error)
+	MoveDocument(kbAssetID, docID uint64, targetFolder string) error
 	CompleteDocumentParsing(kbAssetID, docID uint64, chunks []model.KBChunk) error
 	FailDocumentParsing(docID uint64, errMsg string) error
 	ListChunks(kbAssetID, docID uint64, page, pageSize int) ([]model.KBChunk, int64, error)
@@ -119,6 +121,25 @@ func (r *kbRepository) ListMatchingFiles(kbAssetID uint64, scope string, docID u
 		docs = []model.KBDocument{}
 	}
 	return docs, nil
+}
+
+func (r *kbRepository) FileExistsInFolder(kbAssetID uint64, folderPath, fileName string, excludeDocID uint64) (bool, error) {
+	tx := r.db.Model(&model.KBDocument{}).
+		Where("kb_asset_id = ? AND is_folder = ? AND folder_path = ? AND file_name = ?", kbAssetID, false, folderPath, fileName)
+	if excludeDocID > 0 {
+		tx = tx.Where("id <> ?", excludeDocID)
+	}
+	var count int64
+	if err := tx.Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (r *kbRepository) MoveDocument(kbAssetID, docID uint64, targetFolder string) error {
+	return r.db.Model(&model.KBDocument{}).
+		Where("id = ? AND kb_asset_id = ? AND is_folder = ?", docID, kbAssetID, false).
+		Update("folder_path", targetFolder).Error
 }
 
 func (r *kbRepository) CompleteDocumentParsing(kbAssetID, docID uint64, chunks []model.KBChunk) error {

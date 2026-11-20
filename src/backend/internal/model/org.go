@@ -69,10 +69,21 @@ type OrgMemberItem struct {
 	JoinedAt time.Time `json:"joined_at"`
 }
 
+type OrgQuery struct {
+	Keyword  string
+	Page     int
+	PageSize int
+}
+
 type CreateOrgRequest struct {
 	OrgCode     string `json:"org_code" validate:"required,min=2,max=64"`
 	OrgName     string `json:"org_name" validate:"required,min=2,max=128"`
 	Description string `json:"description" validate:"max=512"`
+}
+
+type UpdateOrgRequest struct {
+	OrgName     string  `json:"org_name" validate:"omitempty,min=2,max=128"`
+	Description *string `json:"description" validate:"omitempty,max=512"`
 }
 
 type AddOrgMemberRequest struct {

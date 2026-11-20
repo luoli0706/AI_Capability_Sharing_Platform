@@ -11,8 +11,9 @@ const (
 	DomainRoleAdmin  = "admin"
 	DomainRoleMember = "member"
 
-	DomainVisibilityPublic  = "public"
-	DomainVisibilityPrivate = "private"
+	DomainVisibilityPublic     = "public"
+	DomainVisibilityPrivate    = "private"
+	DomainVisibilityOrgPrivate = "org_private"
 )
 
 type BizDomain struct {
@@ -78,12 +79,14 @@ type DomainMemberItem struct {
 	JoinedAt   time.Time `json:"joined_at"`
 }
 
-// DomainQuery defines filters for GET /api/v1/domains.
+// DomainQuery defines filters and pagination for GET /api/v1/domains.
 type DomainQuery struct {
 	Tab       string
 	Keyword   string
 	DomainUID string
 	OrgID     uint64
+	Page      int
+	PageSize  int
 }
 
 // CreateDomainRequest represents POST /api/v1/domains payload.
@@ -91,15 +94,15 @@ type CreateDomainRequest struct {
 	DomainCode  string `json:"domain_code" validate:"required,min=2,max=64"`
 	DomainName  string `json:"domain_name" validate:"required,min=2,max=128"`
 	Description string `json:"description" validate:"max=512"`
-	Visibility  string `json:"visibility" validate:"omitempty,oneof=public private"`
+	Visibility  string `json:"visibility" validate:"omitempty,oneof=public private org_private"`
 	OrgID       uint64 `json:"org_id"`
 }
 
 // UpdateDomainRequest represents PUT /api/v1/domains/:id payload.
 type UpdateDomainRequest struct {
-	DomainName  string `json:"domain_name" validate:"omitempty,min=2,max=128"`
+	DomainName  string  `json:"domain_name" validate:"omitempty,min=2,max=128"`
 	Description *string `json:"description" validate:"omitempty,max=512"`
-	Visibility  string `json:"visibility" validate:"omitempty,oneof=public private"`
+	Visibility  string  `json:"visibility" validate:"omitempty,oneof=public private org_private"`
 }
 
 // AddDomainMemberRequest represents POST /api/v1/domains/:id/members payload.

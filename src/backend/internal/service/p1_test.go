@@ -36,7 +36,7 @@ func (m *mockP1UserRepo) FindByEmail(email string) (*model.SysUser, error) {
 func (m *mockP1UserRepo) GetUserRoles(userID uint64) ([]string, error) {
 	return []string{model.RoleDeveloper}, nil
 }
-func (m *mockP1UserRepo) UpdateProfile(userID uint64, nickname, email, avatar string) error {
+func (m *mockP1UserRepo) UpdateProfile(userID uint64, nickname string, email *string, avatar, bio string) error {
 	return nil
 }
 func (m *mockP1UserRepo) UpdatePasswordAndTokenVersion(userID uint64, passwordHash string) error {
@@ -50,8 +50,8 @@ type mockP1DomainRepo struct {
 	members map[uint64]map[uint64]string
 }
 
-func (m *mockP1DomainRepo) ListDomains(userID uint64, q model.DomainQuery, userOrgIDs []uint64) ([]model.DomainListItem, error) {
-	return nil, nil
+func (m *mockP1DomainRepo) ListDomains(userID uint64, q model.DomainQuery, userOrgIDs, adminOrgIDs []uint64) ([]model.DomainListItem, int64, error) {
+	return nil, 0, nil
 }
 func (m *mockP1DomainRepo) FindByID(id uint64) (*model.BizDomain, error) {
 	if d, ok := m.domains[id]; ok {
@@ -66,7 +66,8 @@ func (m *mockP1DomainRepo) FindByUID(uid string) (*model.BizDomain, error) {
 	return nil, gorm.ErrRecordNotFound
 }
 func (m *mockP1DomainRepo) CreateWithOwner(domain *model.BizDomain) error { return nil }
-func (m *mockP1DomainRepo) UpdateDomain(domain *model.BizDomain) error    { return nil }
+func (m *mockP1DomainRepo) UpdateDomain(domain *model.BizDomain) error { return nil }
+func (m *mockP1DomainRepo) DeleteDomain(id uint64) error               { return nil }
 func (m *mockP1DomainRepo) ListMembers(domainID uint64) ([]model.DomainMemberItem, error) {
 	return nil, nil
 }
@@ -88,7 +89,7 @@ func (m *mockP1DomainRepo) GetUserAdminDomainIDs(userID uint64) ([]uint64, error
 	}
 	return ids, nil
 }
-func (m *mockP1DomainRepo) GetAccessibleDomainIDs(userID uint64, userOrgIDs []uint64) ([]uint64, error) {
+func (m *mockP1DomainRepo) GetAccessibleDomainIDs(userID uint64, userOrgIDs, adminOrgIDs []uint64) ([]uint64, error) {
 	return []uint64{}, nil
 }
 

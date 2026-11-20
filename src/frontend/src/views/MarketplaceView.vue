@@ -156,7 +156,7 @@ onBeforeUnmount(() => {
           域内能力广场
           <span v-if="currentDomain" class="domain-tag">{{ currentDomain.domain_name }}</span>
         </h1>
-        <p class="page-subtitle">探索、订阅并在线调试当前业务域内已发布的 MCP 服务、Skills 技能、Agent 与知识库</p>
+        <p class="page-subtitle">探索、订阅并在线调试当前域内已发布的 MCP 服务、Skills 技能、Agent 与知识库</p>
       </div>
       <div class="marketplace-count tabular-nums">
         共 <strong>{{ total }}</strong> 项可用能力
@@ -202,7 +202,7 @@ onBeforeUnmount(() => {
 
     <!-- Empty State -->
     <div v-else-if="assets.length === 0" class="surface-card empty-box" :class="{ 'is-refreshing': isRefreshing }">
-      <el-empty description="当前业务域暂无符合条件的已发布 AI 能力" />
+      <el-empty description="当前域暂无符合条件的已发布 AI 能力" />
     </div>
 
     <!-- Asset Card Grid -->

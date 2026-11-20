@@ -88,6 +88,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&model.ApprovalRequest{},
 		&model.ApprovalRecord{},
 		&model.AssetInvokeLog{},
+		&model.AssetAuditLog{},
 	); err != nil {
 		return err
 	}

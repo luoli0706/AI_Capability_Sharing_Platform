@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -27,7 +28,41 @@ func newMockOrgRepo() *mockOrgRepo {
 	}
 }
 
-func (m *mockOrgRepo) ListOrgs(userID uint64) ([]model.OrgListItem, error) { return nil, nil }
+func (m *mockOrgRepo) ListOrgs(userID uint64, q model.OrgQuery) ([]model.OrgListItem, int64, error) {
+	kw := strings.ToLower(strings.TrimSpace(q.Keyword))
+	var out []model.OrgListItem
+	for _, o := range m.orgs {
+		if kw != "" && !strings.Contains(strings.ToLower(o.OrgName), kw) && !strings.Contains(strings.ToLower(o.OrgCode), kw) {
+			continue
+		}
+		out = append(out, model.OrgListItem{
+			ID:        o.ID,
+			OrgCode:   o.OrgCode,
+			OrgName:   o.OrgName,
+			OwnerID:   o.OwnerID,
+			MyRole:    m.members[o.ID][userID],
+			CreatedAt: o.CreatedAt,
+		})
+	}
+	total := int64(len(out))
+	page := q.Page
+	if page <= 0 {
+		page = 1
+	}
+	pageSize := q.PageSize
+	if pageSize <= 0 {
+		pageSize = 12
+	}
+	start := (page - 1) * pageSize
+	if start >= len(out) {
+		return []model.OrgListItem{}, total, nil
+	}
+	end := start + pageSize
+	if end > len(out) {
+		end = len(out)
+	}
+	return out[start:end], total, nil
+}
 func (m *mockOrgRepo) FindByID(id uint64) (*model.BizOrganization, error) {
 	if o, ok := m.orgs[id]; ok {
 		return o, nil
@@ -48,6 +83,14 @@ func (m *mockOrgRepo) CreateWithOwner(org *model.BizOrganization) error {
 	org.CreatedAt = time.Now()
 	m.orgs[org.ID] = org
 	m.members[org.ID] = map[uint64]string{org.OwnerID: model.OrgRoleOwner}
+	return nil
+}
+func (m *mockOrgRepo) UpdateOrg(org *model.BizOrganization) error {
+	m.orgs[org.ID] = org
+	return nil
+}
+func (m *mockOrgRepo) DeleteOrg(id uint64) error {
+	delete(m.orgs, id)
 	return nil
 }
 func (m *mockOrgRepo) ListMembers(orgID uint64) ([]model.OrgMemberItem, error) { return nil, nil }
@@ -80,6 +123,15 @@ func (m *mockOrgRepo) GetUserOrgIDs(userID uint64) ([]uint64, error) {
 	}
 	return ids, nil
 }
+func (m *mockOrgRepo) GetUserAdminOrgIDs(userID uint64) ([]uint64, error) {
+	var ids []uint64
+	for oid, roles := range m.members {
+		if r := roles[userID]; r == model.OrgRoleOwner || r == model.OrgRoleAdmin {
+			ids = append(ids, oid)
+		}
+	}
+	return ids, nil
+}
 func (m *mockOrgRepo) ListPublicDomainsByOrg(orgID, userID uint64) ([]model.DomainListItem, error) {
 	return nil, nil
 }
@@ -98,15 +150,19 @@ func newMockSquareDomainRepo() *mockSquareDomainRepo {
 	}
 }
 
-func (m *mockSquareDomainRepo) ListDomains(userID uint64, q model.DomainQuery, userOrgIDs []uint64) ([]model.DomainListItem, error) {
+func (m *mockSquareDomainRepo) ListDomains(userID uint64, q model.DomainQuery, userOrgIDs, adminOrgIDs []uint64) ([]model.DomainListItem, int64, error) {
 	uid := strings.ToUpper(strings.TrimSpace(q.DomainUID))
 	kw := strings.TrimSpace(q.Keyword)
 	if uid == "" && strings.HasPrefix(strings.ToUpper(kw), "DOM-") {
 		uid = strings.ToUpper(kw)
 	}
+	orgSet := toUint64Set(userOrgIDs)
+	adminOrgSet := toUint64Set(adminOrgIDs)
+
 	var out []model.DomainListItem
 	for _, d := range m.domains {
-		if q.Tab == "square" {
+		switch q.Tab {
+		case "square":
 			if uid != "" {
 				if d.DomainUID != uid {
 					continue
@@ -118,6 +174,13 @@ func (m *mockSquareDomainRepo) ListDomains(userID uint64, q model.DomainQuery, u
 				if kw != "" && !strings.Contains(strings.ToLower(d.DomainName), strings.ToLower(kw)) && !strings.Contains(strings.ToLower(d.DomainCode), strings.ToLower(kw)) {
 					continue
 				}
+			}
+		case "mine":
+			isMember := m.members[d.ID] != nil && m.members[d.ID][userID] != ""
+			isOrgPub := d.Visibility == model.DomainVisibilityPublic && d.OrgID > 0 && orgSet[d.OrgID]
+			isOrgPrivAdmin := d.Visibility == model.DomainVisibilityOrgPrivate && d.OrgID > 0 && adminOrgSet[d.OrgID]
+			if !isMember && !isOrgPub && !isOrgPrivAdmin {
+				continue
 			}
 		}
 		out = append(out, model.DomainListItem{
@@ -131,7 +194,24 @@ func (m *mockSquareDomainRepo) ListDomains(userID uint64, q model.DomainQuery, u
 			OwnerID:    d.OwnerID,
 		})
 	}
-	return out, nil
+	total := int64(len(out))
+	page := q.Page
+	if page <= 0 {
+		page = 1
+	}
+	pageSize := q.PageSize
+	if pageSize <= 0 {
+		pageSize = 12
+	}
+	start := (page - 1) * pageSize
+	if start >= len(out) {
+		return []model.DomainListItem{}, total, nil
+	}
+	end := start + pageSize
+	if end > len(out) {
+		end = len(out)
+	}
+	return out[start:end], total, nil
 }
 func (m *mockSquareDomainRepo) FindByID(id uint64) (*model.BizDomain, error) {
 	if d, ok := m.domains[id]; ok {
@@ -166,6 +246,10 @@ func (m *mockSquareDomainRepo) UpdateDomain(domain *model.BizDomain) error {
 	m.domains[domain.ID] = domain
 	return nil
 }
+func (m *mockSquareDomainRepo) DeleteDomain(id uint64) error {
+	delete(m.domains, id)
+	return nil
+}
 func (m *mockSquareDomainRepo) ListMembers(domainID uint64) ([]model.DomainMemberItem, error) {
 	return nil, nil
 }
@@ -193,7 +277,7 @@ func (m *mockSquareDomainRepo) GetUserDomainIDs(userID uint64) ([]uint64, error)
 func (m *mockSquareDomainRepo) GetUserAdminDomainIDs(userID uint64) ([]uint64, error) {
 	return nil, nil
 }
-func (m *mockSquareDomainRepo) GetAccessibleDomainIDs(userID uint64, userOrgIDs []uint64) ([]uint64, error) {
+func (m *mockSquareDomainRepo) GetAccessibleDomainIDs(userID uint64, userOrgIDs, adminOrgIDs []uint64) ([]uint64, error) {
 	return nil, nil
 }
 
@@ -229,14 +313,14 @@ func TestOrgDomainVisibilityAndStrictPermissions(t *testing.T) {
 	}
 
 	// 2. Private domain hidden from square fuzzy search, only found by exact domain_uid
-	sqFuzzy, err := domainSvc.ListDomains(2, model.DomainQuery{Tab: "square", Keyword: "Secret"})
+	sqFuzzy, _, err := domainSvc.ListDomains(2, model.DomainQuery{Tab: "square", Keyword: "Secret"})
 	if err != nil {
 		t.Fatalf("ListDomains square fuzzy failed: %v", err)
 	}
 	if len(sqFuzzy) != 0 {
 		t.Fatalf("expected private domain to be hidden from square fuzzy search, got %d", len(sqFuzzy))
 	}
-	sqExact, err := domainSvc.ListDomains(2, model.DomainQuery{Tab: "square", Keyword: personalDom.DomainUID})
+	sqExact, _, err := domainSvc.ListDomains(2, model.DomainQuery{Tab: "square", Keyword: personalDom.DomainUID})
 	if err != nil {
 		t.Fatalf("ListDomains square exact UID failed: %v", err)
 	}
@@ -332,5 +416,117 @@ func TestOrgDomainVisibilityAndStrictPermissions(t *testing.T) {
 	}
 	if _, err := invokeSvc.CheckAccess(2, false, "skill-org-priv"); err == nil {
 		t.Fatal("expected org member NOT to have automatic access to org private domain asset")
+	}
+}
+
+func TestOrgPrivateDomainAndOrgLifecycle(t *testing.T) {
+	userRepo := &mockP1UserRepo{
+		users: map[uint64]*model.SysUser{
+			1: {ID: 1, Username: "org_owner", Status: 1},
+			2: {ID: 2, Username: "org_admin", Status: 1},
+			3: {ID: 3, Username: "org_member_invited", Status: 1},
+			4: {ID: 4, Username: "org_member_other", Status: 1},
+		},
+	}
+	orgRepo := newMockOrgRepo()
+	domainRepo := newMockSquareDomainRepo()
+	auditRepo := &mockAuditRepo{}
+
+	orgSvc := NewOrgService(orgRepo, userRepo)
+	orgSvc.SetAuditRepos(auditRepo, userRepo)
+	domainSvc := NewDomainService(domainRepo, userRepo, orgRepo)
+	domainSvc.SetAuditRepos(auditRepo, userRepo)
+	auditSvc := NewAuditService(auditRepo, domainRepo, orgRepo)
+
+	org, err := orgSvc.CreateOrg(1, model.CreateOrgRequest{OrgCode: "core-org", OrgName: "Core Org"})
+	if err != nil {
+		t.Fatalf("CreateOrg failed: %v", err)
+	}
+	_ = orgSvc.AddMember(1, org.ID, model.AddOrgMemberRequest{UserID: 2, OrgRole: model.OrgRoleAdmin})
+	_ = orgSvc.AddMember(1, org.ID, model.AddOrgMemberRequest{UserID: 3, OrgRole: model.OrgRoleMember})
+	_ = orgSvc.AddMember(1, org.ID, model.AddOrgMemberRequest{UserID: 4, OrgRole: model.OrgRoleMember})
+
+	// 1. Non-admin org member (3) cannot create org_private domain -> 403
+	_, err = domainSvc.CreateDomain(3, model.CreateDomainRequest{
+		DomainCode: "bad-org-priv",
+		DomainName: "Bad Org Priv",
+		Visibility: model.DomainVisibilityOrgPrivate,
+		OrgID:      org.ID,
+	})
+	var appErr *AppError
+	if !errors.As(err, &appErr) || appErr.HTTPStatus != http.StatusForbidden {
+		t.Fatalf("expected 403 for non-admin creating org_private, got %v", err)
+	}
+
+	// 2. Org admin (2) creates org_private domain -> 200
+	orgPriv, err := domainSvc.CreateDomain(2, model.CreateDomainRequest{
+		DomainCode: "vip-group",
+		DomainName: "VIP Group",
+		Visibility: model.DomainVisibilityOrgPrivate,
+		OrgID:      org.ID,
+	})
+	if err != nil {
+		t.Fatalf("org admin CreateDomain org_private failed: %v", err)
+	}
+
+	// 3. Invite user 3 into orgPriv; user 4 (other org member) is NOT invited
+	if err := domainSvc.AddMember(2, orgPriv.ID, model.AddDomainMemberRequest{UserID: 3, DomainRole: model.DomainRoleAdmin}); err != nil {
+		t.Fatalf("org admin AddMember failed: %v", err)
+	}
+
+	// User 4 cannot see org_private in mine or square
+	mine4, _, _ := domainSvc.ListDomains(4, model.DomainQuery{Tab: "mine"})
+	if len(mine4) != 0 {
+		t.Fatalf("expected other org member (4) to see 0 domains in mine, got %+v", mine4)
+	}
+	sq4, _, _ := domainSvc.ListDomains(4, model.DomainQuery{Tab: "square", Keyword: "VIP"})
+	if len(sq4) != 0 {
+		t.Fatalf("expected org_private hidden from square search, got %+v", sq4)
+	}
+
+	// User 3 (invited) sees it in mine, but CANNOT manage or invite others (even if domain_role='admin')
+	mine3, _, _ := domainSvc.ListDomains(3, model.DomainQuery{Tab: "mine"})
+	if len(mine3) != 1 || mine3[0].ID != orgPriv.ID {
+		t.Fatalf("expected invited member (3) to see org_private in mine, got %+v", mine3)
+	}
+	err = domainSvc.AddMember(3, orgPriv.ID, model.AddDomainMemberRequest{UserID: 4, DomainRole: model.DomainRoleMember})
+	if !errors.As(err, &appErr) || appErr.HTTPStatus != http.StatusForbidden {
+		t.Fatalf("expected 403 when invited member tries to manage org_private, got %v", err)
+	}
+
+	// 4. Domain pagination
+	_, _ = domainSvc.CreateDomain(1, model.CreateDomainRequest{DomainCode: "d2", DomainName: "Domain 2", Visibility: model.DomainVisibilityPublic})
+	_, _ = domainSvc.CreateDomain(1, model.CreateDomainRequest{DomainCode: "d3", DomainName: "Domain 3", Visibility: model.DomainVisibilityPublic})
+	page1, total, err := domainSvc.ListDomains(1, model.DomainQuery{Tab: "mine", Page: 1, PageSize: 2})
+	if err != nil || total != 3 || len(page1) != 2 {
+		t.Fatalf("expected total=3 len=2 on page 1, got total=%d len=%d err=%v", total, len(page1), err)
+	}
+
+	// 5. PUT/DELETE orgs & DELETE domains + audit logs
+	if _, err := orgSvc.UpdateOrg(2, org.ID, model.UpdateOrgRequest{OrgName: "Core Org Updated"}); err != nil {
+		t.Fatalf("org admin UpdateOrg failed: %v", err)
+	}
+	// Org admin (2) cannot delete org -> 403; org owner (1) can
+	if err := orgSvc.DeleteOrg(2, org.ID); err == nil {
+		t.Fatal("expected 403 when org admin tries to delete org")
+	}
+	if err := domainSvc.DeleteDomain(1, orgPriv.ID); err != nil {
+		t.Fatalf("org owner DeleteDomain org_private failed: %v", err)
+	}
+	if err := orgSvc.DeleteOrg(1, org.ID); err != nil {
+		t.Fatalf("org owner DeleteOrg failed: %v", err)
+	}
+
+	logs, logTotal, err := auditSvc.ListManagedLogs(context.Background(), 1, model.AuditLogQuery{})
+	if err != nil || logTotal == 0 || len(logs) == 0 {
+		t.Fatalf("expected org/domain audit logs for owner, got total=%d err=%v", logTotal, err)
+	}
+
+	// 6. Org keyword search & pagination
+	_, _ = orgSvc.CreateOrg(1, model.CreateOrgRequest{OrgCode: "alpha-ai", OrgName: "Alpha AI"})
+	_, _ = orgSvc.CreateOrg(1, model.CreateOrgRequest{OrgCode: "beta-ops", OrgName: "Beta Ops"})
+	filteredOrgs, filteredTotal, err := orgSvc.ListOrgs(1, model.OrgQuery{Keyword: "alpha", Page: 1, PageSize: 10})
+	if err != nil || filteredTotal != 1 || len(filteredOrgs) != 1 || filteredOrgs[0].OrgCode != "alpha-ai" {
+		t.Fatalf("expected 1 filtered org 'alpha-ai', got total=%d list=%+v err=%v", filteredTotal, filteredOrgs, err)
 	}
 }

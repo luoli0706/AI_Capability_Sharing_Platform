@@ -18,14 +18,23 @@ func NewOrgHandler(orgSvc service.OrgService) *OrgHandler {
 }
 
 func (h *OrgHandler) ListOrgs(c echo.Context) error {
+	page, pageSize := parsePageParamsWithDefault(c, 12)
+	q := model.OrgQuery{
+		Keyword:  c.QueryParam("keyword"),
+		Page:     page,
+		PageSize: pageSize,
+	}
+
 	userID := middleware.GetUserID(c)
-	list, err := h.orgSvc.ListOrgs(userID)
+	list, total, err := h.orgSvc.ListOrgs(userID, q)
 	if err != nil {
 		return service.HandleError(c, err)
 	}
 	return response.Success(c, map[string]interface{}{
-		"list":  list,
-		"total": len(list),
+		"list":      list,
+		"total":     total,
+		"page":      page,
+		"page_size": pageSize,
 	})
 }
 
@@ -41,6 +50,38 @@ func (h *OrgHandler) CreateOrg(c echo.Context) error {
 		return service.HandleError(c, err)
 	}
 	return response.Success(c, org)
+}
+
+func (h *OrgHandler) UpdateOrg(c echo.Context) error {
+	orgID, ok := parseUintParam(c, "id")
+	if !ok {
+		return nil
+	}
+
+	var req model.UpdateOrgRequest
+	if !bindAndValidate(c, &req) {
+		return nil
+	}
+
+	userID := middleware.GetUserID(c)
+	org, err := h.orgSvc.UpdateOrg(userID, orgID, req)
+	if err != nil {
+		return service.HandleError(c, err)
+	}
+	return response.Success(c, org)
+}
+
+func (h *OrgHandler) DeleteOrg(c echo.Context) error {
+	orgID, ok := parseUintParam(c, "id")
+	if !ok {
+		return nil
+	}
+
+	userID := middleware.GetUserID(c)
+	if err := h.orgSvc.DeleteOrg(userID, orgID); err != nil {
+		return service.HandleError(c, err)
+	}
+	return response.Success(c, nil)
 }
 
 func (h *OrgHandler) GetOrgDetail(c echo.Context) error {
@@ -62,13 +103,18 @@ func (h *OrgHandler) ListMembers(c echo.Context) error {
 	if !ok {
 		return nil
 	}
+	page, pageSize := parsePageParams(c)
 
 	list, err := h.orgSvc.ListMembers(orgID)
 	if err != nil {
 		return service.HandleError(c, err)
 	}
+	paged, total := paginateSlice(list, page, pageSize)
 	return response.Success(c, map[string]interface{}{
-		"list": list,
+		"list":      paged,
+		"total":     total,
+		"page":      page,
+		"page_size": pageSize,
 	})
 }
 

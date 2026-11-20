@@ -11,6 +11,7 @@ import {
   Expand,
   Fold,
   Grid,
+  List,
   OfficeBuilding,
   SwitchButton,
   User,
@@ -19,7 +20,6 @@ import {
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
 import { useDomainStore } from '@/stores/domain'
-import { getRoleLabel } from '@/utils/format'
 
 const route = useRoute()
 const router = useRouter()
@@ -66,10 +66,11 @@ const globalNavItems = computed(() => {
   const items = [
     { path: '/organizations', title: '组织中心', icon: Grid },
     { path: '/approvals', title: '审批中心', icon: Checked },
+    { path: '/logs', title: '日志中心', icon: List },
     { path: '/profile', title: '个人中心', icon: User }
   ]
   if (!activeDomainId.value) {
-    return [{ path: '/domains', title: '业务域大厅', icon: OfficeBuilding }, ...items]
+    return [{ path: '/domains', title: '域大厅', icon: OfficeBuilding }, ...items]
   }
   return items
 })
@@ -83,10 +84,12 @@ const displayName = computed(
 
 const userInitial = computed(() => displayName.value.slice(0, 1).toUpperCase())
 
-const primaryRoleLabel = computed(() => {
-  const roles = user.value?.roles
-  if (!roles || roles.length === 0) return '研发人员'
-  return getRoleLabel(roles[0])
+const isSuperAdmin = computed(() => Boolean(user.value?.roles?.includes('super_admin')))
+
+const userSubtitle = computed(() => {
+  if (isSuperAdmin.value) return '超级管理员'
+  if (user.value?.bio) return user.value.bio
+  return user.value?.username ? `@${user.value.username}` : ''
 })
 
 onMounted(() => {
@@ -156,14 +159,14 @@ async function handleCommand(command: string) {
       <!-- Active Domain Switcher Card -->
       <div v-if="activeDomainId && !isCollapsed" class="domain-switcher-box">
         <div class="switcher-header">
-          <span class="switcher-label">当前业务域</span>
+          <span class="switcher-label">当前域</span>
           <button
             type="button"
             class="back-hall-btn"
             @click="router.push('/domains')"
           >
             <el-icon :size="12"><ArrowLeft /></el-icon>
-            <span>业务域大厅</span>
+            <span>域大厅</span>
           </button>
         </div>
         <el-select
@@ -203,7 +206,7 @@ async function handleCommand(command: string) {
             v-if="isCollapsed"
             to="/domains"
             class="nav-item"
-            title="返回业务域大厅"
+            title="返回域大厅"
           >
             <el-icon class="nav-icon" :size="18"><OfficeBuilding /></el-icon>
           </router-link>
@@ -226,7 +229,7 @@ async function handleCommand(command: string) {
           v-if="!activeDomainId && domainStore.lastDomain && !isCollapsed"
           class="last-domain-shortcut"
         >
-          <div class="shortcut-label">最近进入业务域</div>
+          <div class="shortcut-label">最近进入的域</div>
           <button
             type="button"
             class="shortcut-btn"
@@ -258,7 +261,7 @@ async function handleCommand(command: string) {
       <header class="layout-header">
         <div class="header-left">
           <el-breadcrumb separator="/">
-            <el-breadcrumb-item :to="{ path: '/domains' }">业务域大厅</el-breadcrumb-item>
+            <el-breadcrumb-item :to="{ path: '/domains' }">域大厅</el-breadcrumb-item>
             <el-breadcrumb-item
               v-if="activeDomainId"
               :to="{ path: `/domains/${activeDomainId}/marketplace` }"
@@ -274,12 +277,12 @@ async function handleCommand(command: string) {
         <div class="header-right">
           <el-dropdown trigger="click" @command="handleCommand">
             <div class="user-trigger" role="button" tabindex="0">
-              <el-avatar :size="32" class="user-avatar">
+              <el-avatar :size="32" :src="user?.avatar || undefined" class="user-avatar">
                 {{ userInitial }}
               </el-avatar>
               <div class="user-meta">
                 <span class="user-name">{{ displayName }}</span>
-                <span class="user-role">{{ primaryRoleLabel }}</span>
+                <span v-if="userSubtitle" class="user-role">{{ userSubtitle }}</span>
               </div>
             </div>
             <template #dropdown>
@@ -287,15 +290,10 @@ async function handleCommand(command: string) {
                 <div class="dropdown-user-header">
                   <div class="dropdown-name">{{ displayName }}</div>
                   <div class="dropdown-username">@{{ user?.username }}</div>
-                  <div v-if="user?.roles?.length" class="dropdown-roles">
-                    <el-tag
-                      v-for="role in user.roles"
-                      :key="role"
-                      size="small"
-                      type="primary"
-                      effect="light"
-                    >
-                      {{ getRoleLabel(role) }}
+                  <div v-if="user?.bio" class="dropdown-bio">{{ user.bio }}</div>
+                  <div v-if="isSuperAdmin" class="dropdown-roles">
+                    <el-tag size="small" type="primary" effect="light">
+                      超级管理员
                     </el-tag>
                   </div>
                 </div>
@@ -642,6 +640,16 @@ async function handleCommand(command: string) {
   font-size: 12px;
   color: var(--ascp-text-muted);
   margin-top: 2px;
+}
+
+.dropdown-bio {
+  font-size: 12px;
+  color: var(--ascp-text-secondary);
+  margin-top: 4px;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dropdown-roles {

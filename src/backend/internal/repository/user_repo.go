@@ -14,7 +14,7 @@ type UserRepository interface {
 	FindByUsername(username string) (*model.SysUser, error)
 	FindByEmail(email string) (*model.SysUser, error)
 	GetUserRoles(userID uint64) ([]string, error)
-	UpdateProfile(userID uint64, nickname, email, avatar string) error
+	UpdateProfile(userID uint64, nickname string, email *string, avatar, bio string) error
 	UpdatePasswordAndTokenVersion(userID uint64, passwordHash string) error
 	IncrementTokenVersion(userID uint64) error
 	UpdateLastLogin(userID uint64, t time.Time) error
@@ -87,13 +87,12 @@ func (r *userRepository) GetUserRoles(userID uint64) ([]string, error) {
 	return roles, nil
 }
 
-func (r *userRepository) UpdateProfile(userID uint64, nickname, email, avatar string) error {
+func (r *userRepository) UpdateProfile(userID uint64, nickname string, email *string, avatar, bio string) error {
 	updates := map[string]interface{}{
 		"nickname": nickname,
+		"email":    email,
 		"avatar":   avatar,
-	}
-	if email != "" {
-		updates["email"] = email
+		"bio":      bio,
 	}
 	return r.db.Model(&model.SysUser{}).Where("id = ?", userID).Updates(updates).Error
 }

@@ -2,6 +2,7 @@ package service
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"ascp-backend/internal/config"
@@ -41,10 +42,15 @@ func (s *authService) Register(req model.RegisterRequest) (*model.UserInfo, erro
 		return nil, err
 	}
 
-	if _, err := s.userRepo.FindByEmail(req.Email); err == nil {
-		return nil, NewConflict("email already exists")
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, err
+	var emailPtr *string
+	trimmedEmail := strings.TrimSpace(req.Email)
+	if trimmedEmail != "" {
+		if _, err := s.userRepo.FindByEmail(trimmedEmail); err == nil {
+			return nil, NewConflict("email already exists")
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
+		}
+		emailPtr = &trimmedEmail
 	}
 
 	hash, err := password.Hash(req.Password)
@@ -61,7 +67,7 @@ func (s *authService) Register(req model.RegisterRequest) (*model.UserInfo, erro
 		Username:     req.Username,
 		PasswordHash: hash,
 		Nickname:     nickname,
-		Email:        req.Email,
+		Email:        emailPtr,
 		Status:       model.UserStatusActive,
 		TokenVersion: 1,
 	}
@@ -70,16 +76,8 @@ func (s *authService) Register(req model.RegisterRequest) (*model.UserInfo, erro
 		return nil, err
 	}
 
-	return &model.UserInfo{
-		ID:        user.ID,
-		Username:  user.Username,
-		Nickname:  user.Nickname,
-		Email:     user.Email,
-		Avatar:    user.Avatar,
-		Status:    user.Status,
-		Roles:     []string{model.RoleDeveloper},
-		CreatedAt: user.CreatedAt,
-	}, nil
+	info := model.ToUserInfo(user, []string{model.RoleDeveloper})
+	return &info, nil
 }
 
 func (s *authService) Login(req model.LoginRequest) (*model.LoginResponse, error) {
@@ -118,17 +116,14 @@ func (s *authService) Login(req model.LoginRequest) (*model.LoginResponse, error
 
 	_ = s.userRepo.UpdateLastLogin(user.ID, time.Now())
 
+	info := model.ToUserInfo(user, roles)
+	info.Status = 0
+	info.CreatedAt = time.Time{}
+
 	return &model.LoginResponse{
 		Token:     token,
 		ExpiresIn: expiresIn,
-		User: model.UserInfo{
-			ID:       user.ID,
-			Username: user.Username,
-			Nickname: user.Nickname,
-			Email:    user.Email,
-			Avatar:   user.Avatar,
-			Roles:    roles,
-		},
+		User:      info,
 	}, nil
 }
 
@@ -145,16 +140,8 @@ func (s *authService) GetProfile(userID uint64) (*model.UserInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &model.UserInfo{
-		ID:        user.ID,
-		Username:  user.Username,
-		Nickname:  user.Nickname,
-		Email:     user.Email,
-		Avatar:    user.Avatar,
-		Status:    user.Status,
-		Roles:     roles,
-		CreatedAt: user.CreatedAt,
-	}, nil
+	info := model.ToUserInfo(user, roles)
+	return &info, nil
 }
 
 func (s *authService) UpdateProfile(userID uint64, req model.UpdateProfileRequest) (*model.UserInfo, error) {
@@ -163,25 +150,38 @@ func (s *authService) UpdateProfile(userID uint64, req model.UpdateProfileReques
 		return nil, err
 	}
 
-	if req.Email != "" && req.Email != user.Email {
-		existing, err := s.userRepo.FindByEmail(req.Email)
-		if err == nil && existing.ID != userID {
-			return nil, NewConflict("email already in use")
-		} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, err
+	emailPtr := user.Email
+	trimmedEmail := strings.TrimSpace(req.Email)
+	if trimmedEmail != "" {
+		currentEmail := ""
+		if user.Email != nil {
+			currentEmail = *user.Email
 		}
+		if trimmedEmail != currentEmail {
+			existing, err := s.userRepo.FindByEmail(trimmedEmail)
+			if err == nil && existing.ID != userID {
+				return nil, NewConflict("email already in use")
+			} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, err
+			}
+		}
+		emailPtr = &trimmedEmail
 	}
 
 	nickname := req.Nickname
 	if nickname == "" {
 		nickname = user.Nickname
 	}
-	email := req.Email
-	if email == "" {
-		email = user.Email
+	avatar := user.Avatar
+	if req.Avatar != nil {
+		avatar = *req.Avatar
+	}
+	bio := user.Bio
+	if req.Bio != nil {
+		bio = *req.Bio
 	}
 
-	if err := s.userRepo.UpdateProfile(userID, nickname, email, req.Avatar); err != nil {
+	if err := s.userRepo.UpdateProfile(userID, nickname, emailPtr, avatar, bio); err != nil {
 		return nil, err
 	}
 

@@ -3,6 +3,7 @@ package service
 import (
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"math/big"
 
 	"ascp-backend/internal/model"
@@ -12,20 +13,23 @@ import (
 )
 
 type DomainService interface {
-	ListDomains(userID uint64, q model.DomainQuery) ([]model.DomainListItem, error)
+	ListDomains(userID uint64, q model.DomainQuery) ([]model.DomainListItem, int64, error)
 	CreateDomain(userID uint64, req model.CreateDomainRequest) (*model.DomainListItem, error)
 	UpdateDomain(operatorID uint64, domainID uint64, req model.UpdateDomainRequest) (*model.DomainListItem, error)
+	DeleteDomain(operatorID uint64, domainID uint64) error
 	ListMembers(domainID uint64) ([]model.DomainMemberItem, error)
 	AddMember(operatorID uint64, domainID uint64, req model.AddDomainMemberRequest) error
 	UpdateMemberRole(operatorID uint64, domainID, targetUserID uint64, req model.UpdateDomainMemberRoleRequest) error
 	RemoveMember(operatorID uint64, domainID, targetUserID uint64) error
 	CanManageDomain(domainID, userID uint64) (bool, *model.BizDomain, string, error)
+	SetAuditRepos(auditRepo repository.AuditLogRepository, userRepo repository.UserRepository)
 }
 
 type domainService struct {
 	domainRepo repository.DomainRepository
 	userRepo   repository.UserRepository
 	orgRepo    repository.OrgRepository
+	auditRepo  repository.AuditLogRepository
 }
 
 func NewDomainService(domainRepo repository.DomainRepository, userRepo repository.UserRepository, orgRepo repository.OrgRepository) DomainService {
@@ -36,16 +40,27 @@ func NewDomainService(domainRepo repository.DomainRepository, userRepo repositor
 	}
 }
 
-func (s *domainService) ListDomains(userID uint64, q model.DomainQuery) ([]model.DomainListItem, error) {
-	var orgIDs []uint64
+func (s *domainService) SetAuditRepos(auditRepo repository.AuditLogRepository, userRepo repository.UserRepository) {
+	s.auditRepo = auditRepo
+	if userRepo != nil {
+		s.userRepo = userRepo
+	}
+}
+
+func (s *domainService) ListDomains(userID uint64, q model.DomainQuery) ([]model.DomainListItem, int64, error) {
+	var userOrgIDs, adminOrgIDs []uint64
 	if s.orgRepo != nil {
 		var err error
-		orgIDs, err = s.orgRepo.GetUserOrgIDs(userID)
+		userOrgIDs, err = s.orgRepo.GetUserOrgIDs(userID)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
+		}
+		adminOrgIDs, err = s.orgRepo.GetUserAdminOrgIDs(userID)
+		if err != nil {
+			return nil, 0, err
 		}
 	}
-	return s.domainRepo.ListDomains(userID, q, orgIDs)
+	return s.domainRepo.ListDomains(userID, q, userOrgIDs, adminOrgIDs)
 }
 
 func (s *domainService) CreateDomain(userID uint64, req model.CreateDomainRequest) (*model.DomainListItem, error) {
@@ -62,6 +77,10 @@ func (s *domainService) CreateDomain(userID uint64, req model.CreateDomainReques
 
 	orgID := req.OrgID
 	orgName := "个人"
+	if visibility == model.DomainVisibilityOrgPrivate && orgID == 0 {
+		return nil, NewForbidden("仅组织创建者或组织管理员可创建组织私有域")
+	}
+
 	if orgID > 0 {
 		if s.orgRepo == nil {
 			return nil, NewBadRequest("organization module not configured")
@@ -77,7 +96,11 @@ func (s *domainService) CreateDomain(userID uint64, req model.CreateDomainReques
 		if err != nil {
 			return nil, err
 		}
-		if orgRole == "" && org.OwnerID != userID {
+		if visibility == model.DomainVisibilityOrgPrivate {
+			if org.OwnerID != userID && orgRole != model.OrgRoleOwner && orgRole != model.OrgRoleAdmin {
+				return nil, NewForbidden("仅组织创建者或组织管理员可创建组织私有域")
+			}
+		} else if orgRole == "" && org.OwnerID != userID {
 			return nil, NewForbidden("you must be a member of the organization to create a domain under it")
 		}
 		orgName = org.OrgName
@@ -104,6 +127,8 @@ func (s *domainService) CreateDomain(userID uint64, req model.CreateDomainReques
 		return nil, err
 	}
 
+	recordAudit(s.auditRepo, s.userRepo, userID, domain.ID, domain.DomainName, domain.ID, domain.DomainCode, domain.DomainName, "domain", model.AuditActionDomainCreate, domain.DomainName, fmt.Sprintf("创建域 %s (%s)", domain.DomainName, domain.Visibility))
+
 	return &model.DomainListItem{
 		ID:           domain.ID,
 		DomainUID:    domain.DomainUID,
@@ -129,7 +154,13 @@ func (s *domainService) UpdateDomain(operatorID uint64, domainID uint64, req mod
 		return nil, err
 	}
 	if !allowed {
-		return nil, NewForbidden("only domain creator or assigned domain admin can manage this domain")
+		return nil, NewForbidden("no permission to manage this domain")
+	}
+
+	if req.Visibility == model.DomainVisibilityOrgPrivate {
+		if domain.OrgID == 0 || !s.isOrgAdminOrOwner(domain.OrgID, operatorID) {
+			return nil, NewForbidden("仅组织创建者或组织管理员可设置组织私有域")
+		}
 	}
 
 	if req.DomainName != "" {
@@ -145,6 +176,8 @@ func (s *domainService) UpdateDomain(operatorID uint64, domainID uint64, req mod
 	if err := s.domainRepo.UpdateDomain(domain); err != nil {
 		return nil, err
 	}
+
+	recordAudit(s.auditRepo, s.userRepo, operatorID, domain.ID, domain.DomainName, domain.ID, domain.DomainCode, domain.DomainName, "domain", model.AuditActionDomainUpdate, domain.DomainName, "更新域信息 "+domain.DomainName)
 
 	members, _ := s.domainRepo.ListMembers(domainID)
 	return &model.DomainListItem{
@@ -165,6 +198,22 @@ func (s *domainService) UpdateDomain(operatorID uint64, domainID uint64, req mod
 	}, nil
 }
 
+func (s *domainService) DeleteDomain(operatorID uint64, domainID uint64) error {
+	allowed, domain, _, err := s.CanManageDomain(domainID, operatorID)
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return NewForbidden("no permission to delete this domain")
+	}
+
+	if err := s.domainRepo.DeleteDomain(domainID); err != nil {
+		return err
+	}
+	recordAudit(s.auditRepo, s.userRepo, operatorID, domain.ID, domain.DomainName, domain.ID, domain.DomainCode, domain.DomainName, "domain", model.AuditActionDomainDelete, domain.DomainName, "删除域 "+domain.DomainName)
+	return nil
+}
+
 func (s *domainService) ListMembers(domainID uint64) ([]model.DomainMemberItem, error) {
 	if _, err := s.domainRepo.FindByID(domainID); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -181,13 +230,13 @@ func (s *domainService) AddMember(operatorID uint64, domainID uint64, req model.
 		return err
 	}
 	if !allowed {
-		return NewForbidden("only domain creator or assigned domain admin can manage members")
+		return NewForbidden("no permission to manage domain members")
 	}
 
 	if req.DomainRole == model.DomainRoleOwner {
 		return NewForbidden("cannot assign owner role")
 	}
-	if req.DomainRole == model.DomainRoleAdmin && domain.OwnerID != operatorID {
+	if domain.Visibility != model.DomainVisibilityOrgPrivate && req.DomainRole == model.DomainRoleAdmin && domain.OwnerID != operatorID {
 		return NewForbidden("only domain creator can assign domain admin")
 	}
 
@@ -215,26 +264,31 @@ func (s *domainService) AddMember(operatorID uint64, domainID uint64, req model.
 	if err != nil {
 		return err
 	}
-	if existingRole == model.DomainRoleAdmin && domain.OwnerID != operatorID {
+	if domain.Visibility != model.DomainVisibilityOrgPrivate && existingRole == model.DomainRoleAdmin && domain.OwnerID != operatorID {
 		return NewForbidden("only domain creator can modify domain admin")
 	}
 
-	return s.domainRepo.UpsertMember(&model.DomainMember{
+	if err := s.domainRepo.UpsertMember(&model.DomainMember{
 		DomainID:   domainID,
 		UserID:     targetUser.ID,
 		DomainRole: req.DomainRole,
-	})
+	}); err != nil {
+		return err
+	}
+
+	recordAudit(s.auditRepo, s.userRepo, operatorID, domain.ID, domain.DomainName, domain.ID, domain.DomainCode, domain.DomainName, "domain", model.AuditActionDomainMemberAdd, targetUser.Username, fmt.Sprintf("添加域成员 %s (%s)", targetUser.Username, req.DomainRole))
+	return nil
 }
 
 func (s *domainService) UpdateMemberRole(operatorID uint64, domainID, targetUserID uint64, req model.UpdateDomainMemberRoleRequest) error {
-	domain, err := s.domainRepo.FindByID(domainID)
+	allowed, domain, _, err := s.CanManageDomain(domainID, operatorID)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return NewNotFound("domain not found")
-		}
 		return err
 	}
-	if domain.OwnerID != operatorID {
+	if !allowed {
+		return NewForbidden("no permission to update domain member role")
+	}
+	if domain.Visibility != model.DomainVisibilityOrgPrivate && domain.OwnerID != operatorID {
 		return NewForbidden("only domain creator can update member roles")
 	}
 	if targetUserID == domain.OwnerID {
@@ -262,7 +316,7 @@ func (s *domainService) RemoveMember(operatorID uint64, domainID, targetUserID u
 		return err
 	}
 	if !allowed {
-		return NewForbidden("only domain creator or assigned domain admin can remove members")
+		return NewForbidden("no permission to remove domain members")
 	}
 	if targetUserID == domain.OwnerID {
 		return NewForbidden("cannot remove domain creator")
@@ -275,7 +329,7 @@ func (s *domainService) RemoveMember(operatorID uint64, domainID, targetUserID u
 	if targetRole == "" {
 		return NewNotFound("domain member not found")
 	}
-	if targetRole == model.DomainRoleAdmin && domain.OwnerID != operatorID {
+	if domain.Visibility != model.DomainVisibilityOrgPrivate && targetRole == model.DomainRoleAdmin && domain.OwnerID != operatorID {
 		return NewForbidden("only domain creator can remove a domain admin")
 	}
 
@@ -283,10 +337,23 @@ func (s *domainService) RemoveMember(operatorID uint64, domainID, targetUserID u
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return NewNotFound("domain member not found")
 	}
-	return err
+	if err != nil {
+		return err
+	}
+
+	targetName := fmt.Sprintf("user#%d", targetUserID)
+	if s.userRepo != nil {
+		if u, uErr := s.userRepo.FindByID(targetUserID); uErr == nil {
+			targetName = u.Username
+		}
+	}
+	recordAudit(s.auditRepo, s.userRepo, operatorID, domain.ID, domain.DomainName, domain.ID, domain.DomainCode, domain.DomainName, "domain", model.AuditActionDomainMemberRemove, targetName, "移除域成员 "+targetName)
+	return nil
 }
 
-// CanManageDomain enforces strict domain management: ONLY domain creator or assigned domain admin.
+// CanManageDomain enforces strict domain management:
+// - org_private: ONLY organization owner or organization admin of domain.OrgID.
+// - public / private: ONLY domain creator or assigned domain admin.
 func (s *domainService) CanManageDomain(domainID, userID uint64) (bool, *model.BizDomain, string, error) {
 	domain, err := s.domainRepo.FindByID(domainID)
 	if err != nil {
@@ -299,8 +366,31 @@ func (s *domainService) CanManageDomain(domainID, userID uint64) (bool, *model.B
 	if err != nil {
 		return false, nil, "", err
 	}
+
+	if domain.Visibility == model.DomainVisibilityOrgPrivate && domain.OrgID > 0 {
+		return s.isOrgAdminOrOwner(domain.OrgID, userID), domain, role, nil
+	}
+
 	allowed := domain.OwnerID == userID || role == model.DomainRoleOwner || role == model.DomainRoleAdmin
 	return allowed, domain, role, nil
+}
+
+func (s *domainService) isOrgAdminOrOwner(orgID, userID uint64) bool {
+	if s.orgRepo == nil || orgID == 0 {
+		return false
+	}
+	org, err := s.orgRepo.FindByID(orgID)
+	if err != nil {
+		return false
+	}
+	if org.OwnerID == userID {
+		return true
+	}
+	orgRole, err := s.orgRepo.GetMemberRole(orgID, userID)
+	if err != nil {
+		return false
+	}
+	return orgRole == model.OrgRoleOwner || orgRole == model.OrgRoleAdmin
 }
 
 func generateDomainUID() (string, error) {

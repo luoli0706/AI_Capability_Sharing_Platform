@@ -21,21 +21,37 @@ func NewDomainHandler(domainSvc service.DomainService) *DomainHandler {
 
 func (h *DomainHandler) ListDomains(c echo.Context) error {
 	orgID, _ := strconv.ParseUint(c.QueryParam("org_id"), 10, 64)
+	page, _ := strconv.Atoi(c.QueryParam("page"))
+	if page <= 0 {
+		page = 1
+	}
+	pageSize, _ := strconv.Atoi(c.QueryParam("page_size"))
+	if pageSize <= 0 {
+		pageSize = 12
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+
 	q := model.DomainQuery{
 		Tab:       c.QueryParam("tab"),
 		Keyword:   c.QueryParam("keyword"),
 		DomainUID: c.QueryParam("domain_uid"),
 		OrgID:     orgID,
+		Page:      page,
+		PageSize:  pageSize,
 	}
 
 	userID := middleware.GetUserID(c)
-	list, err := h.domainSvc.ListDomains(userID, q)
+	list, total, err := h.domainSvc.ListDomains(userID, q)
 	if err != nil {
 		return service.HandleError(c, err)
 	}
 	return response.Success(c, map[string]interface{}{
-		"list":  list,
-		"total": len(list),
+		"list":      list,
+		"total":     total,
+		"page":      page,
+		"page_size": pageSize,
 	})
 }
 
@@ -72,18 +88,36 @@ func (h *DomainHandler) UpdateDomain(c echo.Context) error {
 	return response.Success(c, domain)
 }
 
-func (h *DomainHandler) ListMembers(c echo.Context) error {
+func (h *DomainHandler) DeleteDomain(c echo.Context) error {
 	domainID, ok := parseUintParam(c, "id")
 	if !ok {
 		return nil
 	}
 
+	userID := middleware.GetUserID(c)
+	if err := h.domainSvc.DeleteDomain(userID, domainID); err != nil {
+		return service.HandleError(c, err)
+	}
+	return response.Success(c, nil)
+}
+
+func (h *DomainHandler) ListMembers(c echo.Context) error {
+	domainID, ok := parseUintParam(c, "id")
+	if !ok {
+		return nil
+	}
+	page, pageSize := parsePageParams(c)
+
 	list, err := h.domainSvc.ListMembers(domainID)
 	if err != nil {
 		return service.HandleError(c, err)
 	}
+	paged, total := paginateSlice(list, page, pageSize)
 	return response.Success(c, map[string]interface{}{
-		"list": list,
+		"list":      paged,
+		"total":     total,
+		"page":      page,
+		"page_size": pageSize,
 	})
 }
 

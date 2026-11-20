@@ -14,6 +14,9 @@ const activeTab = ref<'pending' | 'my' | 'handled'>('pending')
 const targetTypeFilter = ref<'' | 'asset_publish' | 'asset_access'>('')
 const loading = ref(false)
 const list = ref<ApprovalRequest[]>([])
+const total = ref(0)
+const page = ref(1)
+const pageSize = ref(10)
 
 const filteredList = computed(() => {
   if (!targetTypeFilter.value) return list.value
@@ -38,22 +41,32 @@ async function fetchList() {
   loading.value = true
   try {
     let res
+    const params = { page: page.value, page_size: pageSize.value }
     if (activeTab.value === 'pending') {
-      res = await getPendingApprovals({ page: 1, page_size: 50 })
+      res = await getPendingApprovals(params)
     } else if (activeTab.value === 'my') {
-      res = await getMyRequests({ page: 1, page_size: 50 })
+      res = await getMyRequests(params)
     } else {
-      res = await getHandledApprovals({ page: 1, page_size: 50 })
+      res = await getHandledApprovals(params)
     }
-    list.value = normalizeList(res).items
+    const normalized = normalizeList(res)
+    list.value = normalized.items
+    total.value = normalized.total
   } catch {
     list.value = []
+    total.value = 0
   } finally {
     loading.value = false
   }
 }
 
 function handleTabChange() {
+  page.value = 1
+  fetchList()
+}
+
+function handlePageChange(newPage: number) {
+  page.value = newPage
   fetchList()
 }
 
@@ -220,6 +233,17 @@ onMounted(() => {
           <el-empty description="暂无审批记录" />
         </template>
       </el-table>
+
+      <div v-if="total > 0" class="table-pagination">
+        <el-pagination
+          v-model:current-page="page"
+          :page-size="pageSize"
+          :total="total"
+          layout="total, prev, pager, next"
+          background
+          @current-change="handlePageChange"
+        />
+      </div>
     </div>
 
     <!-- Approval Timeline Drawer -->
@@ -370,6 +394,12 @@ onMounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.table-pagination {
+  padding: 14px 18px 0;
+  display: flex;
+  justify-content: flex-end;
 }
 
 .req-no {

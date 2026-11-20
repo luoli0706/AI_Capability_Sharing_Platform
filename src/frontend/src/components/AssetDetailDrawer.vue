@@ -418,7 +418,7 @@ async function handleRunInvoke() {
         <el-tab-pane label="配置与元数据" name="overview">
           <div class="tab-section">
             <el-descriptions :column="2" border size="small">
-              <el-descriptions-item label="所属业务域">
+              <el-descriptions-item label="所属域">
                 {{ detail.domain_name || `域 #${detail.domain_id}` }}
               </el-descriptions-item>
               <el-descriptions-item label="资产负责人">

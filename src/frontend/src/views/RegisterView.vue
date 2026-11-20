@@ -37,8 +37,21 @@ const rules: FormRules = {
   ],
   nickname: [{ max: 32, message: '昵称不超过 32 个字符', trigger: 'blur' }],
   email: [
-    { required: true, message: '请输入邮箱地址', trigger: 'blur' },
-    { type: 'email', message: '请输入有效的邮箱格式', trigger: 'blur' }
+    {
+      validator: (_rule: unknown, value: string, callback: (err?: Error) => void) => {
+        if (!value || !value.trim()) {
+          callback()
+          return
+        }
+        const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+        if (!emailRe.test(value.trim())) {
+          callback(new Error('请输入有效的邮箱格式'))
+          return
+        }
+        callback()
+      },
+      trigger: 'blur'
+    }
   ],
   password: [
     { required: true, message: '请输入密码', trigger: 'blur' },
@@ -57,7 +70,7 @@ async function handleSubmit() {
     await register({
       username: form.username.trim(),
       nickname: form.nickname.trim() || form.username.trim(),
-      email: form.email.trim(),
+      email: form.email.trim() || undefined,
       password: form.password
     })
     ElMessage.success('注册成功，请登录')
@@ -98,7 +111,7 @@ async function handleSubmit() {
 
         <h1 class="showcase-title">加入 AI 能力共享协作网络</h1>
         <p class="showcase-desc">
-          注册账号后即可进入业务域空间，浏览团队内能力广场、参与业务域协作，并创建发布您的 MCP 服务、Skills 与 Agent 资产。
+          注册账号后即可进入域空间，浏览团队内能力广场、参与域协作，并创建发布您的 MCP 服务、Skills 与 Agent 资产。
         </p>
       </div>
     </section>
@@ -135,10 +148,10 @@ async function handleSubmit() {
             />
           </el-form-item>
 
-          <el-form-item label="工作邮箱" prop="email">
+          <el-form-item label="邮箱（选填）" prop="email">
             <el-input
               v-model="form.email"
-              placeholder="name@company.com"
+              placeholder="选填，例如 name@example.com"
               :prefix-icon="Message"
               autocomplete="email"
             />

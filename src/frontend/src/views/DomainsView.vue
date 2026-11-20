@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   CopyDocument,
+  Delete,
   Edit,
   Lock,
   OfficeBuilding,
@@ -12,12 +13,12 @@ import {
   Unlock,
   UserFilled
 } from '@element-plus/icons-vue'
-import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
-import { createDomain, getDomains, updateDomain } from '@/api/domain'
+import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
+import { createDomain, deleteDomain, getDomains, updateDomain } from '@/api/domain'
 import { getOrgs } from '@/api/org'
 import { useDomainStore } from '@/stores/domain'
 import type { DomainItem, DomainVisibility, OrgItem } from '@/types/api'
-import { getRoleLabel, normalizeList } from '@/utils/format'
+import { getDomainVisibilityMeta, getRoleLabel, normalizeList } from '@/utils/format'
 
 const router = useRouter()
 const domainStore = useDomainStore()
@@ -25,6 +26,9 @@ const domainStore = useDomainStore()
 const activeTab = ref<'mine' | 'square'>('mine')
 const loading = ref(false)
 const domains = ref<DomainItem[]>([])
+const total = ref(0)
+const page = ref(1)
+const pageSize = ref(12)
 const searchText = ref('')
 const myOrgs = ref<OrgItem[]>([])
 
@@ -46,10 +50,16 @@ const createForm = reactive<{
   visibility: 'public'
 })
 
+const canCreateOrgPrivate = computed(() => {
+  if (!createForm.org_id) return false
+  const org = myOrgs.value.find((o) => o.id === createForm.org_id)
+  return org?.my_role === 'owner' || org?.my_role === 'admin'
+})
+
 const createRules: FormRules = {
-  domain_name: [{ required: true, message: '请输入业务域名称', trigger: 'blur' }],
+  domain_name: [{ required: true, message: '请输入域名称', trigger: 'blur' }],
   domain_code: [
-    { required: true, message: '请输入业务域编码', trigger: 'blur' },
+    { required: true, message: '请输入域编码', trigger: 'blur' },
     { pattern: /^[a-zA-Z0-9_-]+$/, message: '仅支持字母、数字、下划线和连字符', trigger: 'blur' }
   ]
 }
@@ -59,6 +69,7 @@ const editModalOpen = ref(false)
 const editFormRef = ref<FormInstance>()
 const editing = ref(false)
 const editDomainId = ref<number | null>(null)
+const editDomainOrgId = ref<number>(0)
 const editForm = reactive<{
   domain_name: string
   description: string
@@ -69,8 +80,15 @@ const editForm = reactive<{
   visibility: 'public'
 })
 
+const canEditOrgPrivate = computed(() => {
+  if (!editDomainOrgId.value) return false
+  if (editForm.visibility === 'org_private') return true
+  const org = myOrgs.value.find((o) => o.id === editDomainOrgId.value)
+  return org?.my_role === 'owner' || org?.my_role === 'admin'
+})
+
 const editRules: FormRules = {
-  domain_name: [{ required: true, message: '请输入业务域名称', trigger: 'blur' }]
+  domain_name: [{ required: true, message: '请输入域名称', trigger: 'blur' }]
 }
 
 async function fetchDomainList() {
@@ -82,12 +100,15 @@ async function fetchDomainList() {
       tab: activeTab.value,
       keyword: q && !isUidQuery ? q : undefined,
       domain_uid: isUidQuery ? q.toUpperCase() : undefined,
-      page: 1,
-      page_size: 100
+      page: page.value,
+      page_size: pageSize.value
     })
-    domains.value = normalizeList(res).items
+    const normalized = normalizeList(res)
+    domains.value = normalized.items
+    total.value = normalized.total
   } catch {
     domains.value = []
+    total.value = 0
   } finally {
     loading.value = false
   }
@@ -104,7 +125,24 @@ async function fetchMyOrgs() {
 
 function handleTabChange() {
   searchText.value = ''
+  page.value = 1
   fetchDomainList()
+}
+
+function handleSearch() {
+  page.value = 1
+  fetchDomainList()
+}
+
+function handlePageChange(newPage: number) {
+  page.value = newPage
+  fetchDomainList()
+}
+
+function handleCreateOrgChange() {
+  if (!canCreateOrgPrivate.value && createForm.visibility === 'org_private') {
+    createForm.visibility = 'public'
+  }
 }
 
 function openCreateModal() {
@@ -132,7 +170,7 @@ async function handleCreateDomain() {
       visibility: createForm.visibility,
       org_id: createForm.org_id
     })
-    ElMessage.success('业务域创建成功')
+    ElMessage.success('域创建成功')
     createModalOpen.value = false
     await domainStore.fetchDomains(true)
     fetchDomainList()
@@ -145,10 +183,12 @@ async function handleCreateDomain() {
 
 function openEditModal(domain: DomainItem) {
   editDomainId.value = domain.id
+  editDomainOrgId.value = domain.org_id || 0
   editForm.domain_name = domain.domain_name
   editForm.description = domain.description || ''
   editForm.visibility = domain.visibility || 'public'
   editFormRef.value?.clearValidate()
+  fetchMyOrgs()
   editModalOpen.value = true
 }
 
@@ -164,7 +204,7 @@ async function handleUpdateDomain() {
       description: editForm.description.trim(),
       visibility: editForm.visibility
     })
-    ElMessage.success('业务域信息已更新')
+    ElMessage.success('域信息已更新')
     editModalOpen.value = false
     await domainStore.fetchDomains(true)
     fetchDomainList()
@@ -172,6 +212,26 @@ async function handleUpdateDomain() {
     // Handled by interceptor
   } finally {
     editing.value = false
+  }
+}
+
+async function handleDeleteDomain(domain: DomainItem) {
+  try {
+    await ElMessageBox.confirm(
+      `确认删除域「${domain.domain_name}」吗？删除后该域及其成员关系将被清除。`,
+      '删除域确认',
+      {
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消',
+        type: 'error'
+      }
+    )
+    await deleteDomain(domain.id)
+    ElMessage.success('域已删除')
+    await domainStore.fetchDomains(true)
+    fetchDomainList()
+  } catch {
+    // Cancelled or failed
   }
 }
 
@@ -211,15 +271,15 @@ onMounted(() => {
   <div class="page-container">
     <div class="page-header">
       <div>
-        <h1 class="page-title">业务域大厅</h1>
-        <p class="page-subtitle">选择一个研发团队业务域进入，查看域内能力广场、管理 AI 资产与私有知识库</p>
+        <h1 class="page-title">域大厅</h1>
+        <p class="page-subtitle">浏览、搜索并进入域空间，管理域成员与共享权限边界</p>
       </div>
-      <el-button type="primary" :icon="Plus" @click="openCreateModal">创建业务域</el-button>
+      <el-button type="primary" :icon="Plus" @click="openCreateModal">创建域</el-button>
     </div>
 
     <div class="surface-card tabs-toolbar">
       <el-tabs v-model="activeTab" @tab-change="handleTabChange">
-        <el-tab-pane label="我的业务域" name="mine" />
+        <el-tab-pane label="我的域" name="mine" />
         <el-tab-pane label="域广场" name="square" />
       </el-tabs>
 
@@ -229,20 +289,20 @@ onMounted(() => {
           :placeholder="
             activeTab === 'square'
               ? '按名称搜索公开域，或输入唯一域 ID (如 DOM-...) 精确查找私密域'
-              : '搜索我的业务域名称或编码...'
+              : '搜索我的域名称或编码...'
           "
           clearable
           :prefix-icon="Search"
           style="max-width: 520px; flex: 1"
-          @keyup.enter="fetchDomainList"
-          @clear="fetchDomainList"
+          @keyup.enter="handleSearch"
+          @clear="handleSearch"
         />
-        <el-button type="primary" plain @click="fetchDomainList">搜索</el-button>
+        <el-button type="primary" plain @click="handleSearch">搜索</el-button>
       </div>
 
       <el-alert
         v-if="activeTab === 'square'"
-        title="私密域不会出现在域广场默认列表或名称搜索中，仅支持通过唯一域 ID（如 DOM-...）精确查找。"
+        title="私密域与组织私有域不会出现在域广场默认列表或名称搜索中，私密域仅支持通过唯一域 ID（如 DOM-...）精确查找。"
         type="info"
         show-icon
         :closable="false"
@@ -261,7 +321,7 @@ onMounted(() => {
         :description="
           activeTab === 'square'
             ? '未找到匹配的公开域或对应唯一域 ID 的私密域'
-            : '暂无可访问的业务域，点击右上角「创建业务域」开始初始化团队空间'
+            : '暂无可访问的域，点击右上角「创建域」开始初始化团队空间'
         "
       />
     </div>
@@ -274,15 +334,15 @@ onMounted(() => {
           </div>
           <div class="badge-group">
             <el-tag
-              :type="domain.visibility === 'private' ? 'warning' : 'success'"
+              :type="getDomainVisibilityMeta(domain.visibility).tagType"
               size="small"
               effect="plain"
             >
               <el-icon style="margin-right: 3px; vertical-align: -1px">
-                <Lock v-if="domain.visibility === 'private'" />
+                <Lock v-if="domain.visibility === 'private' || domain.visibility === 'org_private'" />
                 <Unlock v-else />
               </el-icon>
-              {{ domain.visibility === 'private' ? '私密' : '公开' }}
+              {{ getDomainVisibilityMeta(domain.visibility).label }}
             </el-tag>
             <el-tag size="small" type="info" effect="light">
               {{ domain.org_id && domain.org_name ? domain.org_name : '个人' }}
@@ -322,7 +382,7 @@ onMounted(() => {
           </button>
         </div>
 
-        <p class="domain-desc">{{ domain.description || '暂无业务域描述' }}</p>
+        <p class="domain-desc">{{ domain.description || '暂无域描述' }}</p>
 
         <div class="domain-meta">
           <div class="member-stat tabular-nums">
@@ -338,7 +398,17 @@ onMounted(() => {
               :icon="Edit"
               @click="openEditModal(domain)"
             >
-              编辑域
+              编辑
+            </el-button>
+            <el-button
+              v-if="domain.can_manage"
+              link
+              type="danger"
+              size="small"
+              :icon="Delete"
+              @click="handleDeleteDomain(domain)"
+            >
+              删除
             </el-button>
             <el-button link type="info" size="small" @click="goMembers(domain)">
               成员管理
@@ -355,18 +425,29 @@ onMounted(() => {
       </div>
     </div>
 
+    <div v-if="total > pageSize" class="pagination-wrap">
+      <el-pagination
+        v-model:current-page="page"
+        :page-size="pageSize"
+        :total="total"
+        layout="total, prev, pager, next"
+        background
+        @current-change="handlePageChange"
+      />
+    </div>
+
     <!-- Create Domain Modal -->
-    <el-dialog v-model="createModalOpen" title="创建业务域" width="500px" destroy-on-close>
+    <el-dialog v-model="createModalOpen" title="创建域" width="520px" destroy-on-close>
       <el-form
         ref="createFormRef"
         :model="createForm"
         :rules="createRules"
         label-position="top"
       >
-        <el-form-item label="业务域名称" prop="domain_name">
+        <el-form-item label="域名称" prop="domain_name">
           <el-input v-model="createForm.domain_name" placeholder="例如：智能客服研发域" />
         </el-form-item>
-        <el-form-item label="业务域编码" prop="domain_code">
+        <el-form-item label="域编码" prop="domain_code">
           <el-input
             v-model="createForm.domain_code"
             placeholder="例如：smart-cs-domain"
@@ -374,7 +455,11 @@ onMounted(() => {
           />
         </el-form-item>
         <el-form-item label="所属组织">
-          <el-select v-model="createForm.org_id" style="width: 100%">
+          <el-select
+            v-model="createForm.org_id"
+            style="width: 100%"
+            @change="handleCreateOrgChange"
+          >
             <el-option label="个人 (未加入组织或个人私有)" :value="0" />
             <el-option
               v-for="org in myOrgs"
@@ -386,8 +471,13 @@ onMounted(() => {
         </el-form-item>
         <el-form-item label="可见性">
           <el-radio-group v-model="createForm.visibility" class="visibility-radios">
-            <el-radio value="public">公开域（域广场可见/可搜）</el-radio>
+            <el-radio value="public">
+              {{ createForm.org_id > 0 ? '公开域 / 组织公有域（域广场可见，组织成员共享）' : '公开域（域广场可见/可搜）' }}
+            </el-radio>
             <el-radio value="private">私密域（仅通过唯一域 ID 搜索）</el-radio>
+            <el-radio v-if="canCreateOrgPrivate" value="org_private">
+              组织私有域（仅组织创建者/管理员可管理与邀请，对其他组织成员不可见）
+            </el-radio>
           </el-radio-group>
         </el-form-item>
         <el-form-item label="描述说明" prop="description">
@@ -395,7 +485,7 @@ onMounted(() => {
             v-model="createForm.description"
             type="textarea"
             :rows="3"
-            placeholder="说明该业务域承载的团队职责与 AI 能力范围..."
+            placeholder="说明该域承载的团队职责与 AI 能力范围..."
           />
         </el-form-item>
       </el-form>
@@ -408,20 +498,23 @@ onMounted(() => {
     </el-dialog>
 
     <!-- Edit Domain Modal -->
-    <el-dialog v-model="editModalOpen" title="编辑业务域" width="480px" destroy-on-close>
+    <el-dialog v-model="editModalOpen" title="编辑域" width="520px" destroy-on-close>
       <el-form
         ref="editFormRef"
         :model="editForm"
         :rules="editRules"
         label-position="top"
       >
-        <el-form-item label="业务域名称" prop="domain_name">
+        <el-form-item label="域名称" prop="domain_name">
           <el-input v-model="editForm.domain_name" />
         </el-form-item>
         <el-form-item label="可见性">
           <el-radio-group v-model="editForm.visibility" class="visibility-radios">
             <el-radio value="public">公开域（域广场可见/可搜）</el-radio>
             <el-radio value="private">私密域（仅通过唯一域 ID 搜索）</el-radio>
+            <el-radio v-if="canEditOrgPrivate" value="org_private">
+              组织私有域（仅组织创建者/管理员可管理与邀请，对其他组织成员不可见）
+            </el-radio>
           </el-radio-group>
         </el-form-item>
         <el-form-item label="描述说明" prop="description">
@@ -582,10 +675,16 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 6px;
+  gap: 8px;
 }
 
 .empty-box {
   padding: 48px 16px;
+}
+
+.pagination-wrap {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 4px;
 }
 </style>

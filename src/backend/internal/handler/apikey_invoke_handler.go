@@ -20,12 +20,19 @@ func NewAPIKeyHandler(keySvc service.APIKeyService) *APIKeyHandler {
 }
 
 func (h *APIKeyHandler) ListKeys(c echo.Context) error {
+	page, pageSize := parsePageParams(c)
 	userID := middleware.GetUserID(c)
 	list, err := h.keySvc.ListKeys(userID)
 	if err != nil {
 		return service.HandleError(c, err)
 	}
-	return response.Success(c, map[string]interface{}{"list": list})
+	paged, total := paginateSlice(list, page, pageSize)
+	return response.Success(c, map[string]interface{}{
+		"list":      paged,
+		"total":     total,
+		"page":      page,
+		"page_size": pageSize,
+	})
 }
 
 func (h *APIKeyHandler) CreateKey(c echo.Context) error {

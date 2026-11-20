@@ -215,3 +215,51 @@ func (h *KBHandler) Download(c echo.Context) error {
 	c.Response().Header().Set(echo.HeaderContentDisposition, fmt.Sprintf(`attachment; filename="%s"`, filename))
 	return c.Blob(http.StatusOK, contentType, data)
 }
+
+func (h *KBHandler) MoveDocument(c echo.Context) error {
+	kbID, ok := parseUintParam(c, "id")
+	if !ok {
+		return nil
+	}
+	docID, ok := parseUintParam(c, "docId")
+	if !ok {
+		return nil
+	}
+
+	var req model.MoveKBDocumentRequest
+	if !bindAndValidate(c, &req) {
+		return nil
+	}
+
+	userID := middleware.GetUserID(c)
+	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
+	doc, err := h.kbSvc.MoveDocument(userID, isSuperAdmin, kbID, docID, req.TargetFolderPath)
+	if err != nil {
+		return service.HandleError(c, err)
+	}
+	return response.Success(c, doc)
+}
+
+func (h *KBHandler) CopyDocument(c echo.Context) error {
+	kbID, ok := parseUintParam(c, "id")
+	if !ok {
+		return nil
+	}
+	docID, ok := parseUintParam(c, "docId")
+	if !ok {
+		return nil
+	}
+
+	var req model.CopyKBDocumentRequest
+	if !bindAndValidate(c, &req) {
+		return nil
+	}
+
+	userID := middleware.GetUserID(c)
+	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
+	doc, err := h.kbSvc.CopyDocument(userID, isSuperAdmin, kbID, docID, req.TargetFolderPath, req.NewName)
+	if err != nil {
+		return service.HandleError(c, err)
+	}
+	return response.Success(c, doc)
+}

@@ -50,6 +50,7 @@ func main() {
 	govRepo := repository.NewGovernanceRepository(db)
 	keyRepo := repository.NewAPIKeyRepository(db)
 	logRepo := repository.NewInvokeLogRepository(db)
+	auditRepo := repository.NewAuditLogRepository(db)
 
 	// Services
 	authSvc := service.NewAuthService(userRepo, cfg.JWT)
@@ -60,6 +61,13 @@ func main() {
 	govSvc := service.NewGovernanceService(govRepo, assetRepo, domainRepo, orgRepo)
 	keySvc := service.NewAPIKeyService(keyRepo)
 	invokeSvc := service.NewInvokeService(assetRepo, domainRepo, govRepo, kbRepo, logRepo, orgRepo)
+	auditSvc := service.NewAuditService(auditRepo, domainRepo, orgRepo)
+
+	assetSvc.SetAuditRepos(auditRepo, userRepo)
+	kbSvc.SetAuditRepos(auditRepo, userRepo)
+	govSvc.SetAuditRepos(auditRepo, userRepo)
+	domainSvc.SetAuditRepos(auditRepo, userRepo)
+	orgSvc.SetAuditRepos(auditRepo, userRepo)
 
 	// Handlers
 	authHandler := handler.NewAuthHandler(authSvc)
@@ -70,6 +78,7 @@ func main() {
 	govHandler := handler.NewGovernanceHandler(govSvc)
 	apiKeyHandler := handler.NewAPIKeyHandler(keySvc)
 	invokeHandler := handler.NewInvokeHandler(invokeSvc)
+	auditHandler := handler.NewAuditHandler(auditSvc)
 
 	e := echo.New()
 	e.HideBanner = true
@@ -117,6 +126,8 @@ func main() {
 	protected.GET("/orgs", orgHandler.ListOrgs)
 	protected.POST("/orgs", orgHandler.CreateOrg)
 	protected.GET("/orgs/:id", orgHandler.GetOrgDetail)
+	protected.PUT("/orgs/:id", orgHandler.UpdateOrg)
+	protected.DELETE("/orgs/:id", orgHandler.DeleteOrg)
 	protected.GET("/orgs/:id/members", orgHandler.ListMembers)
 	protected.POST("/orgs/:id/members", orgHandler.AddMember)
 	protected.DELETE("/orgs/:id/members/:userId", orgHandler.RemoveMember)
@@ -124,6 +135,7 @@ func main() {
 	protected.GET("/domains", domainHandler.ListDomains)
 	protected.POST("/domains", domainHandler.CreateDomain)
 	protected.PUT("/domains/:id", domainHandler.UpdateDomain)
+	protected.DELETE("/domains/:id", domainHandler.DeleteDomain)
 	protected.GET("/domains/:id/members", domainHandler.ListMembers)
 	protected.POST("/domains/:id/members", domainHandler.AddMember)
 	protected.PUT("/domains/:id/members/:userId", domainHandler.UpdateMemberRole)
@@ -157,9 +169,12 @@ func main() {
 	protected.GET("/kb/:id/documents/:docId/content", kbHandler.GetDocumentContent)
 	protected.GET("/kb/:id/documents/:docId/chunks", kbHandler.ListChunks)
 	protected.DELETE("/kb/:id/documents/:docId", kbHandler.DeleteDocument)
+	protected.POST("/kb/:id/documents/:docId/move", kbHandler.MoveDocument)
+	protected.POST("/kb/:id/documents/:docId/copy", kbHandler.CopyDocument)
 	protected.POST("/kb/:id/search", kbHandler.Search)
 	protected.GET("/kb/:id/download/preview", kbHandler.DownloadPreview)
 	protected.GET("/kb/:id/download", kbHandler.Download)
+	protected.GET("/audit-logs", auditHandler.ListLogs)
 
 	protected.POST("/approvals", govHandler.CreateApproval)
 	protected.GET("/approvals/my-requests", govHandler.ListMyRequests)

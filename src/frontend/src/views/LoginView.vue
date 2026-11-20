@@ -26,7 +26,7 @@ const highlights = [
   { title: 'MCP 服务统一接入', desc: '标准化 SSE / Streamable HTTP 服务注册与探测' },
   { title: 'Skills 技能沉淀', desc: 'Prompt、脚本与工作流资产跨团队安全复用' },
   { title: 'Agent 智能体编排', desc: '灵活绑定模型参数、工具链与领域知识库' },
-  { title: '业务域隔离治理', desc: '基于业务域与 RBAC 的研发团队权限边界' }
+  { title: '域隔离治理', desc: '基于域与 RBAC 的研发团队权限边界' }
 ]
 
 async function handleSubmit() {
@@ -95,7 +95,7 @@ async function handleSubmit() {
       <div class="auth-card">
         <div class="auth-card-header">
           <h2>欢迎登录 ASCP</h2>
-          <p>请输入您的团队账号以进入业务域工作台</p>
+          <p>请输入您的团队账号以进入域工作台</p>
         </div>
 
         <el-form

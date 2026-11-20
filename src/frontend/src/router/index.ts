@@ -24,7 +24,7 @@ const routes: RouteRecordRaw[] = [
         path: 'domains',
         name: 'domains',
         component: () => import('@/views/DomainsView.vue'),
-        meta: { title: '业务域大厅', requiresAuth: true }
+        meta: { title: '域大厅', requiresAuth: true }
       },
       {
         path: 'organizations',
@@ -61,6 +61,12 @@ const routes: RouteRecordRaw[] = [
         name: 'approvals',
         component: () => import('@/views/ApprovalsView.vue'),
         meta: { title: '审批中心', requiresAuth: true }
+      },
+      {
+        path: 'logs',
+        name: 'logs',
+        component: () => import('@/views/AuditLogsView.vue'),
+        meta: { title: '日志中心', requiresAuth: true }
       },
       {
         path: 'profile',

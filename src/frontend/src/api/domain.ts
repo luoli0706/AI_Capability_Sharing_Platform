@@ -31,6 +31,10 @@ export function updateDomain(id: number, data: UpdateDomainPayload): Promise<Dom
   return apiPut<DomainItem, UpdateDomainPayload>(`/domains/${id}`, data)
 }
 
+export function deleteDomain(id: number): Promise<null> {
+  return apiDelete<null>(`/domains/${id}`)
+}
+
 export function getDomainMembers(
   domainId: number
 ): Promise<PaginatedData<DomainMember> | DomainMember[]> {

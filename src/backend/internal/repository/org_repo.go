@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"strings"
+
 	"ascp-backend/internal/model"
 
 	"gorm.io/gorm"
@@ -8,15 +10,18 @@ import (
 )
 
 type OrgRepository interface {
-	ListOrgs(userID uint64) ([]model.OrgListItem, error)
+	ListOrgs(userID uint64, q model.OrgQuery) ([]model.OrgListItem, int64, error)
 	FindByID(id uint64) (*model.BizOrganization, error)
 	FindByCode(code string) (*model.BizOrganization, error)
 	CreateWithOwner(org *model.BizOrganization) error
+	UpdateOrg(org *model.BizOrganization) error
+	DeleteOrg(id uint64) error
 	ListMembers(orgID uint64) ([]model.OrgMemberItem, error)
 	GetMemberRole(orgID, userID uint64) (string, error)
 	UpsertMember(member *model.OrganizationMember) error
 	RemoveMember(orgID, userID uint64) error
 	GetUserOrgIDs(userID uint64) ([]uint64, error)
+	GetUserAdminOrgIDs(userID uint64) ([]uint64, error)
 	ListPublicDomainsByOrg(orgID, userID uint64) ([]model.DomainListItem, error)
 }
 
@@ -28,13 +33,37 @@ func NewOrgRepository(db *gorm.DB) OrgRepository {
 	return &orgRepository{db: db}
 }
 
-func (r *orgRepository) ListOrgs(userID uint64) ([]model.OrgListItem, error) {
+func (r *orgRepository) ListOrgs(userID uint64, q model.OrgQuery) ([]model.OrgListItem, int64, error) {
+	tx := r.db.Model(&model.BizOrganization{})
+	if kw := strings.TrimSpace(q.Keyword); kw != "" {
+		like := "%" + kw + "%"
+		tx = tx.Where("(org_name LIKE ? OR org_code LIKE ?)", like, like)
+	}
+
+	var total int64
+	if err := tx.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	page := q.Page
+	if page <= 0 {
+		page = 1
+	}
+	pageSize := q.PageSize
+	if pageSize <= 0 {
+		pageSize = 12
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+
 	var orgs []model.BizOrganization
-	if err := r.db.Order("id DESC").Find(&orgs).Error; err != nil {
-		return nil, err
+	offset := (page - 1) * pageSize
+	if err := tx.Order("id DESC").Offset(offset).Limit(pageSize).Find(&orgs).Error; err != nil {
+		return nil, 0, err
 	}
 	if len(orgs) == 0 {
-		return []model.OrgListItem{}, nil
+		return []model.OrgListItem{}, total, nil
 	}
 
 	type countRow struct {
@@ -46,7 +75,7 @@ func (r *orgRepository) ListOrgs(userID uint64) ([]model.OrgListItem, error) {
 		Select("org_id AS id, COUNT(*) AS cnt").
 		Group("org_id").
 		Scan(&memberCounts).Error; err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	memberMap := make(map[uint64]int64, len(memberCounts))
 	for _, c := range memberCounts {
@@ -59,7 +88,7 @@ func (r *orgRepository) ListOrgs(userID uint64) ([]model.OrgListItem, error) {
 		Where("org_id > 0 AND visibility = ?", model.DomainVisibilityPublic).
 		Group("org_id").
 		Scan(&domainCounts).Error; err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	domainMap := make(map[uint64]int64, len(domainCounts))
 	for _, c := range domainCounts {
@@ -68,7 +97,7 @@ func (r *orgRepository) ListOrgs(userID uint64) ([]model.OrgListItem, error) {
 
 	var myMemberships []model.OrganizationMember
 	if err := r.db.Where("user_id = ?", userID).Find(&myMemberships).Error; err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	roleMap := make(map[uint64]string, len(myMemberships))
 	for _, m := range myMemberships {
@@ -90,7 +119,7 @@ func (r *orgRepository) ListOrgs(userID uint64) ([]model.OrgListItem, error) {
 			CreatedAt:   o.CreatedAt,
 		})
 	}
-	return items, nil
+	return items, total, nil
 }
 
 func (r *orgRepository) FindByID(id uint64) (*model.BizOrganization, error) {
@@ -121,6 +150,21 @@ func (r *orgRepository) CreateWithOwner(org *model.BizOrganization) error {
 		}
 		return tx.Create(&member).Error
 	})
+}
+
+func (r *orgRepository) UpdateOrg(org *model.BizOrganization) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Save(org).Error; err != nil {
+			return err
+		}
+		return tx.Model(&model.BizDomain{}).
+			Where("org_id = ?", org.ID).
+			Update("org_name", org.OrgName).Error
+	})
+}
+
+func (r *orgRepository) DeleteOrg(id uint64) error {
+	return r.db.Delete(&model.BizOrganization{}, id).Error
 }
 
 func (r *orgRepository) ListMembers(orgID uint64) ([]model.OrgMemberItem, error) {
@@ -178,6 +222,30 @@ func (r *orgRepository) GetUserOrgIDs(userID uint64) ([]uint64, error) {
 	return ids, err
 }
 
+func (r *orgRepository) GetUserAdminOrgIDs(userID uint64) ([]uint64, error) {
+	var memberIDs []uint64
+	if err := r.db.Model(&model.OrganizationMember{}).
+		Where("user_id = ? AND org_role IN ?", userID, []string{model.OrgRoleOwner, model.OrgRoleAdmin}).
+		Pluck("org_id", &memberIDs).Error; err != nil {
+		return nil, err
+	}
+	var ownerIDs []uint64
+	if err := r.db.Model(&model.BizOrganization{}).
+		Where("owner_id = ?", userID).
+		Pluck("id", &ownerIDs).Error; err != nil {
+		return nil, err
+	}
+	seen := make(map[uint64]bool, len(memberIDs)+len(ownerIDs))
+	ids := make([]uint64, 0, len(memberIDs)+len(ownerIDs))
+	for _, id := range append(memberIDs, ownerIDs...) {
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
 func (r *orgRepository) ListPublicDomainsByOrg(orgID, userID uint64) ([]model.DomainListItem, error) {
 	var domains []model.BizDomain
 	if err := r.db.Where("org_id = ? AND visibility = ?", orgID, model.DomainVisibilityPublic).
@@ -188,5 +256,9 @@ func (r *orgRepository) ListPublicDomainsByOrg(orgID, userID uint64) ([]model.Do
 	if err != nil {
 		return nil, err
 	}
-	return hydrateDomainListItems(r.db, domains, userID, orgIDs)
+	adminOrgIDs, err := r.GetUserAdminOrgIDs(userID)
+	if err != nil {
+		return nil, err
+	}
+	return hydrateDomainListItems(r.db, domains, userID, orgIDs, adminOrgIDs)
 }

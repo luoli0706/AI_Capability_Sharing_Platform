@@ -9,7 +9,7 @@ export interface AssetTypeMeta {
   bgColor: string
 }
 
-const ASSET_TYPE_MAP: Record<AssetType, AssetTypeMeta> = {
+const ASSET_TYPE_MAP: Record<string, AssetTypeMeta> = {
   mcp: {
     label: 'MCP 服务',
     shortLabel: 'MCP',
@@ -37,12 +37,26 @@ const ASSET_TYPE_MAP: Record<AssetType, AssetTypeMeta> = {
     tagType: 'info',
     color: '#0284C7',
     bgColor: '#F0F9FF'
+  },
+  domain: {
+    label: '域',
+    shortLabel: '域',
+    tagType: 'primary',
+    color: '#4F46E5',
+    bgColor: '#EEF2FF'
+  },
+  org: {
+    label: '组织',
+    shortLabel: '组织',
+    tagType: 'warning',
+    color: '#7C3AED',
+    bgColor: '#F5F3FF'
   }
 }
 
 export function getAssetTypeMeta(type: string): AssetTypeMeta {
   return (
-    ASSET_TYPE_MAP[type as AssetType] ?? {
+    ASSET_TYPE_MAP[type] ?? {
       label: type.toUpperCase(),
       shortLabel: type,
       tagType: 'info',
@@ -71,7 +85,7 @@ export function getAssetStatusMeta(status: AssetStatus | string): StatusMeta {
 
 const VISIBILITY_MAP: Record<AssetVisibility, string> = {
   public: '全平台公开',
-  domain: '业务域内可见',
+  domain: '域内可见',
   private: '仅自己可见'
 }
 
@@ -79,10 +93,19 @@ export function getVisibilityLabel(visibility: string): string {
   return VISIBILITY_MAP[visibility as AssetVisibility] ?? visibility
 }
 
+export function getDomainVisibilityMeta(visibility: string): {
+  label: string
+  tagType: 'success' | 'warning' | 'primary' | 'info'
+} {
+  if (visibility === 'private') return { label: '私密', tagType: 'warning' }
+  if (visibility === 'org_private') return { label: '组织私有', tagType: 'primary' }
+  if (visibility === 'public') return { label: '公开', tagType: 'success' }
+  return { label: visibility || '公开', tagType: 'info' }
+}
+
 const ROLE_LABEL_MAP: Record<string, string> = {
-  super_admin: '平台超管',
+  super_admin: '超级管理员',
   domain_admin: '域管理员',
-  developer: '研发人员',
   owner: '域负责人',
   admin: '管理员',
   member: '成员'
