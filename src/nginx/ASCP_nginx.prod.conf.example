@@ -1,0 +1,75 @@
+# ASCP Nginx 生产环境配置模板
+# 适用场景：Docker Compose 容器网络内，静态托管前端 dist 产物，反向代理并负载均衡多后端实例
+
+limit_req_zone $binary_remote_addr zone=ascp_auth_limit:10m rate=10r/s;
+limit_req_zone $binary_remote_addr zone=ascp_invoke_limit:10m rate=30r/s;
+
+upstream ascp_backend {
+    least_conn;
+    server backend:8080 max_fails=3 fail_timeout=15s;
+    # 扩展多实例时取消注释：
+    # server backend-2:8080 max_fails=3 fail_timeout=15s;
+}
+
+server {
+    listen 80;
+    server_name _;
+
+    client_max_body_size 50m;
+
+    # 基础安全响应头
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+
+    # 开启 Gzip 压缩
+    gzip on;
+    gzip_min_length 1024;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml;
+
+    # 前端静态资源托管（Vue3 SPA）
+    root /usr/share/nginx/html;
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # 静态资源长缓存
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff2?)$ {
+        expires 7d;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # 认证接口限流与反向代理
+    location /api/v1/auth/ {
+        limit_req zone=ascp_auth_limit burst=20 nodelay;
+        proxy_pass http://ascp_backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # 能力代理调用接口（支持 SSE 流式输出 + 限流）
+    location /api/v1/invoke/ {
+        limit_req zone=ascp_invoke_limit burst=50 nodelay;
+        proxy_pass http://ascp_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 300s;
+    }
+
+    # 通用后端 API 反向代理
+    location /api/ {
+        proxy_pass http://ascp_backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

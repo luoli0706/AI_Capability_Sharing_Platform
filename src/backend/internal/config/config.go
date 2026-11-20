@@ -1,0 +1,121 @@
+package config
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/spf13/viper"
+)
+
+type Config struct {
+	Server   ServerConfig   `mapstructure:"server"`
+	Database DatabaseConfig `mapstructure:"database"`
+	JWT      JWTConfig      `mapstructure:"jwt"`
+	Storage  StorageConfig  `mapstructure:"storage"`
+}
+
+type ServerConfig struct {
+	Port string `mapstructure:"port"`
+	Mode string `mapstructure:"mode"`
+}
+
+type DatabaseConfig struct {
+	DSN          string `mapstructure:"dsn"`
+	MaxIdleConns int    `mapstructure:"max_idle_conns"`
+	MaxOpenConns int    `mapstructure:"max_open_conns"`
+}
+
+type JWTConfig struct {
+	Secret      string `mapstructure:"secret"`
+	ExpireHours int    `mapstructure:"expire_hours"`
+}
+
+type StorageConfig struct {
+	UploadDir string `mapstructure:"upload_dir"`
+}
+
+// Load reads configuration from yaml file, optional .env file, and environment variables.
+func Load(path string) (*Config, error) {
+	return loadFrom(path, ".env")
+}
+
+func loadFrom(path, dotEnvPath string) (*Config, error) {
+	v := viper.New()
+	v.SetConfigFile(path)
+	v.AutomaticEnv()
+
+	if err := v.ReadInConfig(); err != nil {
+		return nil, err
+	}
+
+	var cfg Config
+	if err := v.Unmarshal(&cfg); err != nil {
+		return nil, err
+	}
+
+	dotEnv := loadDotEnv(dotEnvPath)
+	user := getEnvValue(dotEnv, "MYSQL_USER")
+	password := getEnvValue(dotEnv, "MYSQL_PASSWORD")
+	host := getEnvValue(dotEnv, "MYSQL_HOST")
+	port := getEnvValue(dotEnv, "MYSQL_PORT")
+	database := getEnvValue(dotEnv, "MYSQL_DATABASE")
+
+	if user != "" || password != "" || host != "" || port != "" || database != "" {
+		if user == "" {
+			user = "root"
+		}
+		if host == "" {
+			host = "127.0.0.1"
+		}
+		if port == "" {
+			port = "3306"
+		}
+		if database == "" {
+			database = "ascp"
+		}
+		cfg.Database.DSN = fmt.Sprintf(
+			"%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local",
+			user, password, host, port, database,
+		)
+	}
+
+	return &cfg, nil
+}
+
+func getEnvValue(dotEnv map[string]string, key string) string {
+	if val, ok := os.LookupEnv(key); ok && val != "" {
+		return val
+	}
+	return dotEnv[key]
+}
+
+func loadDotEnv(filename string) map[string]string {
+	values := make(map[string]string)
+	f, err := os.Open(filename)
+	if err != nil {
+		return values
+	}
+	defer func() { _ = f.Close() }()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		idx := strings.IndexByte(line, '=')
+		if idx <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:idx])
+		val := strings.TrimSpace(line[idx+1:])
+		if len(val) >= 2 && ((val[0] == '"' && val[len(val)-1] == '"') || (val[0] == '\'' && val[len(val)-1] == '\'')) {
+			val = val[1 : len(val)-1]
+		}
+		values[key] = val
+	}
+	return values
+}

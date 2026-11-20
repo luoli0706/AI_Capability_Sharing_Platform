@@ -1,0 +1,24 @@
+# Dependencies & build artifacts
+node_modules/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+
+# Uploads & logs
+uploads/
+*.log
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
