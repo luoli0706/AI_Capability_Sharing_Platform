@@ -1,12 +1,22 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
-import { Plus, Search } from '@element-plus/icons-vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
+import { storeToRefs } from 'pinia'
+import { MoreFilled, Plus, Search } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { deleteAsset, getAssets, offlineAsset, publishAsset } from '@/api/asset'
-import { getDomains } from '@/api/domain'
+import {
+  deleteAsset,
+  getAssets,
+  mcpHealthCheck,
+  mcpSyncTools,
+  offlineAsset,
+  publishAsset
+} from '@/api/asset'
 import AssetDetailDrawer from '@/components/AssetDetailDrawer.vue'
 import AssetFormDrawer from '@/components/AssetFormDrawer.vue'
-import type { AssetItem, AssetType, DomainItem } from '@/types/api'
+import AssetVersionsDrawer from '@/components/AssetVersionsDrawer.vue'
+import { useDomainStore } from '@/stores/domain'
+import type { AssetItem, AssetType } from '@/types/api'
 import {
   formatDateTime,
   getAssetStatusMeta,
@@ -15,10 +25,16 @@ import {
   normalizeList
 } from '@/utils/format'
 
+const route = useRoute()
+const domainStore = useDomainStore()
+const { domains } = storeToRefs(domainStore)
+
+const domainId = computed(() => Number(route.params.domainId))
+const currentDomain = computed(() => domainStore.getDomainById(domainId.value))
+
 const loading = ref(false)
 const assets = ref<AssetItem[]>([])
 const total = ref(0)
-const domains = ref<DomainItem[]>([])
 
 const filters = reactive<{
   asset_type: AssetType | ''
@@ -40,20 +56,24 @@ const editAssetId = ref<number | null>(null)
 const detailDrawerOpen = ref(false)
 const detailAssetId = ref<number | null>(null)
 
-async function fetchDomains() {
-  try {
-    const res = await getDomains({ page: 1, page_size: 100 })
-    domains.value = normalizeList(res).items
-  } catch {
-    domains.value = []
-  }
-}
+const versionsDrawerOpen = ref(false)
+const versionsAsset = ref<AssetItem | null>(null)
+
+const publishModalOpen = ref(false)
+const publishing = ref(false)
+const publishTarget = ref<AssetItem | null>(null)
+const publishForm = reactive({
+  version: '',
+  changelog: ''
+})
 
 async function fetchWorkspaceAssets() {
+  if (!domainId.value) return
   loading.value = true
   try {
     const res = await getAssets({
       scope: 'workspace',
+      domain_id: domainId.value,
       asset_type: filters.asset_type || undefined,
       status: filters.status || undefined,
       keyword: filters.keyword.trim() || undefined,
@@ -91,18 +111,33 @@ function openDetail(asset: AssetItem) {
   detailDrawerOpen.value = true
 }
 
-async function handlePublish(asset: AssetItem) {
+function openVersions(asset: AssetItem) {
+  versionsAsset.value = asset
+  versionsDrawerOpen.value = true
+}
+
+function openPublishModal(asset: AssetItem) {
+  publishTarget.value = asset
+  publishForm.version = asset.current_version || 'v0.1.0'
+  publishForm.changelog = ''
+  publishModalOpen.value = true
+}
+
+async function handleConfirmPublish() {
+  if (!publishTarget.value) return
+  publishing.value = true
   try {
-    await ElMessageBox.confirm(`确认发布资产「${asset.name}」到能力广场吗？`, '发布确认', {
-      confirmButtonText: '确认发布',
-      cancelButtonText: '取消',
-      type: 'info'
+    await publishAsset(publishTarget.value.id, {
+      version: publishForm.version.trim() || undefined,
+      changelog: publishForm.changelog.trim() || undefined
     })
-    await publishAsset(asset.id)
-    ElMessage.success('发布成功')
+    ElMessage.success('发布成功，已生成版本快照')
+    publishModalOpen.value = false
     fetchWorkspaceAssets()
   } catch {
-    // Cancelled or failed
+    // Handled by interceptor
+  } finally {
+    publishing.value = false
   }
 }
 
@@ -136,8 +171,42 @@ async function handleDelete(asset: AssetItem) {
   }
 }
 
+async function handleMoreCommand(command: string, asset: AssetItem) {
+  if (command === 'versions') {
+    openVersions(asset)
+    return
+  }
+  if (command === 'health-check') {
+    try {
+      const res = await mcpHealthCheck(asset.id)
+      ElMessage.success(`MCP 健康检查：${res.health_status || 'healthy'}`)
+    } catch {
+      // Handled by interceptor
+    }
+    return
+  }
+  if (command === 'sync-tools') {
+    try {
+      const res = await mcpSyncTools(asset.id)
+      const count = res.count ?? res.tools_schema?.length ?? 0
+      ElMessage.success(`已同步 ${count} 个 MCP Tools`)
+    } catch {
+      // Handled by interceptor
+    }
+    return
+  }
+  if (command === 'delete') {
+    handleDelete(asset)
+  }
+}
+
+watch(domainId, () => {
+  filters.page = 1
+  fetchWorkspaceAssets()
+})
+
 onMounted(() => {
-  fetchDomains()
+  domainStore.fetchDomains()
   fetchWorkspaceAssets()
 })
 </script>
@@ -146,8 +215,11 @@ onMounted(() => {
   <div class="page-container">
     <div class="page-header">
       <div>
-        <h1 class="page-title">资产工作台</h1>
-        <p class="page-subtitle">创建、配置并管理您的 MCP 服务、Skills 技能、Agent 与私有知识库生命周期</p>
+        <h1 class="page-title">
+          域内资产工作台
+          <span v-if="currentDomain" class="domain-tag">{{ currentDomain.domain_name }}</span>
+        </h1>
+        <p class="page-subtitle">在当前业务域内创建、配置与发布 MCP 服务、Skills 技能、Agent 与私有知识库</p>
       </div>
       <el-button type="primary" :icon="Plus" @click="openCreate">新建资产</el-button>
     </div>
@@ -204,17 +276,11 @@ onMounted(() => {
           </template>
         </el-table-column>
 
-        <el-table-column label="类型" width="115">
+        <el-table-column label="类型" width="110">
           <template #default="{ row }">
             <el-tag :type="getAssetTypeMeta(row.asset_type).tagType" size="small" effect="light">
               {{ getAssetTypeMeta(row.asset_type).shortLabel }}
             </el-tag>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="所属业务域" min-width="130">
-          <template #default="{ row }">
-            {{ row.domain_name || `域 #${row.domain_id}` }}
           </template>
         </el-table-column>
 
@@ -250,7 +316,7 @@ onMounted(() => {
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="230" fixed="right">
+        <el-table-column label="操作" width="240" fixed="right">
           <template #default="{ row }">
             <div class="action-group">
               <el-button link type="primary" size="small" @click="openDetail(row)">详情</el-button>
@@ -260,7 +326,7 @@ onMounted(() => {
                 link
                 type="success"
                 size="small"
-                @click="handlePublish(row)"
+                @click="openPublishModal(row)"
               >
                 发布
               </el-button>
@@ -273,13 +339,31 @@ onMounted(() => {
               >
                 下线
               </el-button>
-              <el-button link type="danger" size="small" @click="handleDelete(row)">删除</el-button>
+              <el-dropdown trigger="click" @command="(cmd: string) => handleMoreCommand(cmd, row)">
+                <el-button link type="info" size="small">
+                  <el-icon><MoreFilled /></el-icon>
+                </el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="versions">版本历史与回滚</el-dropdown-item>
+                    <el-dropdown-item v-if="row.asset_type === 'mcp'" command="health-check">
+                      MCP 健康检查
+                    </el-dropdown-item>
+                    <el-dropdown-item v-if="row.asset_type === 'mcp'" command="sync-tools">
+                      同步 MCP Tools
+                    </el-dropdown-item>
+                    <el-dropdown-item divided command="delete">
+                      <span style="color: #ef4444">删除资产</span>
+                    </el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
             </div>
           </template>
         </el-table-column>
 
         <template #empty>
-          <el-empty description="工作台暂无 AI 资产，点击右上角「新建资产」开始创建" />
+          <el-empty description="当前业务域暂无 AI 资产，点击右上角「新建资产」开始创建" />
         </template>
       </el-table>
 
@@ -299,17 +383,64 @@ onMounted(() => {
       v-model="formDrawerOpen"
       :edit-asset-id="editAssetId"
       :domains="domains"
+      :fixed-domain-id="domainId"
       @saved="fetchWorkspaceAssets"
     />
 
     <AssetDetailDrawer
       v-model="detailDrawerOpen"
       :asset-id="detailAssetId"
+      :show-actions="false"
     />
+
+    <AssetVersionsDrawer
+      v-model="versionsDrawerOpen"
+      :asset-id="versionsAsset?.id ?? null"
+      :asset-name="versionsAsset?.name"
+      @rolled-back="fetchWorkspaceAssets"
+    />
+
+    <!-- Publish Modal -->
+    <el-dialog v-model="publishModalOpen" title="发布资产版本" width="460px" destroy-on-close>
+      <el-form label-position="top">
+        <el-form-item label="发布版本号">
+          <el-input
+            v-model="publishForm.version"
+            placeholder="例如：v0.1.0 / v1.0.0（留空由系统自动递增）"
+            class="mono-text"
+          />
+        </el-form-item>
+        <el-form-item label="版本变更说明 (Changelog)">
+          <el-input
+            v-model="publishForm.changelog"
+            type="textarea"
+            :rows="3"
+            placeholder="说明本次发布新增或修复的能力..."
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="publishModalOpen = false">取消</el-button>
+        <el-button type="primary" :loading="publishing" @click="handleConfirmPublish">
+          确认发布
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <style scoped>
+.domain-tag {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ascp-primary);
+  background: var(--ascp-primary-soft);
+  padding: 2px 10px;
+  border-radius: 999px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
 .toolbar-card {
   padding: 14px 18px;
 }
@@ -348,7 +479,7 @@ onMounted(() => {
 .action-group {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
 }
 
 .table-pagination {

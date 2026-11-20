@@ -45,14 +45,16 @@ func (AIAsset) TableName() string {
 }
 
 type AIAssetMCP struct {
-	AssetID       uint64     `gorm:"primaryKey;autoIncrement:false" json:"asset_id"`
-	TransportType string     `gorm:"type:varchar(32);not null;default:'sse'" json:"transport_type"`
-	EndpointURL   string     `gorm:"type:varchar(512);not null" json:"endpoint_url"`
-	AuthType      string     `gorm:"type:varchar(32);not null;default:'none'" json:"auth_type"`
-	AuthConfigEnc string     `gorm:"type:text" json:"auth_config_enc,omitempty"`
-	ToolsSchema   JSONRaw    `gorm:"type:json" json:"tools_schema,omitempty"`
-	HealthStatus  string     `gorm:"type:varchar(16);not null;default:'unknown'" json:"health_status"`
-	LastCheckedAt *time.Time `gorm:"type:datetime" json:"last_checked_at,omitempty"`
+	AssetID        uint64     `gorm:"primaryKey;autoIncrement:false" json:"asset_id"`
+	TransportType  string     `gorm:"type:varchar(32);not null;default:'sse'" json:"transport_type"`
+	EndpointURL    string     `gorm:"type:varchar(512);not null" json:"endpoint_url"`
+	AuthType       string     `gorm:"type:varchar(32);not null;default:'none'" json:"auth_type"`
+	AuthConfigEnc  string     `gorm:"type:text" json:"auth_config_enc,omitempty"`
+	ToolsSchema    JSONRaw    `gorm:"type:json" json:"tools_schema,omitempty"`
+	HealthStatus   string     `gorm:"type:varchar(16);not null;default:'unknown'" json:"health_status"`
+	LastCheckedAt  *time.Time `gorm:"type:datetime" json:"last_checked_at,omitempty"`
+	SourceURL      string     `gorm:"type:varchar(512);not null;default:''" json:"source_url"`
+	PackageCommand string     `gorm:"type:varchar(512);not null;default:''" json:"package_command"`
 }
 
 func (AIAssetMCP) TableName() string {
@@ -60,13 +62,16 @@ func (AIAssetMCP) TableName() string {
 }
 
 type AIAssetSkill struct {
-	AssetID      uint64  `gorm:"primaryKey;autoIncrement:false" json:"asset_id"`
-	SkillType    string  `gorm:"type:varchar(32);not null;default:'prompt'" json:"skill_type"`
-	InputSchema  JSONRaw `gorm:"type:json" json:"input_schema,omitempty"`
-	OutputSchema JSONRaw `gorm:"type:json" json:"output_schema,omitempty"`
-	Content      string  `gorm:"type:mediumtext" json:"content"`
-	RuntimeEnv   string  `gorm:"type:varchar(64);not null;default:''" json:"runtime_env"`
-	Dependencies JSONRaw `gorm:"type:json" json:"dependencies,omitempty"`
+	AssetID      uint64      `gorm:"primaryKey;autoIncrement:false" json:"asset_id"`
+	SkillType    string      `gorm:"type:varchar(32);not null;default:'prompt'" json:"skill_type"`
+	InputSchema  JSONRaw     `gorm:"type:json" json:"input_schema,omitempty"`
+	OutputSchema JSONRaw     `gorm:"type:json" json:"output_schema,omitempty"`
+	Content      string      `gorm:"type:mediumtext" json:"content"`
+	RuntimeEnv   string      `gorm:"type:varchar(64);not null;default:''" json:"runtime_env"`
+	Dependencies JSONRaw     `gorm:"type:json" json:"dependencies,omitempty"`
+	SourceURL    string      `gorm:"type:varchar(512);not null;default:''" json:"source_url"`
+	PackagePath  string      `gorm:"type:varchar(512);not null;default:''" json:"package_path"`
+	PackageFiles StringSlice `gorm:"type:json" json:"package_files"`
 }
 
 func (AIAssetSkill) TableName() string {
@@ -83,6 +88,7 @@ type AIAssetAgent struct {
 	BoundMCPIDs   Uint64Slice `gorm:"column:bound_mcp_ids;type:json" json:"bound_mcp_ids"`
 	BoundSkillIDs Uint64Slice `gorm:"column:bound_skill_ids;type:json" json:"bound_skill_ids"`
 	BoundKBIDs    Uint64Slice `gorm:"column:bound_kb_ids;type:json" json:"bound_kb_ids"`
+	SourceURL     string      `gorm:"type:varchar(512);not null;default:''" json:"source_url"`
 }
 
 func (AIAssetAgent) TableName() string {
@@ -105,36 +111,67 @@ func (KBKnowledgeBase) TableName() string {
 // AssetListItem includes domain_name and owner_name for list views.
 type AssetListItem struct {
 	AIAsset
-	DomainName string `json:"domain_name"`
-	OwnerName  string `json:"owner_name"`
+	DomainName    string `json:"domain_name"`
+	OwnerName     string `json:"owner_name"`
+	HasPermission bool   `gorm:"-" json:"has_permission"`
+	IsSubscribed  bool   `gorm:"-" json:"is_subscribed"`
 }
 
 // AssetDetail includes extension config alongside base asset fields.
 type AssetDetail struct {
 	AIAsset
-	DomainName  string           `json:"domain_name"`
-	OwnerName   string           `json:"owner_name"`
-	MCPConfig   *AIAssetMCP      `json:"mcp_config,omitempty"`
-	SkillConfig *AIAssetSkill    `json:"skill_config,omitempty"`
-	AgentConfig *AIAssetAgent    `json:"agent_config,omitempty"`
-	KBConfig    *KBKnowledgeBase `json:"kb_config,omitempty"`
+	DomainName    string           `json:"domain_name"`
+	OwnerName     string           `json:"owner_name"`
+	HasPermission bool             `gorm:"-" json:"has_permission"`
+	IsSubscribed  bool             `gorm:"-" json:"is_subscribed"`
+	MCPConfig     *AIAssetMCP      `json:"mcp_config,omitempty"`
+	SkillConfig   *AIAssetSkill    `json:"skill_config,omitempty"`
+	AgentConfig   *AIAssetAgent    `json:"agent_config,omitempty"`
+	KBConfig      *KBKnowledgeBase `json:"kb_config,omitempty"`
 }
 
 type MCPConfigInput struct {
-	TransportType string  `json:"transport_type"`
-	EndpointURL   string  `json:"endpoint_url"`
-	AuthType      string  `json:"auth_type"`
-	AuthConfigEnc string  `json:"auth_config_enc"`
-	ToolsSchema   JSONRaw `json:"tools_schema"`
+	TransportType  string  `json:"transport_type"`
+	EndpointURL    string  `json:"endpoint_url"`
+	AuthType       string  `json:"auth_type"`
+	AuthConfigEnc  string  `json:"auth_config_enc"`
+	ToolsSchema    JSONRaw `json:"tools_schema"`
+	SourceURL      string  `json:"source_url"`
+	PackageCommand string  `json:"package_command"`
+}
+
+type ParseMCPConfigRequest struct {
+	Content string `json:"content" validate:"required"`
 }
 
 type SkillConfigInput struct {
-	SkillType    string  `json:"skill_type"`
-	InputSchema  JSONRaw `json:"input_schema"`
-	OutputSchema JSONRaw `json:"output_schema"`
-	Content      string  `json:"content"`
-	RuntimeEnv   string  `json:"runtime_env"`
-	Dependencies JSONRaw `json:"dependencies"`
+	SkillType    string      `json:"skill_type"`
+	InputSchema  JSONRaw     `json:"input_schema"`
+	OutputSchema JSONRaw     `json:"output_schema"`
+	Content      string      `json:"content"`
+	RuntimeEnv   string      `json:"runtime_env"`
+	Dependencies JSONRaw     `json:"dependencies"`
+	SourceURL    string      `json:"source_url"`
+	PackagePath  string      `json:"package_path"`
+	PackageFiles StringSlice `json:"package_files"`
+}
+
+type ImportSkillURLRequest struct {
+	URL string `json:"url" validate:"required,url"`
+}
+
+type SkillParseResult struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Content     string   `json:"content"`
+	Files       []string `json:"files"`
+}
+
+type SkillImportResult struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Content     string `json:"content"`
+	SourceURL   string `json:"source_url"`
 }
 
 type AgentConfigInput struct {
@@ -146,6 +183,16 @@ type AgentConfigInput struct {
 	BoundMCPIDs   Uint64Slice `json:"bound_mcp_ids"`
 	BoundSkillIDs Uint64Slice `json:"bound_skill_ids"`
 	BoundKBIDs    Uint64Slice `json:"bound_kb_ids"`
+	SourceURL     string      `json:"source_url"`
+}
+
+type ParseAgentContentRequest struct {
+	Content  string `json:"content" validate:"required"`
+	Filename string `json:"filename"`
+}
+
+type ImportAgentURLRequest struct {
+	URL string `json:"url" validate:"required,url"`
 }
 
 type KBConfigInput struct {
@@ -183,7 +230,8 @@ type UpdateAssetRequest struct {
 
 // PublishAssetRequest represents optional POST /api/v1/assets/:id/publish payload.
 type PublishAssetRequest struct {
-	Version string `json:"version" validate:"omitempty,max=32"`
+	Version   string `json:"version" validate:"omitempty,max=32"`
+	Changelog string `json:"changelog" validate:"omitempty,max=512"`
 }
 
 // AssetQuery defines filter and pagination parameters for listing assets.

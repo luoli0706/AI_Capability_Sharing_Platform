@@ -98,7 +98,7 @@ async function handleSubmit() {
 
         <h1 class="showcase-title">加入 AI 能力共享协作网络</h1>
         <p class="showcase-desc">
-          注册账号后即可浏览企业能力广场、加入业务域协作，并创建发布您的 MCP 服务、Skills 与 Agent 资产。
+          注册账号后即可进入业务域空间，浏览团队内能力广场、参与业务域协作，并创建发布您的 MCP 服务、Skills 与 Agent 资产。
         </p>
       </div>
     </section>
@@ -135,7 +135,7 @@ async function handleSubmit() {
             />
           </el-form-item>
 
-          <el-form-item label="企业邮箱" prop="email">
+          <el-form-item label="工作邮箱" prop="email">
             <el-input
               v-model="form.email"
               placeholder="name@company.com"

@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"strconv"
+
 	"ascp-backend/internal/middleware"
 	"ascp-backend/internal/model"
 	"ascp-backend/internal/pkg/response"
@@ -18,8 +20,16 @@ func NewDomainHandler(domainSvc service.DomainService) *DomainHandler {
 }
 
 func (h *DomainHandler) ListDomains(c echo.Context) error {
+	orgID, _ := strconv.ParseUint(c.QueryParam("org_id"), 10, 64)
+	q := model.DomainQuery{
+		Tab:       c.QueryParam("tab"),
+		Keyword:   c.QueryParam("keyword"),
+		DomainUID: c.QueryParam("domain_uid"),
+		OrgID:     orgID,
+	}
+
 	userID := middleware.GetUserID(c)
-	list, err := h.domainSvc.ListDomains(userID)
+	list, err := h.domainSvc.ListDomains(userID, q)
 	if err != nil {
 		return service.HandleError(c, err)
 	}
@@ -37,6 +47,25 @@ func (h *DomainHandler) CreateDomain(c echo.Context) error {
 
 	userID := middleware.GetUserID(c)
 	domain, err := h.domainSvc.CreateDomain(userID, req)
+	if err != nil {
+		return service.HandleError(c, err)
+	}
+	return response.Success(c, domain)
+}
+
+func (h *DomainHandler) UpdateDomain(c echo.Context) error {
+	domainID, ok := parseUintParam(c, "id")
+	if !ok {
+		return nil
+	}
+
+	var req model.UpdateDomainRequest
+	if !bindAndValidate(c, &req) {
+		return nil
+	}
+
+	userID := middleware.GetUserID(c)
+	domain, err := h.domainSvc.UpdateDomain(userID, domainID, req)
 	if err != nil {
 		return service.HandleError(c, err)
 	}
@@ -70,8 +99,46 @@ func (h *DomainHandler) AddMember(c echo.Context) error {
 	}
 
 	userID := middleware.GetUserID(c)
-	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
-	if err := h.domainSvc.AddMember(userID, isSuperAdmin, domainID, req); err != nil {
+	if err := h.domainSvc.AddMember(userID, domainID, req); err != nil {
+		return service.HandleError(c, err)
+	}
+	return response.Success(c, nil)
+}
+
+func (h *DomainHandler) UpdateMemberRole(c echo.Context) error {
+	domainID, ok := parseUintParam(c, "id")
+	if !ok {
+		return nil
+	}
+	targetUserID, ok := parseUintParam(c, "userId")
+	if !ok {
+		return nil
+	}
+
+	var req model.UpdateDomainMemberRoleRequest
+	if !bindAndValidate(c, &req) {
+		return nil
+	}
+
+	userID := middleware.GetUserID(c)
+	if err := h.domainSvc.UpdateMemberRole(userID, domainID, targetUserID, req); err != nil {
+		return service.HandleError(c, err)
+	}
+	return response.Success(c, nil)
+}
+
+func (h *DomainHandler) RemoveMember(c echo.Context) error {
+	domainID, ok := parseUintParam(c, "id")
+	if !ok {
+		return nil
+	}
+	targetUserID, ok := parseUintParam(c, "userId")
+	if !ok {
+		return nil
+	}
+
+	userID := middleware.GetUserID(c)
+	if err := h.domainSvc.RemoveMember(userID, domainID, targetUserID); err != nil {
 		return service.HandleError(c, err)
 	}
 	return response.Success(c, nil)

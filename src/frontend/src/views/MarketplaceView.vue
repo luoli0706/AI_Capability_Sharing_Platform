@@ -1,26 +1,42 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { Connection, Cpu, Document, Histogram, MagicStick, Search } from '@element-plus/icons-vue'
 import { getAssets } from '@/api/asset'
-import { getDomains } from '@/api/domain'
 import AssetDetailDrawer from '@/components/AssetDetailDrawer.vue'
-import type { AssetItem, AssetType, DomainItem } from '@/types/api'
+import { useDomainStore } from '@/stores/domain'
+import type { AssetItem, AssetType } from '@/types/api'
 import { getAssetStatusMeta, getAssetTypeMeta, normalizeList } from '@/utils/format'
 
+const route = useRoute()
+const domainStore = useDomainStore()
+
+const domainId = computed(() => Number(route.params.domainId))
+const currentDomain = computed(() => domainStore.getDomainById(domainId.value))
+
 const loading = ref(false)
+const hasLoadedOnce = ref(false)
+const isRefreshing = ref(false)
 const assets = ref<AssetItem[]>([])
 const total = ref(0)
-const domains = ref<DomainItem[]>([])
+
+let latestRequestId = 0
+let refreshTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearRefreshTimer() {
+  if (refreshTimer) {
+    clearTimeout(refreshTimer)
+    refreshTimer = null
+  }
+}
 
 const filters = reactive<{
   asset_type: AssetType | ''
-  domain_id: number | ''
   keyword: string
   page: number
   page_size: number
 }>({
   asset_type: '',
-  domain_id: '',
   keyword: '',
   page: 1,
   page_size: 12
@@ -54,34 +70,45 @@ function getOwnerLabel(asset: AssetItem): string {
   return asset.owner?.nickname || asset.owner?.username || asset.owner_name || `用户 #${asset.owner_id}`
 }
 
-async function fetchDomains() {
-  try {
-    const res = await getDomains({ page: 1, page_size: 100 })
-    domains.value = normalizeList(res).items
-  } catch {
-    domains.value = []
-  }
-}
-
 async function fetchAssets() {
-  loading.value = true
+  if (!domainId.value) return
+  const requestId = ++latestRequestId
+  clearRefreshTimer()
+
+  if (!hasLoadedOnce.value) {
+    loading.value = true
+  } else {
+    refreshTimer = setTimeout(() => {
+      if (requestId === latestRequestId) {
+        isRefreshing.value = true
+      }
+    }, 150)
+  }
+
   try {
     const res = await getAssets({
       scope: 'marketplace',
+      domain_id: domainId.value,
       asset_type: filters.asset_type || undefined,
-      domain_id: filters.domain_id || undefined,
       keyword: filters.keyword.trim() || undefined,
       page: filters.page,
       page_size: filters.page_size
     })
+    if (requestId !== latestRequestId) return
     const normalized = normalizeList(res)
     assets.value = normalized.items
     total.value = normalized.total
   } catch {
+    if (requestId !== latestRequestId) return
     assets.value = []
     total.value = 0
   } finally {
-    loading.value = false
+    if (requestId === latestRequestId) {
+      clearRefreshTimer()
+      loading.value = false
+      isRefreshing.value = false
+      hasLoadedOnce.value = true
+    }
   }
 }
 
@@ -106,9 +133,18 @@ function openDetail(asset: AssetItem) {
   detailDrawerOpen.value = true
 }
 
-onMounted(() => {
-  fetchDomains()
+watch(domainId, () => {
+  filters.page = 1
   fetchAssets()
+})
+
+onMounted(() => {
+  domainStore.fetchDomains()
+  fetchAssets()
+})
+
+onBeforeUnmount(() => {
+  clearRefreshTimer()
 })
 </script>
 
@@ -116,8 +152,11 @@ onMounted(() => {
   <div class="page-container">
     <div class="page-header">
       <div>
-        <h1 class="page-title">能力广场</h1>
-        <p class="page-subtitle">探索并复用企业内已发布的 MCP 服务、Skills 技能、Agent 实例与私有知识库</p>
+        <h1 class="page-title">
+          域内能力广场
+          <span v-if="currentDomain" class="domain-tag">{{ currentDomain.domain_name }}</span>
+        </h1>
+        <p class="page-subtitle">探索、订阅并在线调试当前业务域内已发布的 MCP 服务、Skills 技能、Agent 与知识库</p>
       </div>
       <div class="marketplace-count tabular-nums">
         共 <strong>{{ total }}</strong> 项可用能力
@@ -140,21 +179,6 @@ onMounted(() => {
       </div>
 
       <div class="filter-controls">
-        <el-select
-          v-model="filters.domain_id"
-          placeholder="全部业务域"
-          clearable
-          style="width: 180px"
-          @change="handleFilterChange"
-        >
-          <el-option
-            v-for="d in domains"
-            :key="d.id"
-            :label="d.domain_name"
-            :value="d.id"
-          />
-        </el-select>
-
         <el-input
           v-model="filters.keyword"
           placeholder="搜索资产名称、编码或标签..."
@@ -169,20 +193,20 @@ onMounted(() => {
       </div>
     </div>
 
-    <!-- Loading Skeleton -->
-    <div v-if="loading" class="asset-grid">
+    <!-- Loading Skeleton (initial load only) -->
+    <div v-if="loading && !hasLoadedOnce" class="asset-grid">
       <div v-for="i in 6" :key="i" class="surface-card asset-card skeleton-card">
         <el-skeleton :rows="4" animated />
       </div>
     </div>
 
     <!-- Empty State -->
-    <div v-else-if="assets.length === 0" class="surface-card empty-box">
-      <el-empty description="暂无符合条件的已发布 AI 能力" />
+    <div v-else-if="assets.length === 0" class="surface-card empty-box" :class="{ 'is-refreshing': isRefreshing }">
+      <el-empty description="当前业务域暂无符合条件的已发布 AI 能力" />
     </div>
 
     <!-- Asset Card Grid -->
-    <div v-else class="asset-grid">
+    <div v-else class="asset-grid" :class="{ 'is-refreshing': isRefreshing }">
       <article
         v-for="asset in assets"
         :key="asset.id"
@@ -235,7 +259,7 @@ onMounted(() => {
 
         <div class="card-footer">
           <div class="footer-meta">
-            <span class="meta-domain">{{ asset.domain_name || `域 #${asset.domain_id}` }}</span>
+            <span class="meta-domain">{{ asset.domain_name || currentDomain?.domain_name || `域 #${asset.domain_id}` }}</span>
             <span class="meta-dot">·</span>
             <span class="meta-owner">{{ getOwnerLabel(asset) }}</span>
           </div>
@@ -261,11 +285,23 @@ onMounted(() => {
     <AssetDetailDrawer
       v-model="detailDrawerOpen"
       :asset-id="selectedAssetId"
+      :show-actions="true"
     />
   </div>
 </template>
 
 <style scoped>
+.domain-tag {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ascp-primary);
+  background: var(--ascp-primary-soft);
+  padding: 2px 10px;
+  border-radius: 999px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
 .marketplace-count {
   font-size: 13.5px;
   color: var(--ascp-text-muted);
@@ -459,6 +495,11 @@ onMounted(() => {
 
 .empty-box {
   padding: 48px 16px;
+}
+
+.is-refreshing {
+  opacity: 0.7;
+  transition: opacity 0.15s ease;
 }
 
 .pagination-wrap {

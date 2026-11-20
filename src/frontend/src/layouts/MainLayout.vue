@@ -1,33 +1,78 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import {
+  ArrowLeft,
   Box,
+  Checked,
+  Collection,
   Compass,
   Expand,
   Fold,
+  Grid,
   OfficeBuilding,
   SwitchButton,
-  User
+  User,
+  UserFilled
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
+import { useDomainStore } from '@/stores/domain'
 import { getRoleLabel } from '@/utils/format'
 
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
+const domainStore = useDomainStore()
 const { user } = storeToRefs(authStore)
+const { domains } = storeToRefs(domainStore)
 
 const isCollapsed = ref(false)
 
-const navItems = [
-  { path: '/marketplace', title: '能力广场', icon: Compass },
-  { path: '/assets', title: '资产工作台', icon: Box },
-  { path: '/domains', title: '业务域管理', icon: OfficeBuilding },
-  { path: '/profile', title: '个人中心', icon: User }
-]
+const activeDomainId = computed<number | null>(() => {
+  const raw = route.params.domainId
+  if (!raw) return null
+  const num = Number(raw)
+  return Number.isFinite(num) && num > 0 ? num : null
+})
+
+const activeDomain = computed(() =>
+  activeDomainId.value ? domainStore.getDomainById(activeDomainId.value) : null
+)
+
+watch(
+  activeDomainId,
+  (id) => {
+    if (id) {
+      domainStore.setLastDomainId(id)
+    }
+  },
+  { immediate: true }
+)
+
+const domainNavItems = computed(() => {
+  if (!activeDomainId.value) return []
+  const id = activeDomainId.value
+  return [
+    { path: `/domains/${id}/marketplace`, title: '域内能力广场', icon: Compass },
+    { path: `/domains/${id}/assets`, title: '域内资产工作台', icon: Box },
+    { path: `/domains/${id}/knowledge-bases`, title: '域内知识库', icon: Collection },
+    { path: `/domains/${id}/members`, title: '域成员管理', icon: UserFilled }
+  ]
+})
+
+const globalNavItems = computed(() => {
+  const items = [
+    { path: '/organizations', title: '组织中心', icon: Grid },
+    { path: '/approvals', title: '审批中心', icon: Checked },
+    { path: '/profile', title: '个人中心', icon: User }
+  ]
+  if (!activeDomainId.value) {
+    return [{ path: '/domains', title: '业务域大厅', icon: OfficeBuilding }, ...items]
+  }
+  return items
+})
 
 const activePath = computed(() => route.path)
 const currentTitle = computed(() => (route.meta.title as string) || '工作台')
@@ -48,7 +93,18 @@ onMounted(() => {
   authStore.fetchProfile().catch(() => {
     // Handled by axios interceptor if 401
   })
+  domainStore.fetchDomains().catch(() => {
+    // Ignore
+  })
 })
+
+function handleSwitchDomain(newDomainId: number) {
+  if (!newDomainId || newDomainId === activeDomainId.value) return
+  const segment = route.path.split('/').pop() || 'marketplace'
+  const validSegments = ['marketplace', 'assets', 'knowledge-bases', 'members']
+  const target = validSegments.includes(segment) ? segment : 'marketplace'
+  router.push(`/domains/${newDomainId}/${target}`)
+}
 
 async function handleCommand(command: string) {
   if (command === 'profile') {
@@ -75,7 +131,7 @@ async function handleCommand(command: string) {
 <template>
   <div class="layout-shell">
     <aside class="layout-sidebar" :class="{ 'is-collapsed': isCollapsed }">
-      <div class="sidebar-brand" @click="router.push('/marketplace')">
+      <div class="sidebar-brand" @click="router.push('/domains')">
         <div class="brand-logo">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none">
             <path
@@ -97,9 +153,64 @@ async function handleCommand(command: string) {
         </div>
       </div>
 
+      <!-- Active Domain Switcher Card -->
+      <div v-if="activeDomainId && !isCollapsed" class="domain-switcher-box">
+        <div class="switcher-header">
+          <span class="switcher-label">当前业务域</span>
+          <button
+            type="button"
+            class="back-hall-btn"
+            @click="router.push('/domains')"
+          >
+            <el-icon :size="12"><ArrowLeft /></el-icon>
+            <span>业务域大厅</span>
+          </button>
+        </div>
+        <el-select
+          :model-value="activeDomainId"
+          size="small"
+          class="domain-select"
+          @change="handleSwitchDomain"
+        >
+          <el-option
+            v-for="d in domains"
+            :key="d.id"
+            :label="d.domain_name"
+            :value="d.id"
+          />
+        </el-select>
+      </div>
+
       <nav class="sidebar-nav" aria-label="主导航">
+        <template v-if="activeDomainId">
+          <div v-if="!isCollapsed" class="nav-group-label">域内工作空间</div>
+          <router-link
+            v-for="item in domainNavItems"
+            :key="item.path"
+            :to="item.path"
+            class="nav-item"
+            :class="{ 'is-active': activePath === item.path }"
+          >
+            <el-icon class="nav-icon" :size="18">
+              <component :is="item.icon" />
+            </el-icon>
+            <span v-if="!isCollapsed" class="nav-label">{{ item.title }}</span>
+          </router-link>
+
+          <div class="nav-divider" />
+          <div v-if="!isCollapsed" class="nav-group-label">平台全局</div>
+          <router-link
+            v-if="isCollapsed"
+            to="/domains"
+            class="nav-item"
+            title="返回业务域大厅"
+          >
+            <el-icon class="nav-icon" :size="18"><OfficeBuilding /></el-icon>
+          </router-link>
+        </template>
+
         <router-link
-          v-for="item in navItems"
+          v-for="item in globalNavItems"
           :key="item.path"
           :to="item.path"
           class="nav-item"
@@ -110,6 +221,21 @@ async function handleCommand(command: string) {
           </el-icon>
           <span v-if="!isCollapsed" class="nav-label">{{ item.title }}</span>
         </router-link>
+
+        <div
+          v-if="!activeDomainId && domainStore.lastDomain && !isCollapsed"
+          class="last-domain-shortcut"
+        >
+          <div class="shortcut-label">最近进入业务域</div>
+          <button
+            type="button"
+            class="shortcut-btn"
+            @click="router.push(`/domains/${domainStore.lastDomain.id}/marketplace`)"
+          >
+            <span class="shortcut-name">{{ domainStore.lastDomain.domain_name }}</span>
+            <span class="shortcut-go">进入 →</span>
+          </button>
+        </div>
       </nav>
 
       <div class="sidebar-footer">
@@ -132,8 +258,16 @@ async function handleCommand(command: string) {
       <header class="layout-header">
         <div class="header-left">
           <el-breadcrumb separator="/">
-            <el-breadcrumb-item :to="{ path: '/marketplace' }">ASCP 工作台</el-breadcrumb-item>
-            <el-breadcrumb-item>{{ currentTitle }}</el-breadcrumb-item>
+            <el-breadcrumb-item :to="{ path: '/domains' }">业务域大厅</el-breadcrumb-item>
+            <el-breadcrumb-item
+              v-if="activeDomainId"
+              :to="{ path: `/domains/${activeDomainId}/marketplace` }"
+            >
+              {{ activeDomain?.domain_name || `域 #${activeDomainId}` }}
+            </el-breadcrumb-item>
+            <el-breadcrumb-item v-if="route.path !== '/domains'">
+              {{ currentTitle }}
+            </el-breadcrumb-item>
           </el-breadcrumb>
         </div>
 
@@ -196,7 +330,7 @@ async function handleCommand(command: string) {
 }
 
 .layout-sidebar {
-  width: 232px;
+  width: 242px;
   flex-shrink: 0;
   background-color: var(--ascp-sidebar-bg);
   border-right: 1px solid var(--ascp-sidebar-border);
@@ -254,20 +388,87 @@ async function handleCommand(command: string) {
   margin-top: 2px;
 }
 
+.domain-switcher-box {
+  margin: 12px 12px 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+.switcher-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.switcher-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #94a3b8;
+  letter-spacing: 0.03em;
+}
+
+.back-hall-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: none;
+  background: transparent;
+  padding: 0;
+  font-size: 11.5px;
+  color: #a5b4fc;
+  cursor: pointer;
+}
+
+.back-hall-btn:hover {
+  color: #ffffff;
+}
+
+.domain-select {
+  width: 100%;
+}
+
+.domain-select :deep(.el-select__wrapper) {
+  background-color: rgba(15, 23, 42, 0.7);
+  box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.25) inset;
+}
+
+.domain-select :deep(.el-select__selected-item) {
+  color: #f8fafc;
+  font-weight: 500;
+}
+
 .sidebar-nav {
   flex: 1;
-  padding: 14px 10px;
+  padding: 12px 10px;
   display: flex;
   flex-direction: column;
   gap: 4px;
   overflow-y: auto;
 }
 
+.nav-group-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #64748b;
+  padding: 6px 12px 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.nav-divider {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.08);
+  margin: 8px 6px;
+}
+
 .nav-item {
   display: flex;
   align-items: center;
   gap: 12px;
-  height: 42px;
+  height: 40px;
   padding: 0 12px;
   border-radius: 8px;
   color: var(--ascp-sidebar-text);
@@ -296,6 +497,51 @@ async function handleCommand(command: string) {
 
 .nav-icon {
   flex-shrink: 0;
+}
+
+.last-domain-shortcut {
+  margin-top: auto;
+  padding: 10px 8px 4px;
+}
+
+.shortcut-label {
+  font-size: 11px;
+  color: #64748b;
+  margin-bottom: 6px;
+  padding-left: 4px;
+}
+
+.shortcut-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(99, 102, 241, 0.35);
+  background: rgba(79, 70, 229, 0.14);
+  color: #e0e7ff;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.shortcut-btn:hover {
+  background: rgba(79, 70, 229, 0.28);
+}
+
+.shortcut-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.shortcut-go {
+  font-size: 12px;
+  color: #a5b4fc;
+  flex-shrink: 0;
+  margin-left: 6px;
 }
 
 .sidebar-footer {

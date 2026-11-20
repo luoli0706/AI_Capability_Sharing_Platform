@@ -1,22 +1,34 @@
-import { apiGet, apiPost } from './request'
+import { apiDelete, apiGet, apiPost, apiPut } from './request'
 import type {
   AddDomainMemberPayload,
   CreateDomainPayload,
   DomainItem,
   DomainMember,
-  PaginatedData
+  PaginatedData,
+  UpdateDomainPayload
 } from '@/types/api'
 
-export function getDomains(params?: {
+export interface DomainQueryParams {
+  tab?: 'mine' | 'square'
+  keyword?: string
+  domain_uid?: string
+  org_id?: number
   page?: number
   page_size?: number
-  keyword?: string
-}): Promise<PaginatedData<DomainItem> | DomainItem[]> {
+}
+
+export function getDomains(
+  params?: DomainQueryParams
+): Promise<PaginatedData<DomainItem> | DomainItem[]> {
   return apiGet<PaginatedData<DomainItem> | DomainItem[]>('/domains', { params })
 }
 
 export function createDomain(data: CreateDomainPayload): Promise<DomainItem> {
   return apiPost<DomainItem, CreateDomainPayload>('/domains', data)
+}
+
+export function updateDomain(id: number, data: UpdateDomainPayload): Promise<DomainItem> {
+  return apiPut<DomainItem, UpdateDomainPayload>(`/domains/${id}`, data)
 }
 
 export function getDomainMembers(
@@ -30,4 +42,19 @@ export function addDomainMember(
   data: AddDomainMemberPayload
 ): Promise<null> {
   return apiPost<null, AddDomainMemberPayload>(`/domains/${domainId}/members`, data)
+}
+
+export function updateDomainMemberRole(
+  domainId: number,
+  userId: number,
+  domain_role: 'admin' | 'member'
+): Promise<null> {
+  return apiPut<null, { domain_role: 'admin' | 'member' }>(
+    `/domains/${domainId}/members/${userId}`,
+    { domain_role }
+  )
+}
+
+export function removeDomainMember(domainId: number, userId: number): Promise<null> {
+  return apiDelete<null>(`/domains/${domainId}/members/${userId}`)
 }

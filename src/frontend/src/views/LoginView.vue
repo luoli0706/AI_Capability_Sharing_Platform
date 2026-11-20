@@ -26,7 +26,7 @@ const highlights = [
   { title: 'MCP 服务统一接入', desc: '标准化 SSE / Streamable HTTP 服务注册与探测' },
   { title: 'Skills 技能沉淀', desc: 'Prompt、脚本与工作流资产跨团队安全复用' },
   { title: 'Agent 智能体编排', desc: '灵活绑定模型参数、工具链与领域知识库' },
-  { title: '业务域隔离治理', desc: '基于业务域与 RBAC 的企业级权限边界' }
+  { title: '业务域隔离治理', desc: '基于业务域与 RBAC 的研发团队权限边界' }
 ]
 
 async function handleSubmit() {
@@ -41,7 +41,7 @@ async function handleSubmit() {
       password: form.password
     })
     ElMessage.success('登录成功')
-    const redirect = (route.query.redirect as string) || '/marketplace'
+    const redirect = (route.query.redirect as string) || '/domains'
     await router.replace(redirect)
   } catch {
     // Error message is handled by request interceptor
@@ -77,9 +77,9 @@ async function handleSubmit() {
           </div>
         </div>
 
-        <h1 class="showcase-title">企业级 AI 能力共享与治理平台</h1>
+        <h1 class="showcase-title">研发团队 AI 能力共享与治理平台</h1>
         <p class="showcase-desc">
-          统一纳管 MCP Server、Skills 技能、Agent 实例与私有知识库，打破部门数据孤岛，实现高可信 AI 资产复用。
+          统一纳管 MCP Server、Skills 技能、Agent 实例与私有知识库，打破跨团队数据孤岛，实现高可信 AI 资产复用。
         </p>
 
         <div class="highlight-grid">
@@ -95,7 +95,7 @@ async function handleSubmit() {
       <div class="auth-card">
         <div class="auth-card-header">
           <h2>欢迎登录 ASCP</h2>
-          <p>请输入您的企业账号以进入能力工作台</p>
+          <p>请输入您的团队账号以进入业务域工作台</p>
         </div>
 
         <el-form

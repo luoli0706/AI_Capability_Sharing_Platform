@@ -17,26 +17,50 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/',
     component: () => import('@/layouts/MainLayout.vue'),
-    redirect: '/marketplace',
+    redirect: '/domains',
     meta: { requiresAuth: true },
     children: [
-      {
-        path: 'marketplace',
-        name: 'marketplace',
-        component: () => import('@/views/MarketplaceView.vue'),
-        meta: { title: '能力广场', requiresAuth: true }
-      },
-      {
-        path: 'assets',
-        name: 'assets',
-        component: () => import('@/views/AssetsView.vue'),
-        meta: { title: '资产工作台', requiresAuth: true }
-      },
       {
         path: 'domains',
         name: 'domains',
         component: () => import('@/views/DomainsView.vue'),
-        meta: { title: '业务域管理', requiresAuth: true }
+        meta: { title: '业务域大厅', requiresAuth: true }
+      },
+      {
+        path: 'organizations',
+        name: 'organizations',
+        component: () => import('@/views/OrganizationsView.vue'),
+        meta: { title: '组织中心', requiresAuth: true }
+      },
+      {
+        path: 'domains/:domainId/marketplace',
+        name: 'domain-marketplace',
+        component: () => import('@/views/MarketplaceView.vue'),
+        meta: { title: '域内能力广场', requiresAuth: true, domainScoped: true }
+      },
+      {
+        path: 'domains/:domainId/assets',
+        name: 'domain-assets',
+        component: () => import('@/views/AssetsView.vue'),
+        meta: { title: '域内资产工作台', requiresAuth: true, domainScoped: true }
+      },
+      {
+        path: 'domains/:domainId/knowledge-bases',
+        name: 'domain-kbs',
+        component: () => import('@/views/KnowledgeBasesView.vue'),
+        meta: { title: '域内知识库', requiresAuth: true, domainScoped: true }
+      },
+      {
+        path: 'domains/:domainId/members',
+        name: 'domain-members',
+        component: () => import('@/views/DomainMembersView.vue'),
+        meta: { title: '域成员管理', requiresAuth: true, domainScoped: true }
+      },
+      {
+        path: 'approvals',
+        name: 'approvals',
+        component: () => import('@/views/ApprovalsView.vue'),
+        meta: { title: '审批中心', requiresAuth: true }
       },
       {
         path: 'profile',
@@ -48,7 +72,7 @@ const routes: RouteRecordRaw[] = [
   },
   {
     path: '/:pathMatch(.*)*',
-    redirect: '/marketplace'
+    redirect: '/domains'
   }
 ]
 
@@ -70,7 +94,7 @@ router.beforeEach((to) => {
   }
 
   if (to.meta.guestOnly && authStore.isAuthenticated) {
-    return { path: '/marketplace' }
+    return { path: '/domains' }
   }
 
   return true

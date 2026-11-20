@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"time"
+
 	"ascp-backend/internal/model"
 
 	"gorm.io/gorm"
@@ -8,15 +10,24 @@ import (
 )
 
 type AssetRepository interface {
-	ListAssets(q model.AssetQuery, userID uint64, isSuperAdmin bool, memberDomainIDs, adminDomainIDs []uint64) ([]model.AssetListItem, int64, error)
+	ListAssets(q model.AssetQuery, userID uint64, isSuperAdmin bool, memberDomainIDs, adminDomainIDs, permittedAssetIDs []uint64) ([]model.AssetListItem, int64, error)
 	ListUserAssets(q model.AssetQuery) ([]model.AssetListItem, int64, error)
 	FindByID(id uint64) (*model.AIAsset, error)
 	FindByCode(code string) (*model.AIAsset, error)
 	GetDetailByID(id uint64) (*model.AssetDetail, error)
+	GetDetailByCode(code string) (*model.AssetDetail, error)
 	CreateAsset(asset *model.AIAsset, ext interface{}) error
 	UpdateAsset(asset *model.AIAsset, ext interface{}) error
 	DeleteAsset(id uint64) error
 	UpdateStatus(id uint64, status string, version string) error
+	PublishWithSnapshot(assetID uint64, version, changelog string, snapshot model.JSONRaw, publisherID uint64) error
+	ListVersions(assetID uint64) ([]model.AIAssetVersion, error)
+	FindVersionByID(assetID, versionID uint64) (*model.AIAssetVersion, error)
+	RestoreFromSnapshot(asset *model.AIAsset, ext interface{}, versionID uint64, version string) error
+	UpdateMCPHealth(assetID uint64, healthStatus string, checkedAt time.Time) error
+	UpdateMCPTools(assetID uint64, toolsSchema model.JSONRaw) error
+	UpdateSkillPackage(assetID uint64, packagePath string, packageFiles model.StringSlice, content string) error
+	IncrementInvokeCount(assetID uint64) error
 }
 
 type assetRepository struct {
@@ -69,7 +80,7 @@ func (r *assetRepository) paginateAndScan(tx *gorm.DB, page, pageSize int) ([]mo
 	return items, total, nil
 }
 
-func (r *assetRepository) ListAssets(q model.AssetQuery, userID uint64, isSuperAdmin bool, memberDomainIDs, adminDomainIDs []uint64) ([]model.AssetListItem, int64, error) {
+func (r *assetRepository) ListAssets(q model.AssetQuery, userID uint64, isSuperAdmin bool, memberDomainIDs, adminDomainIDs, permittedAssetIDs []uint64) ([]model.AssetListItem, int64, error) {
 	tx := r.baseAssetListQuery()
 	tx = r.applyCommonFilters(tx, q)
 
@@ -86,14 +97,20 @@ func (r *assetRepository) ListAssets(q model.AssetQuery, userID uint64, isSuperA
 			}
 		}
 	} else {
-		// Marketplace mode: published assets visible to current user
 		tx = tx.Where("ai_asset.status = ?", model.AssetStatusPublished)
-		if len(memberDomainIDs) > 0 {
-			tx = tx.Where("(ai_asset.visibility = ? OR ai_asset.owner_id = ? OR (ai_asset.visibility = ? AND ai_asset.domain_id IN ?))",
-				model.VisibilityPublic, userID, model.VisibilityDomain, memberDomainIDs)
-		} else {
-			tx = tx.Where("(ai_asset.visibility = ? OR ai_asset.owner_id = ?)",
-				model.VisibilityPublic, userID)
+		if !isSuperAdmin {
+			cond := "(ai_asset.visibility = ? OR ai_asset.owner_id = ?"
+			args := []interface{}{model.VisibilityPublic, userID}
+			if len(memberDomainIDs) > 0 {
+				cond += " OR (ai_asset.visibility = ? AND ai_asset.domain_id IN ?)"
+				args = append(args, model.VisibilityDomain, memberDomainIDs)
+			}
+			if len(permittedAssetIDs) > 0 {
+				cond += " OR ai_asset.id IN ?"
+				args = append(args, permittedAssetIDs)
+			}
+			cond += ")"
+			tx = tx.Where(cond, args...)
 		}
 	}
 
@@ -131,7 +148,19 @@ func (r *assetRepository) GetDetailByID(id uint64) (*model.AssetDetail, error) {
 	if err != nil {
 		return nil, err
 	}
+	return r.attachExtension(&listItem), nil
+}
 
+func (r *assetRepository) GetDetailByCode(code string) (*model.AssetDetail, error) {
+	var listItem model.AssetListItem
+	err := r.baseAssetListQuery().Where("ai_asset.asset_code = ?", code).Take(&listItem).Error
+	if err != nil {
+		return nil, err
+	}
+	return r.attachExtension(&listItem), nil
+}
+
+func (r *assetRepository) attachExtension(listItem *model.AssetListItem) *model.AssetDetail {
 	detail := &model.AssetDetail{
 		AIAsset:    listItem.AIAsset,
 		DomainName: listItem.DomainName,
@@ -141,27 +170,27 @@ func (r *assetRepository) GetDetailByID(id uint64) (*model.AssetDetail, error) {
 	switch listItem.AssetType {
 	case model.AssetTypeMCP:
 		var cfg model.AIAssetMCP
-		if err := r.db.Where("asset_id = ?", id).First(&cfg).Error; err == nil {
+		if err := r.db.Where("asset_id = ?", listItem.ID).First(&cfg).Error; err == nil {
 			detail.MCPConfig = &cfg
 		}
 	case model.AssetTypeSkill:
 		var cfg model.AIAssetSkill
-		if err := r.db.Where("asset_id = ?", id).First(&cfg).Error; err == nil {
+		if err := r.db.Where("asset_id = ?", listItem.ID).First(&cfg).Error; err == nil {
 			detail.SkillConfig = &cfg
 		}
 	case model.AssetTypeAgent:
 		var cfg model.AIAssetAgent
-		if err := r.db.Where("asset_id = ?", id).First(&cfg).Error; err == nil {
+		if err := r.db.Where("asset_id = ?", listItem.ID).First(&cfg).Error; err == nil {
 			detail.AgentConfig = &cfg
 		}
 	case model.AssetTypeKB:
 		var cfg model.KBKnowledgeBase
-		if err := r.db.Where("asset_id = ?", id).First(&cfg).Error; err == nil {
+		if err := r.db.Where("asset_id = ?", listItem.ID).First(&cfg).Error; err == nil {
 			detail.KBConfig = &cfg
 		}
 	}
 
-	return detail, nil
+	return detail
 }
 
 func (r *assetRepository) CreateAsset(asset *model.AIAsset, ext interface{}) error {
@@ -202,6 +231,101 @@ func (r *assetRepository) UpdateStatus(id uint64, status string, version string)
 		updates["current_version"] = version
 	}
 	return r.db.Model(&model.AIAsset{}).Where("id = ?", id).Updates(updates).Error
+}
+
+func (r *assetRepository) PublishWithSnapshot(assetID uint64, version, changelog string, snapshot model.JSONRaw, publisherID uint64) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&model.AIAssetVersion{}).
+			Where("asset_id = ?", assetID).
+			Update("is_active", 0).Error; err != nil {
+			return err
+		}
+
+		ver := model.AIAssetVersion{
+			AssetID:      assetID,
+			Version:      version,
+			Changelog:    changelog,
+			SnapshotJSON: snapshot,
+			PublisherID:  publisherID,
+			IsActive:     1,
+		}
+		if err := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "asset_id"}, {Name: "version"}},
+			DoUpdates: clause.AssignmentColumns([]string{"changelog", "snapshot_json", "publisher_id", "is_active"}),
+		}).Create(&ver).Error; err != nil {
+			return err
+		}
+
+		return tx.Model(&model.AIAsset{}).Where("id = ?", assetID).Updates(map[string]interface{}{
+			"status":          model.AssetStatusPublished,
+			"current_version": version,
+		}).Error
+	})
+}
+
+func (r *assetRepository) ListVersions(assetID uint64) ([]model.AIAssetVersion, error) {
+	var list []model.AIAssetVersion
+	if err := r.db.Where("asset_id = ?", assetID).Order("id DESC").Find(&list).Error; err != nil {
+		return nil, err
+	}
+	if list == nil {
+		list = []model.AIAssetVersion{}
+	}
+	return list, nil
+}
+
+func (r *assetRepository) FindVersionByID(assetID, versionID uint64) (*model.AIAssetVersion, error) {
+	var ver model.AIAssetVersion
+	if err := r.db.Where("id = ? AND asset_id = ?", versionID, assetID).First(&ver).Error; err != nil {
+		return nil, err
+	}
+	return &ver, nil
+}
+
+func (r *assetRepository) RestoreFromSnapshot(asset *model.AIAsset, ext interface{}, versionID uint64, version string) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		asset.CurrentVersion = version
+		if err := tx.Save(asset).Error; err != nil {
+			return err
+		}
+		if ext != nil {
+			setAssetID(ext, asset.ID)
+			if err := tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(ext).Error; err != nil {
+				return err
+			}
+		}
+		if err := tx.Model(&model.AIAssetVersion{}).Where("asset_id = ?", asset.ID).Update("is_active", 0).Error; err != nil {
+			return err
+		}
+		return tx.Model(&model.AIAssetVersion{}).Where("id = ? AND asset_id = ?", versionID, asset.ID).Update("is_active", 1).Error
+	})
+}
+
+func (r *assetRepository) UpdateMCPHealth(assetID uint64, healthStatus string, checkedAt time.Time) error {
+	return r.db.Model(&model.AIAssetMCP{}).Where("asset_id = ?", assetID).Updates(map[string]interface{}{
+		"health_status":   healthStatus,
+		"last_checked_at": checkedAt,
+	}).Error
+}
+
+func (r *assetRepository) UpdateMCPTools(assetID uint64, toolsSchema model.JSONRaw) error {
+	return r.db.Model(&model.AIAssetMCP{}).Where("asset_id = ?", assetID).Update("tools_schema", toolsSchema).Error
+}
+
+func (r *assetRepository) UpdateSkillPackage(assetID uint64, packagePath string, packageFiles model.StringSlice, content string) error {
+	updates := map[string]interface{}{
+		"package_path":  packagePath,
+		"package_files": packageFiles,
+	}
+	if content != "" {
+		updates["content"] = content
+	}
+	return r.db.Model(&model.AIAssetSkill{}).Where("asset_id = ?", assetID).Updates(updates).Error
+}
+
+func (r *assetRepository) IncrementInvokeCount(assetID uint64) error {
+	return r.db.Model(&model.AIAsset{}).Where("id = ?", assetID).
+		UpdateColumn("invoke_count", gorm.Expr("invoke_count + 1")).Error
 }
 
 func setAssetID(ext interface{}, assetID uint64) {

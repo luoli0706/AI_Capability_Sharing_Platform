@@ -10,13 +10,20 @@ const (
 	DomainRoleOwner  = "owner"
 	DomainRoleAdmin  = "admin"
 	DomainRoleMember = "member"
+
+	DomainVisibilityPublic  = "public"
+	DomainVisibilityPrivate = "private"
 )
 
 type BizDomain struct {
 	ID          uint64         `gorm:"primaryKey;autoIncrement" json:"id"`
+	DomainUID   string         `gorm:"column:domain_uid;type:varchar(32);uniqueIndex:uk_domain_uid;not null;default:''" json:"domain_uid"`
 	DomainCode  string         `gorm:"type:varchar(64);uniqueIndex:uk_domain_code;not null" json:"domain_code"`
 	DomainName  string         `gorm:"type:varchar(128);not null" json:"domain_name"`
 	Description string         `gorm:"type:varchar(512);not null;default:''" json:"description"`
+	Visibility  string         `gorm:"type:varchar(16);not null;default:'public'" json:"visibility"`
+	OrgID       uint64         `gorm:"index:idx_org_id;not null;default:0" json:"org_id"`
+	OrgName     string         `gorm:"type:varchar(64);not null;default:'个人'" json:"org_name"`
 	OwnerID     uint64         `gorm:"not null" json:"owner_id"`
 	Status      int8           `gorm:"type:tinyint;not null;default:1" json:"status"`
 	CreatedAt   time.Time      `gorm:"autoCreateTime" json:"created_at"`
@@ -42,17 +49,23 @@ func (DomainMember) TableName() string {
 	return "domain_member"
 }
 
-// DomainListItem represents a domain row with current user's role and member count.
+// DomainListItem represents a domain row with visibility, org attribution, and caller permissions.
 type DomainListItem struct {
-	ID          uint64    `json:"id"`
-	DomainCode  string    `json:"domain_code"`
-	DomainName  string    `json:"domain_name"`
-	Description string    `json:"description"`
-	OwnerID     uint64    `json:"owner_id"`
-	Status      int8      `json:"status"`
-	MyRole      string    `json:"my_role"`
-	MemberCount int64     `json:"member_count"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID           uint64    `json:"id"`
+	DomainUID    string    `json:"domain_uid"`
+	DomainCode   string    `json:"domain_code"`
+	DomainName   string    `json:"domain_name"`
+	Description  string    `json:"description"`
+	Visibility   string    `json:"visibility"`
+	OrgID        uint64    `json:"org_id"`
+	OrgName      string    `json:"org_name"`
+	OwnerID      uint64    `json:"owner_id"`
+	Status       int8      `json:"status"`
+	MyRole       string    `json:"my_role"`
+	CanManage    bool      `json:"can_manage"`
+	HasOrgAccess bool      `json:"has_org_access"`
+	MemberCount  int64     `json:"member_count"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 // DomainMemberItem represents a member entry in GET /api/v1/domains/:id/members.
@@ -65,11 +78,28 @@ type DomainMemberItem struct {
 	JoinedAt   time.Time `json:"joined_at"`
 }
 
+// DomainQuery defines filters for GET /api/v1/domains.
+type DomainQuery struct {
+	Tab       string
+	Keyword   string
+	DomainUID string
+	OrgID     uint64
+}
+
 // CreateDomainRequest represents POST /api/v1/domains payload.
 type CreateDomainRequest struct {
 	DomainCode  string `json:"domain_code" validate:"required,min=2,max=64"`
 	DomainName  string `json:"domain_name" validate:"required,min=2,max=128"`
 	Description string `json:"description" validate:"max=512"`
+	Visibility  string `json:"visibility" validate:"omitempty,oneof=public private"`
+	OrgID       uint64 `json:"org_id"`
+}
+
+// UpdateDomainRequest represents PUT /api/v1/domains/:id payload.
+type UpdateDomainRequest struct {
+	DomainName  string `json:"domain_name" validate:"omitempty,min=2,max=128"`
+	Description *string `json:"description" validate:"omitempty,max=512"`
+	Visibility  string `json:"visibility" validate:"omitempty,oneof=public private"`
 }
 
 // AddDomainMemberRequest represents POST /api/v1/domains/:id/members payload.
@@ -77,4 +107,9 @@ type AddDomainMemberRequest struct {
 	UserID     uint64 `json:"user_id"`
 	Username   string `json:"username"`
 	DomainRole string `json:"domain_role" validate:"required,oneof=owner admin member"`
+}
+
+// UpdateDomainMemberRoleRequest represents PUT /api/v1/domains/:id/members/:userId payload.
+type UpdateDomainMemberRoleRequest struct {
+	DomainRole string `json:"domain_role" validate:"required,oneof=admin member"`
 }

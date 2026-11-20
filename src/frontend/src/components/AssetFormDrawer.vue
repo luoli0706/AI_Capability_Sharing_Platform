@@ -1,22 +1,46 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
-import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
-import { createAsset, getAssetDetail, updateAsset } from '@/api/asset'
+import { Link, Search, UploadFilled } from '@element-plus/icons-vue'
+import {
+  ElMessage,
+  type FormInstance,
+  type FormRules,
+  type UploadRequestOptions
+} from 'element-plus'
+import {
+  createAsset,
+  getAssetDetail,
+  getAssets,
+  importAgentFromUrl,
+  importSkillFromUrl,
+  parseAgentFile,
+  parseAgentText,
+  parseMcpJson,
+  parseSkillFile,
+  searchMcpRegistry,
+  updateAsset,
+  uploadSkillPackage
+} from '@/api/asset'
 import type {
   AgentConfig,
+  AgentImportResult,
+  AssetItem,
   AssetType,
   AssetVisibility,
   CreateAssetPayload,
   DomainItem,
   KbConfig,
   McpConfig,
+  McpImportItem,
   SkillConfig
 } from '@/types/api'
+import { normalizeList } from '@/utils/format'
 
 const props = defineProps<{
   modelValue: boolean
   editAssetId: number | null
   domains: DomainItem[]
+  fixedDomainId?: number | null
 }>()
 
 const emit = defineEmits<{
@@ -56,30 +80,62 @@ function createInitialForm(): AssetFormState {
     name: '',
     summary: '',
     tags: [],
-    domain_id: props.domains[0]?.id,
+    domain_id: props.fixedDomainId || props.domains[0]?.id,
     visibility: 'domain',
     mcp_config: {
       transport_type: 'sse',
       endpoint_url: '',
-      auth_type: 'none'
+      auth_type: 'none',
+      source_url: '',
+      package_command: ''
     },
     skill_config: {
       skill_type: 'prompt',
       content: '',
-      runtime_env: 'python3.11'
+      runtime_env: 'python3.11',
+      source_url: '',
+      package_files: []
     },
     agent_config: {
       model_provider: 'openai',
       model_name: 'gpt-4o-mini',
       system_prompt: '',
       temperature: 0.7,
-      max_tokens: 2048
+      max_tokens: 2048,
+      bound_mcp_ids: [],
+      bound_skill_ids: [],
+      bound_kb_ids: [],
+      source_url: ''
     },
     kb_config: {
       chunk_size: 500,
-      chunk_overlap: 50,
-      embedding_model: 'text-embedding-3-small'
+      chunk_overlap: 50
     }
+  }
+}
+
+const domainMcps = ref<AssetItem[]>([])
+const domainSkills = ref<AssetItem[]>([])
+const domainKbs = ref<AssetItem[]>([])
+
+async function loadBindableAssets(targetDomainId?: number) {
+  const did = targetDomainId || form.domain_id || props.fixedDomainId
+  if (!did) return
+  try {
+    const res = await getAssets({
+      scope: 'marketplace',
+      domain_id: did,
+      page: 1,
+      page_size: 100
+    })
+    const items = normalizeList(res).items
+    domainMcps.value = items.filter((a) => a.asset_type === 'mcp')
+    domainSkills.value = items.filter((a) => a.asset_type === 'skill')
+    domainKbs.value = items.filter((a) => a.asset_type === 'kb')
+  } catch {
+    domainMcps.value = []
+    domainSkills.value = []
+    domainKbs.value = []
   }
 }
 
@@ -97,7 +153,11 @@ const rules: FormRules = {
   'mcp_config.endpoint_url': [
     {
       validator: (_rule, val, cb) => {
-        if (form.asset_type === 'mcp' && !val?.trim()) {
+        if (
+          form.asset_type === 'mcp' &&
+          form.mcp_config.transport_type !== 'stdio' &&
+          !val?.trim()
+        ) {
           cb(new Error('请输入 MCP 服务端点 URL'))
           return
         }
@@ -132,9 +192,252 @@ const rules: FormRules = {
   ]
 }
 
+const skillsShUrl = ref('')
+const importingUrl = ref(false)
+const parsingFile = ref(false)
+const pendingSkillFile = ref<File | null>(null)
+
+function slugifyCode(raw: string): string {
+  return raw
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48)
+}
+
+function applyParsedSkill(meta: import('@/types/api').ParsedSkillMeta, fallbackUrl?: string) {
+  if (meta.name && !form.name) {
+    form.name = meta.name
+  } else if (meta.name) {
+    form.name = meta.name
+  }
+  if (!isEdit.value) {
+    const rawCode = meta.asset_code || (meta.name ? slugifyCode(meta.name) : '')
+    if (rawCode) form.asset_code = rawCode
+  }
+  if (meta.summary) form.summary = meta.summary
+  if (meta.skill_type) form.skill_config.skill_type = meta.skill_type
+  if (meta.runtime_env) form.skill_config.runtime_env = meta.runtime_env
+  if (meta.content !== undefined) form.skill_config.content = meta.content
+  if (meta.source_url || fallbackUrl) {
+    form.skill_config.source_url = meta.source_url || fallbackUrl || ''
+  }
+  if (Array.isArray(meta.package_files)) {
+    form.skill_config.package_files = meta.package_files
+  }
+  if (Array.isArray(meta.tags) && meta.tags.length > 0) {
+    form.tags = [...new Set([...form.tags, ...meta.tags])]
+  }
+}
+
+async function handleImportSkillUrl() {
+  const url = skillsShUrl.value.trim()
+  if (!url) {
+    ElMessage.warning('请输入 skills.sh 链接')
+    return
+  }
+  importingUrl.value = true
+  try {
+    const parsed = await importSkillFromUrl(url)
+    applyParsedSkill(parsed, url)
+    ElMessage.success('已从 skills.sh 解析并填充技能信息')
+  } catch {
+    // Handled by interceptor
+  } finally {
+    importingUrl.value = false
+  }
+}
+
+async function handleSkillFileRequest(options: UploadRequestOptions) {
+  const file = options.file as File
+  pendingSkillFile.value = file
+  parsingFile.value = true
+  try {
+    const parsed = await parseSkillFile(file)
+    applyParsedSkill(parsed)
+    ElMessage.success(`已解析技能包「${file.name}」，提交保存时将自动上传`)
+  } catch {
+    // Handled by interceptor
+  } finally {
+    parsingFile.value = false
+  }
+}
+
+const mcpRegistryQuery = ref('')
+const searchingRegistry = ref(false)
+const mcpRegistryResults = ref<McpImportItem[]>([])
+const showMcpJsonImport = ref(false)
+const mcpJsonContent = ref('')
+const parsingMcpJson = ref(false)
+
+async function handleSearchMcpRegistry() {
+  const q = mcpRegistryQuery.value.trim()
+  if (!q) {
+    ElMessage.warning('请输入搜索关键词，例如 github、postgres、filesystem')
+    return
+  }
+  searchingRegistry.value = true
+  try {
+    const res = await searchMcpRegistry(q, 10)
+    mcpRegistryResults.value = normalizeList(res).items
+    if (mcpRegistryResults.value.length === 0) {
+      ElMessage.info('未在官方 MCP Registry 中找到匹配服务')
+    }
+  } catch {
+    mcpRegistryResults.value = []
+  } finally {
+    searchingRegistry.value = false
+  }
+}
+
+function applyMcpImportItem(item: McpImportItem) {
+  if (item.name) form.name = item.name
+  if (!isEdit.value) {
+    const code = item.slug || (item.name ? slugifyCode(item.name) : '')
+    if (code) form.asset_code = code
+  }
+  if (item.description) form.summary = item.description
+  if (item.transport_type) form.mcp_config.transport_type = item.transport_type
+  if (item.endpoint_url !== undefined) form.mcp_config.endpoint_url = item.endpoint_url || ''
+  if (item.auth_type) form.mcp_config.auth_type = item.auth_type
+  if (item.package_command !== undefined) {
+    form.mcp_config.package_command = item.package_command || ''
+  }
+  if (item.source_url !== undefined) {
+    form.mcp_config.source_url = item.source_url || ''
+  }
+  ElMessage.success(`已填入「${item.name || item.slug}」配置`)
+}
+
+async function handleParseMcpJson() {
+  const content = mcpJsonContent.value.trim()
+  if (!content) {
+    ElMessage.warning('请先粘贴 mcpServers 或 server.json 配置内容')
+    return
+  }
+  parsingMcpJson.value = true
+  try {
+    const res = await parseMcpJson(content)
+    const item = Array.isArray(res) ? res[0] : res
+    if (!item) {
+      ElMessage.warning('未能解析出有效的 MCP 服务配置')
+      return
+    }
+    applyMcpImportItem(item)
+    showMcpJsonImport.value = false
+  } catch {
+    // Handled by interceptor
+  } finally {
+    parsingMcpJson.value = false
+  }
+}
+
+const agentImportUrl = ref('')
+const importingAgentUrl = ref(false)
+const parsingAgentFile = ref(false)
+const showAgentTextImport = ref(false)
+const agentTextContent = ref('')
+const parsingAgentText = ref(false)
+const detectedAgentFormat = ref('')
+
+function applyAgentImport(parsed: AgentImportResult, fallbackUrl?: string) {
+  if (parsed.name?.trim()) form.name = parsed.name.trim()
+  if (!isEdit.value) {
+    const code = parsed.slug?.trim() || (parsed.name ? slugifyCode(parsed.name) : '')
+    if (code) form.asset_code = code
+  }
+  if (parsed.description?.trim()) form.summary = parsed.description.trim()
+  if (Array.isArray(parsed.tags) && parsed.tags.length > 0) {
+    form.tags = [...new Set([...form.tags, ...parsed.tags])]
+  }
+  if (parsed.model_provider?.trim()) {
+    form.agent_config.model_provider = parsed.model_provider.trim()
+  }
+  if (parsed.model_name?.trim()) {
+    form.agent_config.model_name = parsed.model_name.trim()
+  }
+  if (parsed.system_prompt?.trim()) {
+    form.agent_config.system_prompt = parsed.system_prompt
+  }
+  if (typeof parsed.temperature === 'number' && !Number.isNaN(parsed.temperature)) {
+    form.agent_config.temperature = parsed.temperature
+  }
+  if (typeof parsed.max_tokens === 'number' && parsed.max_tokens > 0) {
+    form.agent_config.max_tokens = parsed.max_tokens
+  }
+  if (parsed.source_url?.trim() || fallbackUrl) {
+    form.agent_config.source_url = parsed.source_url?.trim() || fallbackUrl || ''
+  }
+  if (parsed.detected_format) {
+    detectedAgentFormat.value = parsed.detected_format
+  }
+}
+
+async function handleImportAgentUrl() {
+  const url = agentImportUrl.value.trim()
+  if (!url) {
+    ElMessage.warning('请输入 Agent 定义文件或页面链接')
+    return
+  }
+  importingAgentUrl.value = true
+  try {
+    const parsed = await importAgentFromUrl(url)
+    applyAgentImport(parsed, url)
+    ElMessage.success('已解析 URL 并填充 Agent 配置')
+  } catch {
+    // Handled by interceptor
+  } finally {
+    importingAgentUrl.value = false
+  }
+}
+
+async function handleAgentFileRequest(options: UploadRequestOptions) {
+  const file = options.file as File
+  parsingAgentFile.value = true
+  try {
+    const parsed = await parseAgentFile(file)
+    applyAgentImport(parsed)
+    ElMessage.success(`已解析文件「${file.name}」`)
+  } catch {
+    // Handled by interceptor
+  } finally {
+    parsingAgentFile.value = false
+  }
+}
+
+async function handleParseAgentText() {
+  const content = agentTextContent.value.trim()
+  if (!content) {
+    ElMessage.warning('请先粘贴 Markdown / JSON / YAML 内容')
+    return
+  }
+  parsingAgentText.value = true
+  try {
+    const parsed = await parseAgentText(content)
+    applyAgentImport(parsed)
+    showAgentTextImport.value = false
+    ElMessage.success('已解析文本并填充 Agent 配置')
+  } catch {
+    // Handled by interceptor
+  } finally {
+    parsingAgentText.value = false
+  }
+}
+
 function resetForm() {
   Object.assign(form, createInitialForm())
   tagInput.value = ''
+  skillsShUrl.value = ''
+  pendingSkillFile.value = null
+  mcpRegistryQuery.value = ''
+  mcpRegistryResults.value = []
+  showMcpJsonImport.value = false
+  mcpJsonContent.value = ''
+  agentImportUrl.value = ''
+  showAgentTextImport.value = false
+  agentTextContent.value = ''
+  detectedAgentFormat.value = ''
   formRef.value?.clearValidate()
 }
 
@@ -143,6 +446,7 @@ watch(
   async ([isOpen, editId]) => {
     if (!isOpen) return
     resetForm()
+    loadBindableAssets(props.fixedDomainId || undefined)
     if (!editId) return
 
     loadingDetail.value = true
@@ -216,12 +520,20 @@ async function handleSubmit() {
 
   submitting.value = true
   try {
+    let savedId: number | undefined
     if (isEdit.value && props.editAssetId) {
       await updateAsset(props.editAssetId, payload)
+      savedId = props.editAssetId
       ElMessage.success('资产更新成功')
     } else {
-      await createAsset(payload)
+      const created = await createAsset(payload)
+      savedId = created?.id
       ElMessage.success('资产创建成功')
+    }
+    if (form.asset_type === 'skill' && pendingSkillFile.value && savedId) {
+      await uploadSkillPackage(savedId, pendingSkillFile.value)
+      ElMessage.success('技能包文件已上传')
+      pendingSkillFile.value = null
     }
     visible.value = false
     emit('saved')
@@ -285,7 +597,13 @@ async function handleSubmit() {
         </el-col>
         <el-col :span="8">
           <el-form-item label="所属业务域" prop="domain_id">
-            <el-select v-model="form.domain_id" placeholder="选择业务域" style="width: 100%">
+            <el-select
+              v-model="form.domain_id"
+              :disabled="Boolean(fixedDomainId)"
+              placeholder="选择业务域"
+              style="width: 100%"
+              @change="loadBindableAssets()"
+            >
               <el-option
                 v-for="d in domains"
                 :key="d.id"
@@ -340,6 +658,75 @@ async function handleSubmit() {
       <!-- MCP Config -->
       <template v-if="form.asset_type === 'mcp'">
         <div class="form-section-title">MCP 服务配置</div>
+
+        <div class="mcp-import-box">
+          <div class="import-header-row">
+            <span class="import-label" style="margin-bottom: 0">
+              从官方 MCP Registry 导入
+              <span class="registry-sub mono-text">(registry.modelcontextprotocol.io)</span>
+            </span>
+            <el-button link type="primary" size="small" @click="showMcpJsonImport = !showMcpJsonImport">
+              {{ showMcpJsonImport ? '收起 JSON 导入' : '粘贴 mcpServers / server.json 导入' }}
+            </el-button>
+          </div>
+
+          <div class="import-row" style="margin-top: 8px">
+            <el-input
+              v-model="mcpRegistryQuery"
+              placeholder="搜索关键词（如 github、postgres、filesystem）..."
+              :prefix-icon="Search"
+              clearable
+              @keyup.enter.prevent="handleSearchMcpRegistry"
+            />
+            <el-button
+              type="primary"
+              plain
+              :loading="searchingRegistry"
+              @click="handleSearchMcpRegistry"
+            >
+              搜索 Registry
+            </el-button>
+          </div>
+
+          <div v-if="mcpRegistryResults.length > 0" class="registry-results">
+            <div v-for="srv in mcpRegistryResults" :key="srv.registry_name || srv.slug" class="registry-item">
+              <div class="registry-info">
+                <div class="registry-title-row">
+                  <span class="registry-name">{{ srv.name || srv.registry_name }}</span>
+                  <span v-if="srv.version" class="registry-ver mono-text">{{ srv.version }}</span>
+                  <el-tag size="small" type="info" effect="plain" class="mono-text">
+                    {{ srv.transport_type }}
+                  </el-tag>
+                </div>
+                <div class="registry-desc">{{ srv.description || '暂无描述' }}</div>
+              </div>
+              <el-button type="primary" size="small" plain @click="applyMcpImportItem(srv)">
+                填入表单
+              </el-button>
+            </div>
+          </div>
+
+          <div v-if="showMcpJsonImport" class="json-import-panel">
+            <el-input
+              v-model="mcpJsonContent"
+              type="textarea"
+              :rows="5"
+              placeholder='粘贴 {"mcpServers": { ... }} 或 server.json 内容...'
+              class="mono-text"
+            />
+            <div class="json-import-actions">
+              <el-button
+                type="primary"
+                size="small"
+                :loading="parsingMcpJson"
+                @click="handleParseMcpJson"
+              >
+                解析并填入
+              </el-button>
+            </div>
+          </div>
+        </div>
+
         <el-row :gutter="16">
           <el-col :span="12">
             <el-form-item label="传输协议 (Transport)" prop="mcp_config.transport_type">
@@ -363,7 +750,21 @@ async function handleSubmit() {
         <el-form-item label="服务端点 URL" prop="mcp_config.endpoint_url">
           <el-input
             v-model="form.mcp_config.endpoint_url"
-            placeholder="https://mcp.example.com/sse"
+            placeholder="https://mcp.example.com/sse（Stdio 类型可留空）"
+            class="mono-text"
+          />
+        </el-form-item>
+        <el-form-item label="启动命令 (Package Command，适用于 Stdio)">
+          <el-input
+            v-model="form.mcp_config.package_command"
+            placeholder="例如：npx -y @modelcontextprotocol/server-github"
+            class="mono-text"
+          />
+        </el-form-item>
+        <el-form-item label="来源链接 (Source URL)">
+          <el-input
+            v-model="form.mcp_config.source_url"
+            placeholder="https://github.com/..."
             class="mono-text"
           />
         </el-form-item>
@@ -372,6 +773,48 @@ async function handleSubmit() {
       <!-- Skill Config -->
       <template v-else-if="form.asset_type === 'skill'">
         <div class="form-section-title">Skills 技能配置</div>
+
+        <div class="skill-import-box">
+          <div class="import-label">从 skills.sh 导入</div>
+          <div class="import-row">
+            <el-input
+              v-model="skillsShUrl"
+              placeholder="https://skills.sh/vercel-labs/skills/find-skills"
+              :prefix-icon="Link"
+              clearable
+            />
+            <el-button type="primary" plain :loading="importingUrl" @click="handleImportSkillUrl">
+              导入解析
+            </el-button>
+          </div>
+        </div>
+
+        <div class="skill-upload-box">
+          <el-upload
+            drag
+            action="#"
+            :show-file-list="false"
+            :http-request="handleSkillFileRequest"
+            accept=".md,.zip"
+            :disabled="parsingFile"
+          >
+            <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
+            <div class="el-upload__text">
+              拖拽或点击上传 <em>SKILL.md / .zip 技能包</em>
+            </div>
+            <template #tip>
+              <div class="el-upload__tip">
+                <span v-if="pendingSkillFile">
+                  已选待上传文件：<strong class="mono-text">{{ pendingSkillFile.name }}</strong>
+                </span>
+                <span v-else>
+                  上传后将自动解析名称、简介与 SKILL.md 内容，并在保存资产时同步上传技能包
+                </span>
+              </div>
+            </template>
+          </el-upload>
+        </div>
+
         <el-row :gutter="16">
           <el-col :span="12">
             <el-form-item label="技能类型" prop="skill_config.skill_type">
@@ -392,6 +835,30 @@ async function handleSubmit() {
             </el-form-item>
           </el-col>
         </el-row>
+
+        <el-form-item label="来源链接 (Source URL)">
+          <el-input
+            v-model="form.skill_config.source_url"
+            placeholder="https://skills.sh/..."
+            class="mono-text"
+          />
+        </el-form-item>
+
+        <el-form-item v-if="form.skill_config.package_files?.length" label="技能包内文件">
+          <div class="package-files-list">
+            <el-tag
+              v-for="f in form.skill_config.package_files"
+              :key="f"
+              size="small"
+              type="info"
+              effect="plain"
+              class="mono-text"
+            >
+              {{ f }}
+            </el-tag>
+          </div>
+        </el-form-item>
+
         <el-form-item label="技能内容 / Prompt 定义" prop="skill_config.content">
           <el-input
             v-model="form.skill_config.content"
@@ -406,6 +873,92 @@ async function handleSubmit() {
       <!-- Agent Config -->
       <template v-else-if="form.asset_type === 'agent'">
         <div class="form-section-title">Agent 实例配置</div>
+
+        <div class="mcp-import-box">
+          <div class="import-header-row">
+            <span class="import-label" style="margin-bottom: 0">
+              智能导入 Agent
+              <el-tag
+                v-if="detectedAgentFormat"
+                size="small"
+                type="success"
+                effect="light"
+                class="mono-text"
+                style="margin-left: 8px"
+              >
+                {{ detectedAgentFormat }}
+              </el-tag>
+            </span>
+            <el-button
+              link
+              type="primary"
+              size="small"
+              @click="showAgentTextImport = !showAgentTextImport"
+            >
+              {{ showAgentTextImport ? '收起文本粘贴' : '粘贴 Markdown / JSON / YAML' }}
+            </el-button>
+          </div>
+
+          <div class="import-row" style="margin-top: 8px">
+            <el-input
+              v-model="agentImportUrl"
+              placeholder="输入 ModelScope / Agentverse / GitHub (.md/.json/.yaml) 链接..."
+              :prefix-icon="Link"
+              clearable
+              @keyup.enter.prevent="handleImportAgentUrl"
+            />
+            <el-button
+              type="primary"
+              plain
+              :loading="importingAgentUrl"
+              @click="handleImportAgentUrl"
+            >
+              导入解析
+            </el-button>
+          </div>
+
+          <div style="margin-top: 10px">
+            <el-upload
+              drag
+              action="#"
+              :show-file-list="false"
+              :http-request="handleAgentFileRequest"
+              accept=".md,.txt,.json,.yaml,.yml"
+              :disabled="parsingAgentFile"
+            >
+              <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
+              <div class="el-upload__text">
+                拖拽或点击上传 <em>.md / .txt / .json / .yaml</em> Agent 配置文件
+              </div>
+              <template #tip>
+                <div class="el-upload__tip">
+                  兼容单 Markdown、Frontmatter .md、Dify DSL YAML 及通用 JSON 格式
+                </div>
+              </template>
+            </el-upload>
+          </div>
+
+          <div v-if="showAgentTextImport" class="json-import-panel">
+            <el-input
+              v-model="agentTextContent"
+              type="textarea"
+              :rows="5"
+              placeholder="粘贴 Markdown / Frontmatter / Dify YAML / JSON 配置..."
+              class="mono-text"
+            />
+            <div class="json-import-actions">
+              <el-button
+                type="primary"
+                size="small"
+                :loading="parsingAgentText"
+                @click="handleParseAgentText"
+              >
+                解析并填入
+              </el-button>
+            </div>
+          </div>
+        </div>
+
         <el-row :gutter="16">
           <el-col :span="12">
             <el-form-item label="模型厂商" prop="agent_config.model_provider">
@@ -454,9 +1007,49 @@ async function handleSubmit() {
           <el-input
             v-model="form.agent_config.system_prompt"
             type="textarea"
-            :rows="5"
+            :rows="4"
             placeholder="设定 Agent 的角色定位、行为约束与输出规范..."
           />
+        </el-form-item>
+        <el-form-item label="来源链接 (Source URL)">
+          <el-input
+            v-model="form.agent_config.source_url"
+            placeholder="https://github.com/... 或 ModelScope 链接"
+            class="mono-text"
+          />
+        </el-form-item>
+        <el-form-item label="绑定域内 MCP 服务">
+          <el-select
+            v-model="form.agent_config.bound_mcp_ids"
+            multiple
+            clearable
+            placeholder="选择已发布的 MCP 服务"
+            style="width: 100%"
+          >
+            <el-option v-for="m in domainMcps" :key="m.id" :label="m.name" :value="m.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="绑定域内 Skills 技能">
+          <el-select
+            v-model="form.agent_config.bound_skill_ids"
+            multiple
+            clearable
+            placeholder="选择已发布的 Skills 技能"
+            style="width: 100%"
+          >
+            <el-option v-for="s in domainSkills" :key="s.id" :label="s.name" :value="s.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="绑定域内知识库">
+          <el-select
+            v-model="form.agent_config.bound_kb_ids"
+            multiple
+            clearable
+            placeholder="选择已发布的私有知识库"
+            style="width: 100%"
+          >
+            <el-option v-for="k in domainKbs" :key="k.id" :label="k.name" :value="k.id" />
+          </el-select>
         </el-form-item>
       </template>
 
@@ -487,13 +1080,6 @@ async function handleSubmit() {
             </el-form-item>
           </el-col>
         </el-row>
-        <el-form-item label="Embedding 模型">
-          <el-input
-            v-model="form.kb_config.embedding_model"
-            placeholder="例如：text-embedding-3-small / bge-large-zh"
-            class="mono-text"
-          />
-        </el-form-item>
       </template>
     </el-form>
 
@@ -533,5 +1119,121 @@ async function handleSubmit() {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
+}
+
+.skill-import-box {
+  background: #f8fafc;
+  border: 1px solid var(--ascp-border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+}
+
+.import-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ascp-text-primary);
+  margin-bottom: 8px;
+}
+
+.import-row {
+  display: flex;
+  gap: 8px;
+}
+
+.skill-upload-box {
+  margin-bottom: 16px;
+}
+
+.package-files-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mcp-import-box {
+  background: #f8fafc;
+  border: 1px solid var(--ascp-border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 16px;
+}
+
+.import-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.registry-sub {
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--ascp-text-muted);
+}
+
+.registry-results {
+  margin-top: 10px;
+  max-height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.registry-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  background: #ffffff;
+  border: 1px solid var(--ascp-border);
+  border-radius: 8px;
+}
+
+.registry-info {
+  min-width: 0;
+  flex: 1;
+}
+
+.registry-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.registry-name {
+  font-weight: 600;
+  font-size: 13.5px;
+  color: var(--ascp-text-primary);
+}
+
+.registry-ver {
+  font-size: 11.5px;
+  color: var(--ascp-text-muted);
+}
+
+.registry-desc {
+  margin-top: 3px;
+  font-size: 12.5px;
+  color: var(--ascp-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.json-import-panel {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--ascp-border);
+}
+
+.json-import-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
 }
 </style>

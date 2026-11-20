@@ -112,17 +112,22 @@ func newMemDomainRepo() *memDomainRepo {
 	}
 }
 
-func (m *memDomainRepo) ListDomains(userID uint64) ([]model.DomainListItem, error) {
+func (m *memDomainRepo) ListDomains(userID uint64, q model.DomainQuery, userOrgIDs []uint64) ([]model.DomainListItem, error) {
 	var list []model.DomainListItem
 	for _, d := range m.domains {
 		list = append(list, model.DomainListItem{
 			ID:          d.ID,
+			DomainUID:   d.DomainUID,
 			DomainCode:  d.DomainCode,
 			DomainName:  d.DomainName,
 			Description: d.Description,
+			Visibility:  d.Visibility,
+			OrgID:       d.OrgID,
+			OrgName:     d.OrgName,
 			OwnerID:     d.OwnerID,
 			Status:      d.Status,
 			MyRole:      m.members[d.ID][userID],
+			CanManage:   d.OwnerID == userID,
 			MemberCount: int64(len(m.members[d.ID])),
 			CreatedAt:   d.CreatedAt,
 		})
@@ -143,12 +148,24 @@ func (m *memDomainRepo) FindByCode(code string) (*model.BizDomain, error) {
 	}
 	return nil, gorm.ErrRecordNotFound
 }
+func (m *memDomainRepo) FindByUID(uid string) (*model.BizDomain, error) {
+	for _, d := range m.domains {
+		if d.DomainUID == uid {
+			return d, nil
+		}
+	}
+	return nil, gorm.ErrRecordNotFound
+}
 func (m *memDomainRepo) CreateWithOwner(domain *model.BizDomain) error {
 	domain.ID = m.nextID
 	m.nextID++
 	domain.CreatedAt = time.Now()
 	m.domains[domain.ID] = domain
 	m.members[domain.ID] = map[uint64]string{domain.OwnerID: model.DomainRoleOwner}
+	return nil
+}
+func (m *memDomainRepo) UpdateDomain(domain *model.BizDomain) error {
+	m.domains[domain.ID] = domain
 	return nil
 }
 func (m *memDomainRepo) ListMembers(domainID uint64) ([]model.DomainMemberItem, error) {
@@ -171,6 +188,13 @@ func (m *memDomainRepo) UpsertMember(member *model.DomainMember) error {
 	m.members[member.DomainID][member.UserID] = member.DomainRole
 	return nil
 }
+func (m *memDomainRepo) RemoveMember(domainID, userID uint64) error {
+	if roles, ok := m.members[domainID]; ok {
+		delete(roles, userID)
+		return nil
+	}
+	return gorm.ErrRecordNotFound
+}
 func (m *memDomainRepo) GetUserDomainIDs(userID uint64) ([]uint64, error) {
 	var ids []uint64
 	for did, roles := range m.members {
@@ -189,6 +213,9 @@ func (m *memDomainRepo) GetUserAdminDomainIDs(userID uint64) ([]uint64, error) {
 	}
 	return ids, nil
 }
+func (m *memDomainRepo) GetAccessibleDomainIDs(userID uint64, userOrgIDs []uint64) ([]uint64, error) {
+	return m.GetUserDomainIDs(userID)
+}
 
 type memAssetRepo struct {
 	nextID uint64
@@ -204,7 +231,7 @@ func newMemAssetRepo() *memAssetRepo {
 	}
 }
 
-func (m *memAssetRepo) ListAssets(q model.AssetQuery, userID uint64, isSuperAdmin bool, memberDomainIDs, adminDomainIDs []uint64) ([]model.AssetListItem, int64, error) {
+func (m *memAssetRepo) ListAssets(q model.AssetQuery, userID uint64, isSuperAdmin bool, memberDomainIDs, adminDomainIDs, permittedAssetIDs []uint64) ([]model.AssetListItem, int64, error) {
 	var items []model.AssetListItem
 	for _, a := range m.assets {
 		items = append(items, model.AssetListItem{AIAsset: *a})
@@ -271,6 +298,42 @@ func (m *memAssetRepo) UpdateStatus(id uint64, status string, version string) er
 	return nil
 }
 
+func (m *memAssetRepo) GetDetailByCode(code string) (*model.AssetDetail, error) {
+	for _, a := range m.assets {
+		if a.AssetCode == code {
+			return &model.AssetDetail{AIAsset: *a, MCPConfig: m.mcp[a.ID]}, nil
+		}
+	}
+	return nil, gorm.ErrRecordNotFound
+}
+func (m *memAssetRepo) PublishWithSnapshot(assetID uint64, version, changelog string, snapshot model.JSONRaw, publisherID uint64) error {
+	return m.UpdateStatus(assetID, model.AssetStatusPublished, version)
+}
+func (m *memAssetRepo) ListVersions(assetID uint64) ([]model.AIAssetVersion, error) {
+	return []model.AIAssetVersion{}, nil
+}
+func (m *memAssetRepo) FindVersionByID(assetID, versionID uint64) (*model.AIAssetVersion, error) {
+	return nil, gorm.ErrRecordNotFound
+}
+func (m *memAssetRepo) RestoreFromSnapshot(asset *model.AIAsset, ext interface{}, versionID uint64, version string) error {
+	return nil
+}
+func (m *memAssetRepo) UpdateMCPHealth(assetID uint64, healthStatus string, checkedAt time.Time) error {
+	return nil
+}
+func (m *memAssetRepo) UpdateMCPTools(assetID uint64, toolsSchema model.JSONRaw) error {
+	return nil
+}
+func (m *memAssetRepo) UpdateSkillPackage(assetID uint64, packagePath string, packageFiles model.StringSlice, content string) error {
+	return nil
+}
+func (m *memAssetRepo) IncrementInvokeCount(assetID uint64) error {
+	if a, ok := m.assets[assetID]; ok {
+		a.InvokeCount++
+	}
+	return nil
+}
+
 func setupTestEcho() *echo.Echo {
 	userRepo := newMemUserRepo()
 	domainRepo := newMemDomainRepo()
@@ -278,8 +341,8 @@ func setupTestEcho() *echo.Echo {
 	jwtCfg := config.JWTConfig{Secret: "handler-test-secret", ExpireHours: 24}
 
 	authSvc := service.NewAuthService(userRepo, jwtCfg)
-	domainSvc := service.NewDomainService(domainRepo, userRepo)
-	assetSvc := service.NewAssetService(assetRepo, domainRepo)
+	domainSvc := service.NewDomainService(domainRepo, userRepo, nil)
+	assetSvc := service.NewAssetService(assetRepo, domainRepo, nil, nil, "")
 
 	authH := NewAuthHandler(authSvc)
 	domainH := NewDomainHandler(domainSvc)

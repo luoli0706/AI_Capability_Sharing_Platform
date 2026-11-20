@@ -51,20 +51,64 @@ func InitDB(cfg config.DatabaseConfig, mode string) (*gorm.DB, error) {
 	return db, nil
 }
 
-// AutoMigrate runs GORM AutoMigrate for all P0 models.
+// AutoMigrate runs GORM AutoMigrate for all P0, P1, and Organization models.
 func AutoMigrate(db *gorm.DB) error {
-	return db.AutoMigrate(
+	// Ensure legacy biz_domain rows have unique domain_uid values before GORM creates uk_domain_uid.
+	if db.Migrator().HasTable(&model.BizDomain{}) {
+		if !db.Migrator().HasColumn(&model.BizDomain{}, "domain_uid") {
+			if err := db.Migrator().AddColumn(&model.BizDomain{}, "DomainUID"); err != nil {
+				return err
+			}
+		}
+		if err := db.Model(&model.BizDomain{}).
+			Where("domain_uid = '' OR domain_uid IS NULL").
+			Update("domain_uid", gorm.Expr("CONCAT('DOM-', id)")).Error; err != nil {
+			return err
+		}
+	}
+
+	if err := db.AutoMigrate(
 		&model.SysUser{},
 		&model.SysRole{},
 		&model.SysUserRole{},
+		&model.UserAPIKey{},
+		&model.BizOrganization{},
+		&model.OrganizationMember{},
 		&model.BizDomain{},
 		&model.DomainMember{},
 		&model.AIAsset{},
 		&model.AIAssetMCP{},
 		&model.AIAssetSkill{},
 		&model.AIAssetAgent{},
+		&model.AIAssetVersion{},
 		&model.KBKnowledgeBase{},
-	)
+		&model.KBDocument{},
+		&model.KBChunk{},
+		&model.AssetPermission{},
+		&model.ApprovalRequest{},
+		&model.ApprovalRecord{},
+		&model.AssetInvokeLog{},
+	); err != nil {
+		return err
+	}
+	return BackfillDomains(db)
+}
+
+// BackfillDomains ensures legacy biz_domain rows have valid domain_uid, visibility, and org_name.
+func BackfillDomains(db *gorm.DB) error {
+	if err := db.Model(&model.BizDomain{}).
+		Where("domain_uid = '' OR domain_uid IS NULL").
+		Update("domain_uid", gorm.Expr("CONCAT('DOM-', id)")).Error; err != nil {
+		return err
+	}
+	if err := db.Model(&model.BizDomain{}).
+		Where("visibility = '' OR visibility IS NULL").
+		Update("visibility", model.DomainVisibilityPublic).Error; err != nil {
+		return err
+	}
+	return db.Model(&model.BizDomain{}).
+		Where("org_name = '' OR org_name IS NULL").
+		Update("org_name", "个人").Error
 }
 
 // SeedRoles ensures the default RBAC roles exist in sys_role.

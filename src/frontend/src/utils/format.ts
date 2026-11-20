@@ -98,6 +98,33 @@ export function formatDateTime(val?: string | null): string {
   return d.isValid() ? d.format('YYYY-MM-DD HH:mm') : val
 }
 
+export function formatFileSize(bytes?: number): string {
+  if (!bytes || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  const idx = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
+  return `${(bytes / Math.pow(1024, idx)).toFixed(idx === 0 ? 0 : 1)} ${units[idx]}`
+}
+
+export function getApprovalStatusMeta(status: string): StatusMeta {
+  const map: Record<string, StatusMeta> = {
+    pending: { label: '审批中', tagType: 'warning' },
+    approved: { label: '已通过', tagType: 'success' },
+    rejected: { label: '已驳回', tagType: 'danger' },
+    cancelled: { label: '已取消', tagType: 'info' }
+  }
+  return map[status] ?? { label: status, tagType: 'info' }
+}
+
+export function getKbParseStatusMeta(status: string): StatusMeta {
+  const map: Record<string, StatusMeta> = {
+    pending: { label: '排队中', tagType: 'info' },
+    processing: { label: '切片中', tagType: 'warning' },
+    completed: { label: '已完成', tagType: 'success' },
+    failed: { label: '解析失败', tagType: 'danger' }
+  }
+  return map[status] ?? { label: status, tagType: 'info' }
+}
+
 export function normalizeList<T>(raw: PaginatedData<T> | T[] | null | undefined): {
   items: T[]
   total: number

@@ -1,11 +1,20 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { storeToRefs } from 'pinia'
-import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
-import { getMyAssets, updatePassword, updateProfile } from '@/api/auth'
+import { CopyDocument, Key, Plus, Refresh } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
+import {
+  createApiKey,
+  getApiKeys,
+  getMyAssets,
+  revokeApiKey,
+  updatePassword,
+  updateProfile
+} from '@/api/auth'
+import { getInvokeLogs } from '@/api/invoke'
 import AssetDetailDrawer from '@/components/AssetDetailDrawer.vue'
 import { useAuthStore } from '@/stores/auth'
-import type { AssetItem } from '@/types/api'
+import type { AssetItem, InvokeLogItem, UserApiKey } from '@/types/api'
 import {
   formatDateTime,
   getAssetStatusMeta,
@@ -19,6 +28,7 @@ const { user } = storeToRefs(authStore)
 
 const activeTab = ref('basic')
 
+// Profile form
 const profileFormRef = ref<FormInstance>()
 const savingProfile = ref(false)
 const profileForm = reactive({
@@ -34,6 +44,7 @@ const profileRules: FormRules = {
   ]
 }
 
+// Password form
 const pwdFormRef = ref<FormInstance>()
 const savingPwd = ref(false)
 const pwdForm = reactive({
@@ -63,10 +74,31 @@ const pwdRules: FormRules = {
   confirm_password: [{ validator: validateConfirmPwd, trigger: 'blur' }]
 }
 
+// My Assets
 const loadingAssets = ref(false)
 const myAssets = ref<AssetItem[]>([])
 const detailDrawerOpen = ref(false)
 const selectedAssetId = ref<number | null>(null)
+
+// API Keys
+const loadingKeys = ref(false)
+const apiKeys = ref<UserApiKey[]>([])
+const createKeyModalOpen = ref(false)
+const creatingKey = ref(false)
+const keyFormRef = ref<FormInstance>()
+const keyForm = reactive({
+  key_name: '',
+  expires_days: 90
+})
+const keyRules: FormRules = {
+  key_name: [{ required: true, message: '请输入 API Key 名称', trigger: 'blur' }]
+}
+const createdPlainKey = ref('')
+const plainKeyModalOpen = ref(false)
+
+// Invoke Logs
+const loadingLogs = ref(false)
+const invokeLogs = ref<InvokeLogItem[]>([])
 
 const displayName = computed(
   () => user.value?.nickname || user.value?.username || '用户'
@@ -133,6 +165,89 @@ async function fetchMyAssets() {
   }
 }
 
+async function fetchApiKeys() {
+  loadingKeys.value = true
+  try {
+    const res = await getApiKeys()
+    apiKeys.value = normalizeList(res).items
+  } catch {
+    apiKeys.value = []
+  } finally {
+    loadingKeys.value = false
+  }
+}
+
+function openCreateKeyModal() {
+  keyForm.key_name = ''
+  keyForm.expires_days = 90
+  keyFormRef.value?.clearValidate()
+  createKeyModalOpen.value = true
+}
+
+async function handleCreateKey() {
+  if (!keyFormRef.value) return
+  const valid = await keyFormRef.value.validate().catch(() => false)
+  if (!valid) return
+
+  creatingKey.value = true
+  try {
+    const res = await createApiKey({
+      key_name: keyForm.key_name.trim(),
+      expires_days: keyForm.expires_days
+    })
+    createKeyModalOpen.value = false
+    const plain =
+      typeof res.api_key === 'string' ? res.api_key : res.plain_key || res.key || ''
+    if (plain) {
+      createdPlainKey.value = plain
+      plainKeyModalOpen.value = true
+    } else {
+      ElMessage.success('API Key 创建成功')
+    }
+    fetchApiKeys()
+  } catch {
+    // Handled by interceptor
+  } finally {
+    creatingKey.value = false
+  }
+}
+
+async function copyPlainKey() {
+  try {
+    await navigator.clipboard.writeText(createdPlainKey.value)
+    ElMessage.success('已复制到剪贴板')
+  } catch {
+    ElMessage.info('请手动选中并复制密钥')
+  }
+}
+
+async function handleRevokeKey(item: UserApiKey) {
+  try {
+    await ElMessageBox.confirm(`确认吊销 API Key「${item.key_name}」吗？吊销后立即失效。`, '吊销确认', {
+      confirmButtonText: '确认吊销',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+    await revokeApiKey(item.id)
+    ElMessage.success('API Key 已吊销')
+    fetchApiKeys()
+  } catch {
+    // Cancelled or failed
+  }
+}
+
+async function fetchInvokeLogs() {
+  loadingLogs.value = true
+  try {
+    const res = await getInvokeLogs({ page: 1, page_size: 50 })
+    invokeLogs.value = normalizeList(res).items
+  } catch {
+    invokeLogs.value = []
+  } finally {
+    loadingLogs.value = false
+  }
+}
+
 function openAssetDetail(asset: AssetItem) {
   selectedAssetId.value = asset.id
   detailDrawerOpen.value = true
@@ -147,6 +262,8 @@ onMounted(async () => {
     // Handled by interceptor
   }
   fetchMyAssets()
+  fetchApiKeys()
+  fetchInvokeLogs()
 })
 </script>
 
@@ -155,7 +272,7 @@ onMounted(async () => {
     <div class="page-header">
       <div>
         <h1 class="page-title">个人中心</h1>
-        <p class="page-subtitle">管理您的账号资料、登录密码及个人名下创建的 AI 能力资产</p>
+        <p class="page-subtitle">管理您的账号资料、登录密码、个人 API Key 密钥及能力调用审计记录</p>
       </div>
     </div>
 
@@ -184,65 +301,67 @@ onMounted(async () => {
 
     <div class="surface-card profile-tabs-card">
       <el-tabs v-model="activeTab">
-        <el-tab-pane label="基本信息与修改" name="basic">
-          <el-form
-            ref="profileFormRef"
-            :model="profileForm"
-            :rules="profileRules"
-            label-position="top"
-            class="narrow-form"
-          >
-            <el-form-item label="用户名">
-              <el-input :model-value="user?.username || ''" disabled class="mono-text" />
-            </el-form-item>
-            <el-form-item label="显示昵称" prop="nickname">
-              <el-input v-model="profileForm.nickname" placeholder="请输入显示昵称" />
-            </el-form-item>
-            <el-form-item label="企业邮箱" prop="email">
-              <el-input v-model="profileForm.email" placeholder="name@company.com" />
-            </el-form-item>
-            <el-button type="primary" :loading="savingProfile" @click="handleSaveProfile">
-              保存基本信息
-            </el-button>
-          </el-form>
-        </el-tab-pane>
+        <el-tab-pane label="基本信息与密码" name="basic">
+          <div class="basic-grid">
+            <el-form
+              ref="profileFormRef"
+              :model="profileForm"
+              :rules="profileRules"
+              label-position="top"
+              class="narrow-form"
+            >
+              <h4 class="sub-heading">基本信息</h4>
+              <el-form-item label="用户名">
+                <el-input :model-value="user?.username || ''" disabled class="mono-text" />
+              </el-form-item>
+              <el-form-item label="显示昵称" prop="nickname">
+                <el-input v-model="profileForm.nickname" placeholder="请输入显示昵称" />
+              </el-form-item>
+              <el-form-item label="工作邮箱" prop="email">
+                <el-input v-model="profileForm.email" placeholder="name@company.com" />
+              </el-form-item>
+              <el-button type="primary" :loading="savingProfile" @click="handleSaveProfile">
+                保存基本信息
+              </el-button>
+            </el-form>
 
-        <el-tab-pane label="修改密码" name="password">
-          <el-form
-            ref="pwdFormRef"
-            :model="pwdForm"
-            :rules="pwdRules"
-            label-position="top"
-            class="narrow-form"
-          >
-            <el-form-item label="原密码" prop="old_password">
-              <el-input
-                v-model="pwdForm.old_password"
-                type="password"
-                show-password
-                placeholder="请输入当前密码"
-              />
-            </el-form-item>
-            <el-form-item label="新密码" prop="new_password">
-              <el-input
-                v-model="pwdForm.new_password"
-                type="password"
-                show-password
-                placeholder="至少 6 位字符"
-              />
-            </el-form-item>
-            <el-form-item label="确认新密码" prop="confirm_password">
-              <el-input
-                v-model="pwdForm.confirm_password"
-                type="password"
-                show-password
-                placeholder="请再次输入新密码"
-              />
-            </el-form-item>
-            <el-button type="primary" :loading="savingPwd" @click="handleUpdatePassword">
-              更新密码
-            </el-button>
-          </el-form>
+            <el-form
+              ref="pwdFormRef"
+              :model="pwdForm"
+              :rules="pwdRules"
+              label-position="top"
+              class="narrow-form"
+            >
+              <h4 class="sub-heading">修改密码</h4>
+              <el-form-item label="原密码" prop="old_password">
+                <el-input
+                  v-model="pwdForm.old_password"
+                  type="password"
+                  show-password
+                  placeholder="请输入当前密码"
+                />
+              </el-form-item>
+              <el-form-item label="新密码" prop="new_password">
+                <el-input
+                  v-model="pwdForm.new_password"
+                  type="password"
+                  show-password
+                  placeholder="至少 6 位字符"
+                />
+              </el-form-item>
+              <el-form-item label="确认新密码" prop="confirm_password">
+                <el-input
+                  v-model="pwdForm.confirm_password"
+                  type="password"
+                  show-password
+                  placeholder="请再次输入新密码"
+                />
+              </el-form-item>
+              <el-button type="primary" :loading="savingPwd" @click="handleUpdatePassword">
+                更新密码
+              </el-button>
+            </el-form>
+          </div>
         </el-tab-pane>
 
         <el-tab-pane label="我的资产" name="assets">
@@ -303,10 +422,163 @@ onMounted(async () => {
             </template>
           </el-table>
         </el-tab-pane>
+
+        <el-tab-pane label="API Key 管理" name="apikeys">
+          <div class="tab-toolbar">
+            <span class="tab-hint">通过 <code class="mono-text">X-API-Key</code> 请求头在外部脚本或服务中调用已授权的 AI 能力</span>
+            <el-button type="primary" :icon="Plus" size="small" @click="openCreateKeyModal">
+              新建 API Key
+            </el-button>
+          </div>
+
+          <el-table v-loading="loadingKeys" :data="apiKeys" stripe style="width: 100%">
+            <el-table-column label="名称" min-width="160">
+              <template #default="{ row }">
+                <span class="key-name"><el-icon><Key /></el-icon> {{ row.key_name }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="密钥前缀" width="160">
+              <template #default="{ row }">
+                <span class="mono-text">{{ row.key_prefix }}****</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="100">
+              <template #default="{ row }">
+                <el-tag :type="row.status === 1 ? 'success' : 'danger'" size="small" effect="light">
+                  {{ row.status === 1 ? '启用中' : '已吊销' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="过期时间" width="155">
+              <template #default="{ row }">
+                {{ row.expires_at ? formatDateTime(row.expires_at) : '永不过期' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="最近使用" width="155">
+              <template #default="{ row }">
+                {{ formatDateTime(row.last_used_at) }}
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="100" fixed="right">
+              <template #default="{ row }">
+                <el-button
+                  v-if="row.status === 1"
+                  link
+                  type="danger"
+                  size="small"
+                  @click="handleRevokeKey(row)"
+                >
+                  吊销
+                </el-button>
+              </template>
+            </el-table-column>
+
+            <template #empty>
+              <el-empty description="暂无 API Key，点击右上角「新建 API Key」生成" />
+            </template>
+          </el-table>
+        </el-tab-pane>
+
+        <el-tab-pane label="调用记录" name="logs">
+          <div class="tab-toolbar">
+            <span class="tab-hint">展示您通过控制台、JWT 或 API Key 发起的 AI 能力调用审计日志</span>
+            <el-button :icon="Refresh" size="small" @click="fetchInvokeLogs">刷新</el-button>
+          </div>
+
+          <el-table v-loading="loadingLogs" :data="invokeLogs" stripe style="width: 100%">
+            <el-table-column label="Trace ID" width="175">
+              <template #default="{ row }">
+                <span class="mono-text trace-id">{{ row.trace_id }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="调用资产" min-width="170">
+              <template #default="{ row }">
+                <div class="asset-cell">
+                  <span>{{ row.asset_name || row.asset_code || `资产 #${row.asset_id}` }}</span>
+                  <span v-if="row.asset_version" class="asset-code mono-text">{{ row.asset_version }}</span>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="鉴权方式" width="105">
+              <template #default="{ row }">
+                <el-tag size="small" type="info" effect="plain" class="mono-text">
+                  {{ row.auth_mode }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="状态码" width="110">
+              <template #default="{ row }">
+                <el-tag
+                  :type="row.is_success ? 'success' : 'danger'"
+                  size="small"
+                  effect="light"
+                  class="tabular-nums"
+                >
+                  {{ row.status_code }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="耗时" width="95" align="right">
+              <template #default="{ row }">
+                <span class="tabular-nums">{{ row.latency_ms }} ms</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="调用时间" width="160">
+              <template #default="{ row }">
+                {{ formatDateTime(row.created_at) }}
+              </template>
+            </el-table-column>
+
+            <template #empty>
+              <el-empty description="暂无调用审计记录" />
+            </template>
+          </el-table>
+        </el-tab-pane>
       </el-tabs>
     </div>
 
     <AssetDetailDrawer v-model="detailDrawerOpen" :asset-id="selectedAssetId" />
+
+    <!-- Create API Key Modal -->
+    <el-dialog v-model="createKeyModalOpen" title="新建 API Key" width="420px" destroy-on-close>
+      <el-form ref="keyFormRef" :model="keyForm" :rules="keyRules" label-position="top">
+        <el-form-item label="密钥名称" prop="key_name">
+          <el-input v-model="keyForm.key_name" placeholder="例如：本地调试脚本 Key" />
+        </el-form-item>
+        <el-form-item label="有效期 (天)">
+          <el-input-number v-model="keyForm.expires_days" :min="1" :max="3650" style="width: 100%" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="createKeyModalOpen = false">取消</el-button>
+        <el-button type="primary" :loading="creatingKey" @click="handleCreateKey">确认生成</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- One-time Plain Key Display Dialog -->
+    <el-dialog
+      v-model="plainKeyModalOpen"
+      title="请妥善保存您的 API Key"
+      width="480px"
+      :close-on-click-modal="false"
+    >
+      <el-alert
+        title="出于安全考虑，明文密钥仅在此处展示一次，关闭窗口后将无法再次查看。"
+        type="warning"
+        show-icon
+        :closable="false"
+        style="margin-bottom: 16px"
+      />
+      <div class="plain-key-box">
+        <code class="mono-text">{{ createdPlainKey }}</code>
+        <el-button type="primary" :icon="CopyDocument" size="small" @click="copyPlainKey">
+          复制
+        </el-button>
+      </div>
+      <template #footer>
+        <el-button type="primary" @click="plainKeyModalOpen = false">我已保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -353,9 +625,36 @@ onMounted(async () => {
   padding: 16px 24px 24px;
 }
 
-.narrow-form {
-  max-width: 440px;
+.basic-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 32px;
   padding-top: 8px;
+}
+
+.sub-heading {
+  margin: 0 0 16px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ascp-text-primary);
+}
+
+.narrow-form {
+  max-width: 420px;
+}
+
+.tab-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.tab-hint {
+  font-size: 13px;
+  color: var(--ascp-text-muted);
 }
 
 .asset-cell {
@@ -373,8 +672,28 @@ onMounted(async () => {
   color: var(--ascp-primary);
 }
 
-.asset-code {
+.asset-code,
+.trace-id {
   font-size: 12px;
   color: var(--ascp-text-muted);
+}
+
+.key-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 500;
+}
+
+.plain-key-box {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  background: #0f172a;
+  color: #f8fafc;
+  border-radius: 8px;
+  word-break: break-all;
 }
 </style>

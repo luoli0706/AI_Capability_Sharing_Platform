@@ -1,12 +1,15 @@
-import { apiGet, apiPost, apiPut } from './request'
+import { apiDelete, apiGet, apiPost, apiPut } from './request'
 import type {
   AssetItem,
+  CreateApiKeyPayload,
+  CreateApiKeyResult,
   LoginPayload,
   LoginResult,
   PaginatedData,
   RegisterPayload,
   UpdatePasswordPayload,
   UpdateProfilePayload,
+  UserApiKey,
   UserInfo
 } from '@/types/api'
 
@@ -39,4 +42,16 @@ export function getMyAssets(params?: {
   page_size?: number
 }): Promise<PaginatedData<AssetItem> | AssetItem[]> {
   return apiGet<PaginatedData<AssetItem> | AssetItem[]>('/user/assets', { params })
+}
+
+export function getApiKeys(): Promise<PaginatedData<UserApiKey> | UserApiKey[]> {
+  return apiGet<PaginatedData<UserApiKey> | UserApiKey[]>('/user/api-keys')
+}
+
+export function createApiKey(data: CreateApiKeyPayload): Promise<CreateApiKeyResult> {
+  return apiPost<CreateApiKeyResult, CreateApiKeyPayload>('/user/api-keys', data)
+}
+
+export function revokeApiKey(id: number): Promise<null> {
+  return apiDelete<null>(`/user/api-keys/${id}`)
 }
