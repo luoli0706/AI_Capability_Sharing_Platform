@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"fmt"
 	"strings"
 
 	"ascp-backend/internal/model"
@@ -154,7 +155,12 @@ func (r *orgRepository) CreateWithOwner(org *model.BizOrganization) error {
 
 func (r *orgRepository) UpdateOrg(org *model.BizOrganization) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Save(org).Error; err != nil {
+		if err := tx.Model(&model.BizOrganization{}).
+			Where("id = ?", org.ID).
+			Updates(map[string]interface{}{
+				"org_name":    org.OrgName,
+				"description": org.Description,
+			}).Error; err != nil {
 			return err
 		}
 		return tx.Model(&model.BizDomain{}).
@@ -164,7 +170,25 @@ func (r *orgRepository) UpdateOrg(org *model.BizOrganization) error {
 }
 
 func (r *orgRepository) DeleteOrg(id uint64) error {
-	return r.db.Delete(&model.BizOrganization{}, id).Error
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		var org model.BizOrganization
+		if err := tx.First(&org, id).Error; err != nil {
+			return err
+		}
+		suffix := fmt.Sprintf("__del_%d", id)
+		newCode := org.OrgCode
+		if len(newCode)+len(suffix) > 64 {
+			newCode = newCode[:64-len(suffix)]
+		}
+		newCode += suffix
+		if err := tx.Model(&model.BizOrganization{}).Where("id = ?", id).Update("org_code", newCode).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("org_id = ?", id).Delete(&model.OrganizationMember{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&model.BizOrganization{}, id).Error
+	})
 }
 
 func (r *orgRepository) ListMembers(orgID uint64) ([]model.OrgMemberItem, error) {

@@ -81,6 +81,10 @@ func loadFrom(path, dotEnvPath string) (*Config, error) {
 		)
 	}
 
+	if jwtSecret := getEnvValue(dotEnv, "JWT_SECRET"); jwtSecret != "" {
+		cfg.JWT.Secret = jwtSecret
+	}
+
 	return &cfg, nil
 }
 

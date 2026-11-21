@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"fmt"
 	"strings"
 
 	"ascp-backend/internal/model"
@@ -250,7 +251,25 @@ func (r *domainRepository) UpdateDomain(domain *model.BizDomain) error {
 }
 
 func (r *domainRepository) DeleteDomain(id uint64) error {
-	return r.db.Delete(&model.BizDomain{}, id).Error
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		var dom model.BizDomain
+		if err := tx.First(&dom, id).Error; err != nil {
+			return err
+		}
+		suffix := fmt.Sprintf("__del_%d", id)
+		newCode := dom.DomainCode
+		if len(newCode)+len(suffix) > 64 {
+			newCode = newCode[:64-len(suffix)]
+		}
+		newCode += suffix
+		if err := tx.Model(&model.BizDomain{}).Where("id = ?", id).Update("domain_code", newCode).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("domain_id = ?", id).Delete(&model.DomainMember{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&model.BizDomain{}, id).Error
+	})
 }
 
 func (r *domainRepository) ListMembers(domainID uint64) ([]model.DomainMemberItem, error) {

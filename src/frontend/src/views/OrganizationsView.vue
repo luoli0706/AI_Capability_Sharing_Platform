@@ -449,10 +449,17 @@ onMounted(() => {
         label-position="top"
       >
         <el-form-item label="组织名称" prop="org_name">
-          <el-input v-model="editForm.org_name" />
+          <el-input v-model="editForm.org_name" maxlength="128" />
         </el-form-item>
-        <el-form-item label="组织描述" prop="description">
-          <el-input v-model="editForm.description" type="textarea" :rows="3" />
+        <el-form-item label="组织简介" prop="description">
+          <el-input
+            v-model="editForm.description"
+            type="textarea"
+            :rows="3"
+            maxlength="512"
+            show-word-limit
+            placeholder="请输入组织简介..."
+          />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -476,7 +483,19 @@ onMounted(() => {
 
       <div v-else-if="activeOrg" class="drawer-body">
         <div class="org-summary-box">
-          <div class="summary-code mono-text">编码：{{ activeOrg.org_code }}</div>
+          <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px;">
+            <div class="summary-code mono-text">编码：{{ activeOrg.org_code }}</div>
+            <el-button
+              v-if="canManageActiveOrg"
+              link
+              type="primary"
+              size="small"
+              :icon="Edit"
+              @click="openEditModal(activeOrg)"
+            >
+              编辑组织
+            </el-button>
+          </div>
           <p class="summary-desc">{{ activeOrg.description || '暂无组织说明' }}</p>
         </div>
 
