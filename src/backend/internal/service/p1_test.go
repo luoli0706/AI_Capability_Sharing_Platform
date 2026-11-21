@@ -214,6 +214,7 @@ type mockP1GovRepo struct {
 	recs      map[uint64][]model.ApprovalRecord
 	perms     []*model.AssetPermission
 	assetRepo *mockP1AssetRepo
+	orgRepo   *mockOrgRepo
 }
 
 func newMockP1GovRepo() *mockP1GovRepo {
@@ -254,6 +255,14 @@ func (m *mockP1GovRepo) CreateApprovalWithRecords(req *model.ApprovalRequest, re
 	m.recs[req.ID] = records
 	return nil
 }
+func (m *mockP1GovRepo) HasPendingOrgJoin(orgID, applicantID uint64) (bool, error) {
+	for _, r := range m.reqs {
+		if r.TargetType == model.ApprovalTargetOrgJoin && r.AssetID == orgID && r.ApplicantID == applicantID && r.Status == model.ApprovalStatusPending {
+			return true, nil
+		}
+	}
+	return false, nil
+}
 func (m *mockP1GovRepo) FindApprovalByID(id uint64) (*model.ApprovalRequest, error) {
 	if r, ok := m.reqs[id]; ok {
 		cp := *r
@@ -271,11 +280,18 @@ func (m *mockP1GovRepo) ListApprovalRecords(requestID uint64) ([]model.ApprovalR
 func (m *mockP1GovRepo) ListMyRequests(applicantID uint64) ([]model.ApprovalRequestView, error) {
 	return nil, nil
 }
-func (m *mockP1GovRepo) ListPendingRequests(approverID uint64, isSuperAdmin bool, adminDomainIDs []uint64) ([]model.ApprovalRequestView, error) {
+func (m *mockP1GovRepo) ListPendingRequests(approverID uint64, isSuperAdmin bool, adminDomainIDs, adminOrgIDs []uint64) ([]model.ApprovalRequestView, error) {
 	var out []model.ApprovalRequestView
 	adminSet := toUint64Set(adminDomainIDs)
+	adminOrgSet := toUint64Set(adminOrgIDs)
 	for _, r := range m.reqs {
 		if r.Status != model.ApprovalStatusPending {
+			continue
+		}
+		if r.TargetType == model.ApprovalTargetOrgJoin {
+			if adminOrgSet[r.AssetID] {
+				out = append(out, model.ApprovalRequestView{ApprovalRequest: *r})
+			}
 			continue
 		}
 		if r.TargetType == model.ApprovalTargetPublish {
@@ -340,6 +356,29 @@ func (m *mockP1GovRepo) HandlePublishApproval(req *model.ApprovalRequest, record
 				v.IsActive = 0
 			}
 		}
+	}
+	return nil
+}
+func (m *mockP1GovRepo) HandleOrgJoinApproval(req *model.ApprovalRequest, recordID, approverID uint64, action, comment string) error {
+	stored := m.reqs[req.ID]
+	for i := range m.recs[req.ID] {
+		if m.recs[req.ID][i].ID == recordID {
+			m.recs[req.ID][i].ApproverID = approverID
+			m.recs[req.ID][i].Action = action
+			m.recs[req.ID][i].Comment = comment
+		}
+	}
+	if action == model.ApprovalActionReject {
+		stored.Status = model.ApprovalStatusRejected
+		return nil
+	}
+	stored.Status = model.ApprovalStatusApproved
+	if m.orgRepo != nil {
+		_ = m.orgRepo.UpsertMember(&model.OrganizationMember{
+			OrgID:   req.AssetID,
+			UserID:  req.ApplicantID,
+			OrgRole: model.OrgRoleMember,
+		})
 	}
 	return nil
 }

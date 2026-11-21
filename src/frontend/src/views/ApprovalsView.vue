@@ -11,7 +11,7 @@ import type { ApprovalRequest } from '@/types/api'
 import { formatDateTime, getApprovalStatusMeta, normalizeList } from '@/utils/format'
 
 const activeTab = ref<'pending' | 'my' | 'handled'>('pending')
-const targetTypeFilter = ref<'' | 'asset_publish' | 'asset_access'>('')
+const targetTypeFilter = ref<'' | 'asset_publish' | 'asset_access' | 'org_join'>('')
 const loading = ref(false)
 const list = ref<ApprovalRequest[]>([])
 const total = ref(0)
@@ -117,6 +117,23 @@ function getRecordActionLabel(action: string) {
   return '待审批'
 }
 
+function getTargetTypeMeta(targetType: string): {
+  label: string
+  tagType: 'primary' | 'warning' | 'success' | 'info'
+} {
+  if (targetType === 'asset_publish') return { label: '发布审批', tagType: 'primary' }
+  if (targetType === 'org_join') return { label: '加入组织', tagType: 'success' }
+  if (targetType === 'asset_access') return { label: '权限申请', tagType: 'warning' }
+  return { label: targetType, tagType: 'info' }
+}
+
+function getTargetTitle(row: ApprovalRequest): string {
+  if (row.target_type === 'org_join') {
+    return row.org_name || row.asset_name || `组织 #${row.org_id || row.asset_id}`
+  }
+  return row.asset_name || `资产 #${row.asset_id}`
+}
+
 onMounted(() => {
   fetchList()
 })
@@ -143,6 +160,7 @@ onMounted(() => {
           <el-radio-button value="">全部类型</el-radio-button>
           <el-radio-button value="asset_publish">发布审批</el-radio-button>
           <el-radio-button value="asset_access">权限申请</el-radio-button>
+          <el-radio-button value="org_join">加入组织</el-radio-button>
         </el-radio-group>
       </div>
 
@@ -156,19 +174,19 @@ onMounted(() => {
         <el-table-column label="审批类型" width="105">
           <template #default="{ row }">
             <el-tag
-              :type="row.target_type === 'asset_publish' ? 'primary' : 'warning'"
+              :type="getTargetTypeMeta(row.target_type).tagType"
               size="small"
               effect="light"
             >
-              {{ row.target_type === 'asset_publish' ? '发布审批' : '权限申请' }}
+              {{ getTargetTypeMeta(row.target_type).label }}
             </el-tag>
           </template>
         </el-table-column>
 
-        <el-table-column label="目标资产" min-width="175">
+        <el-table-column label="目标对象" min-width="175">
           <template #default="{ row }">
             <div class="asset-col">
-              <span class="asset-name">{{ row.asset_name || `资产 #${row.asset_id}` }}</span>
+              <span class="asset-name">{{ getTargetTitle(row) }}</span>
               <span v-if="row.asset_code" class="asset-code mono-text">{{ row.asset_code }}</span>
             </div>
           </template>
@@ -185,6 +203,9 @@ onMounted(() => {
             <div v-if="row.target_type === 'asset_publish'" class="publish-info">
               <span class="mono-text version-badge">{{ row.requested_perm || 'v0.1.0' }}</span>
               <span class="reason-text">{{ row.reason || '无变更说明' }}</span>
+            </div>
+            <div v-else-if="row.target_type === 'org_join'">
+              <span class="reason-text">{{ row.reason || '申请加入组织' }}</span>
             </div>
             <div v-else>
               <span class="mono-text">{{ row.requested_perm }}</span>
@@ -260,15 +281,15 @@ onMounted(() => {
           </el-descriptions-item>
           <el-descriptions-item label="审批类型">
             <el-tag
-              :type="activeRequest.target_type === 'asset_publish' ? 'primary' : 'warning'"
+              :type="getTargetTypeMeta(activeRequest.target_type).tagType"
               size="small"
               effect="light"
             >
-              {{ activeRequest.target_type === 'asset_publish' ? '发布审批' : '权限申请' }}
+              {{ getTargetTypeMeta(activeRequest.target_type).label }}
             </el-tag>
           </el-descriptions-item>
-          <el-descriptions-item label="目标资产">
-            {{ activeRequest.asset_name || `资产 #${activeRequest.asset_id}` }}
+          <el-descriptions-item :label="activeRequest.target_type === 'org_join' ? '目标组织' : '目标资产'">
+            {{ getTargetTitle(activeRequest) }}
           </el-descriptions-item>
           <el-descriptions-item
             v-if="activeRequest.target_type === 'asset_publish'"
@@ -276,7 +297,10 @@ onMounted(() => {
           >
             <span class="mono-text">{{ activeRequest.requested_perm || '-' }}</span>
           </el-descriptions-item>
-          <el-descriptions-item v-else label="申请权限">
+          <el-descriptions-item
+            v-else-if="activeRequest.target_type === 'asset_access'"
+            label="申请权限"
+          >
             <span class="mono-text">{{ activeRequest.requested_perm }}</span>（有效期 {{ activeRequest.duration_days }} 天）
           </el-descriptions-item>
           <el-descriptions-item

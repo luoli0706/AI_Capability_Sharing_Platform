@@ -11,6 +11,7 @@ import {
   getOrgDetail,
   getOrgMembers,
   getOrgs,
+  joinOrg,
   removeOrgMember,
   updateOrg
 } from '@/api/org'
@@ -21,12 +22,19 @@ import { formatDateTime, getRoleLabel, normalizeList } from '@/utils/format'
 const router = useRouter()
 const domainStore = useDomainStore()
 
+const activeTab = ref<'mine' | 'square'>('mine')
 const loading = ref(false)
 const orgs = ref<OrgItem[]>([])
 const total = ref(0)
 const page = ref(1)
 const pageSize = ref(12)
 const keyword = ref('')
+
+// Join Org Modal
+const joinModalOpen = ref(false)
+const joining = ref(false)
+const joinTarget = ref<OrgItem | null>(null)
+const joinReason = ref('')
 
 const createModalOpen = ref(false)
 const createFormRef = ref<FormInstance>()
@@ -61,7 +69,7 @@ const editRules: FormRules = {
 
 // Detail Drawer
 const drawerOpen = ref(false)
-const activeTab = ref<'members' | 'domains'>('members')
+const drawerTab = ref<'members' | 'domains'>('members')
 const loadingDetail = ref(false)
 const activeOrg = ref<OrgDetail | null>(null)
 const orgMembers = ref<OrgMember[]>([])
@@ -96,6 +104,7 @@ async function fetchOrgs() {
   loading.value = true
   try {
     const res = await getOrgs({
+      tab: activeTab.value,
       keyword: keyword.value.trim() || undefined,
       page: page.value,
       page_size: pageSize.value
@@ -108,6 +117,40 @@ async function fetchOrgs() {
     total.value = 0
   } finally {
     loading.value = false
+  }
+}
+
+function handleTabChange() {
+  keyword.value = ''
+  page.value = 1
+  fetchOrgs()
+}
+
+function openJoinModal(org: OrgItem) {
+  joinTarget.value = org
+  joinReason.value = ''
+  joinModalOpen.value = true
+}
+
+async function handleJoinOrg() {
+  if (!joinTarget.value) return
+  joining.value = true
+  try {
+    await joinOrg(joinTarget.value.id, joinReason.value.trim() || undefined)
+    ElMessage.success('加入组织申请已提交，请等待组织管理员审批')
+    joinModalOpen.value = false
+  } catch {
+    // Handled by interceptor
+  } finally {
+    joining.value = false
+  }
+}
+
+function handleCardClick(org: OrgItem) {
+  if (org.my_role) {
+    openOrgDrawer(org)
+  } else {
+    openJoinModal(org)
   }
 }
 
@@ -207,7 +250,7 @@ async function handleDeleteOrg(org: OrgItem) {
 
 async function openOrgDrawer(org: OrgItem) {
   activeOrg.value = org
-  activeTab.value = 'members'
+  drawerTab.value = 'members'
   memberPage.value = 1
   memberForm.username = ''
   memberForm.org_role = 'member'
@@ -306,17 +349,24 @@ onMounted(() => {
       <el-button type="primary" :icon="Plus" @click="openCreateModal">创建组织</el-button>
     </div>
 
-    <div class="surface-card search-bar-card">
-      <el-input
-        v-model="keyword"
-        placeholder="按组织名称或编码检索..."
-        clearable
-        :prefix-icon="Search"
-        style="max-width: 360px"
-        @keyup.enter="handleSearch"
-        @clear="handleSearch"
-      />
-      <el-button type="primary" plain @click="handleSearch">搜索</el-button>
+    <div class="surface-card tabs-toolbar">
+      <el-tabs v-model="activeTab" @tab-change="handleTabChange">
+        <el-tab-pane label="我的组织" name="mine" />
+        <el-tab-pane label="组织广场" name="square" />
+      </el-tabs>
+
+      <div class="search-row">
+        <el-input
+          v-model="keyword"
+          placeholder="按组织名称或编码检索..."
+          clearable
+          :prefix-icon="Search"
+          style="max-width: 360px"
+          @keyup.enter="handleSearch"
+          @clear="handleSearch"
+        />
+        <el-button type="primary" plain @click="handleSearch">搜索</el-button>
+      </div>
     </div>
 
     <div v-if="loading" class="org-grid">
@@ -326,7 +376,13 @@ onMounted(() => {
     </div>
 
     <div v-else-if="orgs.length === 0" class="surface-card empty-box">
-      <el-empty description="暂未加入任何组织，点击右上角「创建组织」或联系管理员邀请加入" />
+      <el-empty
+        :description="
+          activeTab === 'square'
+            ? '未找到匹配的组织'
+            : '暂未加入任何组织，可前往「组织广场」申请加入或点击右上角「创建组织」'
+        "
+      />
     </div>
 
     <div v-else class="org-grid">
@@ -335,21 +391,27 @@ onMounted(() => {
         :key="org.id"
         class="surface-card org-card"
         tabindex="0"
-        @click="openOrgDrawer(org)"
-        @keyup.enter="openOrgDrawer(org)"
+        @click="handleCardClick(org)"
+        @keyup.enter="handleCardClick(org)"
       >
         <div class="org-card-top">
           <div class="org-icon">
             <el-icon :size="18"><Grid /></el-icon>
           </div>
-          <el-tag
-            v-if="org.my_role"
-            :type="getRoleTagType(org.my_role)"
-            size="small"
-            effect="light"
-          >
-            {{ getRoleLabel(org.my_role) }}
-          </el-tag>
+          <div style="display: flex; gap: 6px; align-items: center">
+            <el-tag v-if="org.my_role && activeTab === 'square'" size="small" type="success" effect="plain">
+              已加入
+            </el-tag>
+            <el-tag
+              v-if="org.my_role"
+              :type="getRoleTagType(org.my_role)"
+              size="small"
+              effect="light"
+            >
+              {{ getRoleLabel(org.my_role) }}
+            </el-tag>
+            <el-tag v-else size="small" type="info" effect="plain">未加入</el-tag>
+          </div>
         </div>
 
         <h3 class="org-name">{{ org.org_name }}</h3>
@@ -368,27 +430,38 @@ onMounted(() => {
             </span>
           </div>
           <div class="org-card-actions" @click.stop>
+            <template v-if="org.my_role">
+              <el-button
+                v-if="org.my_role === 'owner' || org.my_role === 'admin'"
+                link
+                type="primary"
+                size="small"
+                :icon="Edit"
+                @click="openEditModal(org)"
+              >
+                编辑
+              </el-button>
+              <el-button
+                v-if="org.my_role === 'owner'"
+                link
+                type="danger"
+                size="small"
+                :icon="Delete"
+                @click="handleDeleteOrg(org)"
+              >
+                删除
+              </el-button>
+              <span class="view-detail-hint" @click="openOrgDrawer(org)">管理详情 →</span>
+            </template>
             <el-button
-              v-if="org.my_role === 'owner' || org.my_role === 'admin'"
-              link
+              v-else
               type="primary"
               size="small"
-              :icon="Edit"
-              @click="openEditModal(org)"
+              plain
+              @click="openJoinModal(org)"
             >
-              编辑
+              申请加入
             </el-button>
-            <el-button
-              v-if="org.my_role === 'owner'"
-              link
-              type="danger"
-              size="small"
-              :icon="Delete"
-              @click="handleDeleteOrg(org)"
-            >
-              删除
-            </el-button>
-            <span class="view-detail-hint" @click="openOrgDrawer(org)">管理详情 →</span>
           </div>
         </div>
       </article>
@@ -470,6 +543,31 @@ onMounted(() => {
       </template>
     </el-dialog>
 
+    <!-- Join Org Modal -->
+    <el-dialog
+      v-model="joinModalOpen"
+      :title="`申请加入组织 - ${joinTarget?.org_name || ''}`"
+      width="440px"
+      destroy-on-close
+    >
+      <el-form label-position="top">
+        <el-form-item label="申请理由（选填）">
+          <el-input
+            v-model="joinReason"
+            type="textarea"
+            :rows="3"
+            placeholder="请简要说明您的团队角色或加入原因..."
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="joinModalOpen = false">取消</el-button>
+        <el-button type="primary" :loading="joining" @click="handleJoinOrg">
+          提交申请
+        </el-button>
+      </template>
+    </el-dialog>
+
     <!-- Org Detail Drawer -->
     <el-drawer
       v-model="drawerOpen"
@@ -499,7 +597,7 @@ onMounted(() => {
           <p class="summary-desc">{{ activeOrg.description || '暂无组织说明' }}</p>
         </div>
 
-        <el-tabs v-model="activeTab">
+        <el-tabs v-model="drawerTab">
           <el-tab-pane label="组织成员" name="members">
             <div v-if="canManageActiveOrg" class="add-member-box">
               <el-form
@@ -823,8 +921,11 @@ onMounted(() => {
   color: var(--ascp-text-secondary);
 }
 
-.search-bar-card {
-  padding: 14px 18px;
+.tabs-toolbar {
+  padding: 12px 20px 18px;
+}
+
+.search-row {
   display: flex;
   align-items: center;
   gap: 10px;

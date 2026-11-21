@@ -71,7 +71,7 @@ func main() {
 
 	// Handlers
 	authHandler := handler.NewAuthHandler(authSvc)
-	orgHandler := handler.NewOrgHandler(orgSvc)
+	orgHandler := handler.NewOrgHandler(orgSvc, govSvc)
 	domainHandler := handler.NewDomainHandler(domainSvc)
 	assetHandler := handler.NewAssetHandler(assetSvc)
 	kbHandler := handler.NewKBHandler(kbSvc)
@@ -131,6 +131,7 @@ func main() {
 	protected.GET("/orgs/:id/members", orgHandler.ListMembers)
 	protected.POST("/orgs/:id/members", orgHandler.AddMember)
 	protected.DELETE("/orgs/:id/members/:userId", orgHandler.RemoveMember)
+	protected.POST("/orgs/:id/join", orgHandler.JoinOrg)
 
 	protected.GET("/domains", domainHandler.ListDomains)
 	protected.POST("/domains", domainHandler.CreateDomain)
@@ -164,9 +165,12 @@ func main() {
 	protected.GET("/assets/:id/agent/download", assetHandler.DownloadAgentPackage)
 
 	protected.POST("/kb/:id/folders", kbHandler.CreateFolder)
+	protected.POST("/kb/:id/files", kbHandler.CreateMarkdownFile)
 	protected.POST("/kb/:id/documents", kbHandler.UploadDocument)
 	protected.GET("/kb/:id/documents", kbHandler.ListDocuments)
 	protected.GET("/kb/:id/documents/:docId/content", kbHandler.GetDocumentContent)
+	protected.GET("/kb/:id/documents/:docId/raw", kbHandler.GetDocumentRaw)
+	protected.PUT("/kb/:id/documents/:docId/content", kbHandler.UpdateDocumentContent)
 	protected.GET("/kb/:id/documents/:docId/chunks", kbHandler.ListChunks)
 	protected.DELETE("/kb/:id/documents/:docId", kbHandler.DeleteDocument)
 	protected.POST("/kb/:id/documents/:docId/move", kbHandler.MoveDocument)

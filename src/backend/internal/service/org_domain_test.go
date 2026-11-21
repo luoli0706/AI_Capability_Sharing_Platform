@@ -530,3 +530,82 @@ func TestOrgPrivateDomainAndOrgLifecycle(t *testing.T) {
 		t.Fatalf("expected 1 filtered org 'alpha-ai', got total=%d list=%+v err=%v", filteredTotal, filteredOrgs, err)
 	}
 }
+
+func TestOrgJoinApprovalAndOrgPrivateMemberCheck(t *testing.T) {
+	userRepo := &mockP1UserRepo{
+		users: map[uint64]*model.SysUser{
+			1: {ID: 1, Username: "owner", Status: 1},
+			2: {ID: 2, Username: "admin", Status: 1},
+			3: {ID: 3, Username: "outsider", Status: 1},
+		},
+	}
+	orgRepo := newMockOrgRepo()
+	domainRepo := newMockSquareDomainRepo()
+	govRepo := newMockP1GovRepo()
+	govRepo.orgRepo = orgRepo
+	auditRepo := &mockAuditRepo{}
+
+	orgSvc := NewOrgService(orgRepo, userRepo)
+	domainSvc := NewDomainService(domainRepo, userRepo, orgRepo)
+	govSvc := NewGovernanceService(govRepo, &mockP1AssetRepo{}, domainRepo, orgRepo)
+	govSvc.SetAuditRepos(auditRepo, userRepo)
+
+	org, err := orgSvc.CreateOrg(1, model.CreateOrgRequest{OrgCode: "join-org", OrgName: "Joinable Org"})
+	if err != nil {
+		t.Fatalf("CreateOrg failed: %v", err)
+	}
+	_ = orgSvc.AddMember(1, org.ID, model.AddOrgMemberRequest{UserID: 2, OrgRole: model.OrgRoleAdmin})
+
+	orgPriv, err := domainSvc.CreateDomain(1, model.CreateDomainRequest{
+		DomainCode: "strict-priv",
+		DomainName: "Strict Priv",
+		Visibility: model.DomainVisibilityOrgPrivate,
+		OrgID:      org.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateDomain org_private failed: %v", err)
+	}
+
+	// 1. Adding non-org member (3) to org_private domain -> 400 Bad Request
+	err = domainSvc.AddMember(1, orgPriv.ID, model.AddDomainMemberRequest{UserID: 3, DomainRole: model.DomainRoleMember})
+	var appErr *AppError
+	if !errors.As(err, &appErr) || appErr.HTTPStatus != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request when adding non-org member to org_private domain, got %v", err)
+	}
+
+	// 2. Outsider (3) requests to join org -> pending; duplicate request -> 409 Conflict
+	req, err := govSvc.RequestJoinOrg(3, org.ID, "Please let me in")
+	if err != nil {
+		t.Fatalf("RequestJoinOrg failed: %v", err)
+	}
+	if _, err := govSvc.RequestJoinOrg(3, org.ID, "dup"); !errors.As(err, &appErr) || appErr.HTTPStatus != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict on duplicate join request, got %v", err)
+	}
+
+	// 3. Org admin (2) sees it in pending & approves -> user 3 becomes org member + audit log recorded
+	pending, err := govSvc.ListPendingRequests(2, false)
+	if err != nil || len(pending) != 1 || pending[0].ID != req.ID || pending[0].TargetType != model.ApprovalTargetOrgJoin {
+		t.Fatalf("expected org admin to see 1 org_join pending request, got %+v, err=%v", pending, err)
+	}
+
+	approved, err := govSvc.HandleApproval(2, false, req.ID, model.HandleApprovalRequest{Action: "approve", Comment: "Welcome"})
+	if err != nil {
+		t.Fatalf("HandleApproval org_join failed: %v", err)
+	}
+	if approved.Status != model.ApprovalStatusApproved {
+		t.Fatalf("expected approved status, got %s", approved.Status)
+	}
+
+	role, _ := orgRepo.GetMemberRole(org.ID, 3)
+	if role != model.OrgRoleMember {
+		t.Fatalf("expected user 3 to be org member, got %q", role)
+	}
+	if len(auditRepo.logs) != 1 || auditRepo.logs[0].Action != model.AuditActionOrgMemberAdd {
+		t.Fatalf("expected org.member_add audit log, got %+v", auditRepo.logs)
+	}
+
+	// 4. Now user 3 CAN be added to org_private domain
+	if err := domainSvc.AddMember(1, orgPriv.ID, model.AddDomainMemberRequest{UserID: 3, DomainRole: model.DomainRoleMember}); err != nil {
+		t.Fatalf("expected org member (3) to be added to org_private domain, got %v", err)
+	}
+}

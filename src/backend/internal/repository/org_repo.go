@@ -36,6 +36,16 @@ func NewOrgRepository(db *gorm.DB) OrgRepository {
 
 func (r *orgRepository) ListOrgs(userID uint64, q model.OrgQuery) ([]model.OrgListItem, int64, error) {
 	tx := r.db.Model(&model.BizOrganization{})
+	if q.Tab != "square" {
+		userOrgIDs, err := r.GetUserOrgIDs(userID)
+		if err != nil {
+			return nil, 0, err
+		}
+		if len(userOrgIDs) == 0 {
+			return []model.OrgListItem{}, 0, nil
+		}
+		tx = tx.Where("id IN ?", userOrgIDs)
+	}
 	if kw := strings.TrimSpace(q.Keyword); kw != "" {
 		like := "%" + kw + "%"
 		tx = tx.Where("(org_name LIKE ? OR org_code LIKE ?)", like, like)

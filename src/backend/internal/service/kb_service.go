@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -21,17 +23,61 @@ import (
 	"gorm.io/gorm"
 )
 
+const maxKBFileSize = 10 << 20 // 10MB
+
 var allowedKBExts = map[string]bool{
 	".txt":      true,
 	".md":       true,
 	".markdown": true,
 }
 
+var textKBExts = map[string]bool{
+	".md":       true,
+	".markdown": true,
+	".txt":      true,
+	".json":     true,
+	".yaml":     true,
+	".yml":      true,
+	".csv":      true,
+	".xml":      true,
+	".html":     true,
+	".css":      true,
+	".js":       true,
+	".ts":       true,
+	".go":       true,
+	".py":       true,
+	".sql":      true,
+	".sh":       true,
+	".log":      true,
+	".ini":      true,
+	".conf":     true,
+}
+
+var kbMIMETypes = map[string]string{
+	".png":      "image/png",
+	".jpg":      "image/jpeg",
+	".jpeg":     "image/jpeg",
+	".gif":      "image/gif",
+	".webp":     "image/webp",
+	".svg":      "image/svg+xml",
+	".bmp":      "image/bmp",
+	".ico":      "image/x-icon",
+	".avif":     "image/avif",
+	".md":       "text/markdown; charset=utf-8",
+	".markdown": "text/markdown; charset=utf-8",
+	".txt":      "text/plain; charset=utf-8",
+	".json":     "application/json; charset=utf-8",
+	".pdf":      "application/pdf",
+}
+
 type KBService interface {
 	CreateFolder(userID uint64, isSuperAdmin bool, kbID uint64, folderPath string) (*model.KBDocument, error)
+	CreateMarkdownFile(userID uint64, isSuperAdmin bool, kbID uint64, req model.CreateKBFileRequest) (*model.KBDocument, error)
 	UploadDocuments(userID uint64, isSuperAdmin bool, kbID uint64, folderPath, relativePath string, files []*multipart.FileHeader) ([]model.KBDocument, error)
 	ListDocuments(userID uint64, isSuperAdmin bool, kbID uint64) ([]model.KBDocument, error)
 	GetDocumentContent(userID uint64, isSuperAdmin bool, kbID, docID uint64) (map[string]interface{}, error)
+	GetDocumentRaw(userID uint64, isSuperAdmin bool, kbID, docID uint64) (fileName, mimeType string, isSVG bool, data []byte, err error)
+	UpdateMarkdownContent(userID uint64, isSuperAdmin bool, kbID, docID uint64, req model.UpdateKBFileRequest) (*model.KBDocument, error)
 	ListChunks(userID uint64, isSuperAdmin bool, kbID, docID uint64, page, pageSize int) ([]model.KBChunk, int64, error)
 	DeleteDocument(userID uint64, isSuperAdmin bool, kbID, docID uint64) error
 	Search(userID uint64, isSuperAdmin bool, kbID uint64, req model.KBSearchRequest) ([]model.KBSearchHit, error)
@@ -122,6 +168,148 @@ func (s *kbService) CreateFolder(userID uint64, isSuperAdmin bool, kbID uint64, 
 	return folder, err
 }
 
+func sanitizeMarkdownFileName(raw string) (string, string, error) {
+	name := strings.TrimSpace(raw)
+	if name == "" || strings.Contains(name, "/") || strings.Contains(name, "\\") || strings.Contains(name, "..") {
+		return "", "", NewBadRequest("invalid file_name")
+	}
+	ext := strings.ToLower(filepath.Ext(name))
+	if ext == "" {
+		name += ".md"
+		ext = ".md"
+	}
+	if !allowedKBExts[ext] {
+		return "", "", NewBadRequest("unsupported file type; allowed: .md, .markdown, .txt")
+	}
+	return name, ext, nil
+}
+
+func kbChunkParams(detail *model.AssetDetail) (int, int) {
+	chunkSize, chunkOverlap := 500, 50
+	if detail.KBConfig != nil {
+		if detail.KBConfig.ChunkSize > 0 {
+			chunkSize = detail.KBConfig.ChunkSize
+		}
+		if detail.KBConfig.ChunkOverlap >= 0 {
+			chunkOverlap = detail.KBConfig.ChunkOverlap
+		}
+	}
+	return chunkSize, chunkOverlap
+}
+
+func (s *kbService) CreateMarkdownFile(userID uint64, isSuperAdmin bool, kbID uint64, req model.CreateKBFileRequest) (*model.KBDocument, error) {
+	detail, err := s.ensureKBEditPermission(userID, isSuperAdmin, kbID)
+	if err != nil {
+		return nil, err
+	}
+	normFolder, err := NormalizeFolderPath(req.FolderPath)
+	if err != nil {
+		return nil, err
+	}
+	fileName, ext, err := sanitizeMarkdownFileName(req.FileName)
+	if err != nil {
+		return nil, err
+	}
+
+	exists, err := s.kbRepo.FileExistsInFolder(kbID, normFolder, fileName, 0)
+	if err != nil {
+		return nil, err
+	}
+	if exists {
+		return nil, NewConflict("a file with the same name already exists in this folder")
+	}
+
+	chunkSize, chunkOverlap := kbChunkParams(detail)
+	doc, err := s.persistKBFileAndChunks(detail, userID, normFolder, fileName, ext, []byte(req.Content), chunkSize, chunkOverlap)
+	if err != nil {
+		return nil, err
+	}
+	recordAudit(s.auditRepo, s.userRepo, userID, detail.DomainID, detail.DomainName, detail.ID, detail.AssetCode, detail.Name, detail.AssetType, model.AuditActionKBFileCreate, relativeDocPath(*doc), "新建文档 "+relativeDocPath(*doc))
+	return doc, nil
+}
+
+func (s *kbService) UpdateMarkdownContent(userID uint64, isSuperAdmin bool, kbID, docID uint64, req model.UpdateKBFileRequest) (*model.KBDocument, error) {
+	detail, err := s.ensureKBEditPermission(userID, isSuperAdmin, kbID)
+	if err != nil {
+		return nil, err
+	}
+	doc, err := s.kbRepo.FindDocumentByID(kbID, docID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, NewNotFound("document not found")
+		}
+		return nil, err
+	}
+	if doc.IsFolder {
+		return nil, NewBadRequest("cannot edit content of a folder")
+	}
+
+	if strings.TrimSpace(req.FileName) != "" {
+		newName, newExt, err := sanitizeMarkdownFileName(req.FileName)
+		if err != nil {
+			return nil, err
+		}
+		if newName != doc.FileName {
+			exists, err := s.kbRepo.FileExistsInFolder(kbID, doc.FolderPath, newName, doc.ID)
+			if err != nil {
+				return nil, err
+			}
+			if exists {
+				return nil, NewConflict("a file with the same name already exists in this folder")
+			}
+			doc.FileName = newName
+			doc.FileExt = newExt
+		}
+	}
+
+	contentBytes := []byte(req.Content)
+	sum := sha256.Sum256(contentBytes)
+	fileHash := hex.EncodeToString(sum[:])
+
+	if doc.FilePath == "" {
+		diskDir := filepath.Join(s.uploadDir, fmt.Sprintf("%d", kbID))
+		if doc.FolderPath != "" {
+			diskDir = filepath.Join(diskDir, filepath.FromSlash(doc.FolderPath))
+		}
+		if err := os.MkdirAll(diskDir, 0755); err != nil {
+			return nil, err
+		}
+		doc.FilePath = filepath.Join(diskDir, fmt.Sprintf("%s_%s", fileHash[:12], doc.FileName))
+	} else {
+		if err := os.MkdirAll(filepath.Dir(doc.FilePath), 0755); err != nil {
+			return nil, err
+		}
+	}
+	if err := os.WriteFile(doc.FilePath, contentBytes, 0644); err != nil {
+		return nil, err
+	}
+
+	doc.FileSize = uint64(len(contentBytes))
+	doc.FileHash = fileHash
+	doc.ParseStatus = model.ParseStatusCompleted
+
+	chunkSize, chunkOverlap := kbChunkParams(detail)
+	pieces := chunker.SplitText(req.Content, chunkSize, chunkOverlap)
+	chunks := make([]model.KBChunk, 0, len(pieces))
+	for _, p := range pieces {
+		chunks = append(chunks, model.KBChunk{
+			KBAssetID:  kbID,
+			DocID:      doc.ID,
+			ChunkIndex: p.Index,
+			Content:    p.Content,
+			TokenCount: p.TokenCount,
+		})
+	}
+	doc.ChunkCount = len(chunks)
+
+	if err := s.kbRepo.ReplaceDocumentChunks(kbID, doc, chunks); err != nil {
+		return nil, err
+	}
+
+	recordAudit(s.auditRepo, s.userRepo, userID, detail.DomainID, detail.DomainName, detail.ID, detail.AssetCode, detail.Name, detail.AssetType, model.AuditActionKBFileUpdate, relativeDocPath(*doc), "编辑文档 "+relativeDocPath(*doc))
+	return doc, nil
+}
+
 func (s *kbService) UploadDocuments(
 	userID uint64,
 	isSuperAdmin bool,
@@ -165,18 +353,21 @@ func (s *kbService) UploadDocuments(
 		}
 
 		ext := strings.ToLower(filepath.Ext(safeName))
-		if !allowedKBExts[ext] {
-			return nil, NewBadRequest("unsupported file type; allowed: .md, .markdown, .txt")
+		if fh.Size > maxKBFileSize {
+			return nil, NewBadRequest("单文件大小不能超过 10MB")
 		}
 
 		src, err := fh.Open()
 		if err != nil {
 			return nil, err
 		}
-		contentBytes, readErr := io.ReadAll(io.LimitReader(src, 20<<20))
+		contentBytes, readErr := io.ReadAll(io.LimitReader(src, maxKBFileSize+1))
 		_ = src.Close()
 		if readErr != nil {
 			return nil, readErr
+		}
+		if len(contentBytes) > maxKBFileSize {
+			return nil, NewBadRequest("单文件大小不能超过 10MB")
 		}
 
 		doc, err := s.persistKBFileAndChunks(detail, userID, docFolder, safeName, ext, contentBytes, chunkSize, chunkOverlap)
@@ -234,16 +425,19 @@ func (s *kbService) persistKBFileAndChunks(
 		return nil, err
 	}
 
-	pieces := chunker.SplitText(string(contentBytes), chunkSize, chunkOverlap)
-	chunks := make([]model.KBChunk, 0, len(pieces))
-	for _, p := range pieces {
-		chunks = append(chunks, model.KBChunk{
-			KBAssetID:  detail.ID,
-			DocID:      doc.ID,
-			ChunkIndex: p.Index,
-			Content:    p.Content,
-			TokenCount: p.TokenCount,
-		})
+	var chunks []model.KBChunk
+	if isTextKBFile(ext, contentBytes) {
+		pieces := chunker.SplitText(string(contentBytes), chunkSize, chunkOverlap)
+		chunks = make([]model.KBChunk, 0, len(pieces))
+		for _, p := range pieces {
+			chunks = append(chunks, model.KBChunk{
+				KBAssetID:  detail.ID,
+				DocID:      doc.ID,
+				ChunkIndex: p.Index,
+				Content:    p.Content,
+				TokenCount: p.TokenCount,
+			})
+		}
 	}
 	if err := s.kbRepo.CompleteDocumentParsing(detail.ID, doc.ID, chunks); err != nil {
 		_ = s.kbRepo.FailDocumentParsing(doc.ID, err.Error())
@@ -251,6 +445,27 @@ func (s *kbService) persistKBFileAndChunks(
 		doc.ChunkCount = len(chunks)
 	}
 	return doc, nil
+}
+
+func isTextKBFile(ext string, data []byte) bool {
+	if !textKBExts[strings.ToLower(ext)] {
+		return false
+	}
+	return !bytes.Contains(data, []byte{0})
+}
+
+func detectKBMIMEType(ext string, data []byte) string {
+	lowerExt := strings.ToLower(ext)
+	if mt, ok := kbMIMETypes[lowerExt]; ok {
+		return mt
+	}
+	if mt := mime.TypeByExtension(lowerExt); mt != "" {
+		return mt
+	}
+	if len(data) > 0 {
+		return http.DetectContentType(data)
+	}
+	return "application/octet-stream"
 }
 
 func resolveUploadTarget(baseFolder, relativePath, origFilename string) (folder string, fileName string, err error) {
@@ -305,13 +520,53 @@ func (s *kbService) GetDocumentContent(userID uint64, isSuperAdmin bool, kbID, d
 	if err != nil {
 		return nil, NewNotFound("document file not found on disk")
 	}
+	if !isTextKBFile(doc.FileExt, raw) {
+		return map[string]interface{}{
+			"id":          doc.ID,
+			"file_name":   doc.FileName,
+			"folder_path": doc.FolderPath,
+			"file_size":   doc.FileSize,
+			"is_binary":   true,
+			"content":     "",
+		}, nil
+	}
 	return map[string]interface{}{
 		"id":          doc.ID,
 		"file_name":   doc.FileName,
 		"folder_path": doc.FolderPath,
 		"file_size":   doc.FileSize,
+		"is_binary":   false,
 		"content":     string(raw),
 	}, nil
+}
+
+func (s *kbService) GetDocumentRaw(userID uint64, isSuperAdmin bool, kbID, docID uint64) (string, string, bool, []byte, error) {
+	if _, err := s.ensureKBViewPermission(userID, isSuperAdmin, kbID); err != nil {
+		return "", "", false, nil, err
+	}
+	doc, err := s.kbRepo.FindDocumentByID(kbID, docID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", "", false, nil, NewNotFound("document not found")
+		}
+		return "", "", false, nil, err
+	}
+	if doc.IsFolder {
+		return "", "", false, nil, NewBadRequest("cannot stream raw content of a folder")
+	}
+
+	raw, err := os.ReadFile(doc.FilePath)
+	if err != nil {
+		return "", "", false, nil, NewNotFound("document file not found on disk")
+	}
+
+	ext := doc.FileExt
+	if ext == "" {
+		ext = filepath.Ext(doc.FileName)
+	}
+	mimeType := detectKBMIMEType(ext, raw)
+	isSVG := strings.EqualFold(ext, ".svg")
+	return doc.FileName, mimeType, isSVG, raw, nil
 }
 
 func (s *kbService) ListChunks(userID uint64, isSuperAdmin bool, kbID, docID uint64, page, pageSize int) ([]model.KBChunk, int64, error) {

@@ -1,16 +1,19 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
+  Check,
   Collection,
   CopyDocument,
   Delete,
   Document,
+  DocumentAdd,
   DocumentCopy,
   Download,
   Folder,
   FolderAdd,
   FolderOpened,
+  Picture,
   Refresh,
   Search,
   Upload
@@ -19,18 +22,29 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { getAssets } from '@/api/asset'
 import {
   copyDocument,
+  createKbFile,
   createKbFolder,
   deleteDocument,
   getDocumentContent,
+  getDocumentRawBlob,
   getDocuments,
   moveDocument,
   searchKB,
+  updateKbFileContent,
   uploadDocument
 } from '@/api/kb'
 import { useDomainStore } from '@/stores/domain'
 import type { AssetItem, KbChunk, KbContentResult, KbDocument } from '@/types/api'
 import { formatFileSize, getKbParseStatusMeta, normalizeList } from '@/utils/format'
-import { buildKbTree, confirmAndDownloadKb, type KbTreeNode } from '@/utils/kbDownload'
+import {
+  buildKbTree,
+  confirmAndDownloadKb,
+  isImageFile,
+  isMarkdownFile,
+  isTextFile,
+  MAX_KB_FILE_SIZE,
+  type KbTreeNode
+} from '@/utils/kbDownload'
 import { renderMarkdown } from '@/utils/markdown'
 
 const route = useRoute()
@@ -67,14 +81,51 @@ const createFolderOpen = ref(false)
 const newFolderName = ref('')
 const creatingFolder = ref(false)
 
-// Right Pane Tabs & Preview
+// Create Markdown File Modal
+const createFileOpen = ref(false)
+const creatingFile = ref(false)
+const createFileForm = reactive({
+  file_name: '',
+  content: ''
+})
+
+// Right Pane Tabs & Preview / Editor
 const rightTab = ref<'preview' | 'search'>('preview')
 const loadingPreview = ref(false)
 const previewDoc = ref<KbContentResult | null>(null)
-const previewMode = ref<'rendered' | 'raw'>('rendered')
+const imagePreviewUrl = ref('')
+const imageDoc = ref<KbDocument | null>(null)
+const binaryDoc = ref<KbDocument | null>(null)
+const previewMode = ref<'rendered' | 'edit' | 'split' | 'raw'>('rendered')
+const editFileName = ref('')
+const editContent = ref('')
+const savingEdit = ref(false)
+
+function revokeImageUrl() {
+  if (imagePreviewUrl.value) {
+    URL.revokeObjectURL(imagePreviewUrl.value)
+    imagePreviewUrl.value = ''
+  }
+}
+
+function resetPreviewState() {
+  revokeImageUrl()
+  previewDoc.value = null
+  imageDoc.value = null
+  binaryDoc.value = null
+}
+
 const renderedHtml = computed(() =>
   previewDoc.value ? renderMarkdown(previewDoc.value.content) : ''
 )
+const liveRenderedHtml = computed(() => renderMarkdown(editContent.value))
+const hasUnsavedChanges = computed(() => {
+  if (!previewDoc.value) return false
+  return (
+    editFileName.value !== previewDoc.value.file_name ||
+    editContent.value !== previewDoc.value.content
+  )
+})
 
 // Keyword Search
 const searchQuery = ref('')
@@ -160,7 +211,7 @@ async function fetchDocuments(silent = false) {
 function handleSelectKb(id: number) {
   selectedKbId.value = id
   selectedFolderPath.value = ''
-  previewDoc.value = null
+  resetPreviewState()
   searchResults.value = []
   hasSearched.value = false
   fetchDocuments()
@@ -192,6 +243,41 @@ async function handleCreateFolder() {
   }
 }
 
+function openCreateFileModal() {
+  createFileForm.file_name = ''
+  createFileForm.content = ''
+  createFileOpen.value = true
+}
+
+async function handleCreateFile() {
+  if (!selectedKbId.value) return
+  let fileName = createFileForm.file_name.trim()
+  if (!fileName) {
+    ElMessage.warning('请输入 Markdown 文件名，例如 guide.md')
+    return
+  }
+  if (!/\.(md|markdown)$/i.test(fileName)) {
+    fileName = `${fileName}.md`
+  }
+
+  creatingFile.value = true
+  try {
+    const created = await createKbFile(selectedKbId.value, {
+      folder_path: selectedFolderPath.value || undefined,
+      file_name: fileName,
+      content: createFileForm.content
+    })
+    ElMessage.success(`已新建文档「${created.file_name}」`)
+    createFileOpen.value = false
+    await fetchDocuments()
+    await loadPreviewDoc(created.id, 'split')
+  } catch {
+    // Handled by interceptor
+  } finally {
+    creatingFile.value = false
+  }
+}
+
 function triggerFileUpload(targetFolder?: string) {
   if (typeof targetFolder === 'string') {
     selectedFolderPath.value = targetFolder
@@ -212,6 +298,10 @@ async function handleFilesSelected(event: Event) {
   let uploadedCount = 0
   try {
     for (const file of Array.from(files)) {
+      if (file.size > MAX_KB_FILE_SIZE) {
+        ElMessage.warning(`文件「${file.name}」超过 10MB 限制，已跳过`)
+        continue
+      }
       await uploadDocument(
         selectedKbId.value,
         file,
@@ -219,8 +309,10 @@ async function handleFilesSelected(event: Event) {
       )
       uploadedCount++
     }
-    ElMessage.success(`成功上传 ${uploadedCount} 个 Markdown 文件`)
-    await fetchDocuments()
+    if (uploadedCount > 0) {
+      ElMessage.success(`成功上传 ${uploadedCount} 个文件`)
+      await fetchDocuments()
+    }
   } catch {
     // Handled by interceptor
   } finally {
@@ -234,17 +326,15 @@ async function handleFolderSelected(event: Event) {
   const files = input.files
   if (!files || files.length === 0 || !selectedKbId.value) return
 
-  const mdFiles = Array.from(files).filter((f) => /\.(md|markdown)$/i.test(f.name))
-  if (mdFiles.length === 0) {
-    ElMessage.warning('所选文件夹中未包含 .md Markdown 文件')
-    input.value = ''
-    return
-  }
-
+  const allFiles = Array.from(files)
   uploading.value = true
   let uploadedCount = 0
   try {
-    for (const file of mdFiles) {
+    for (const file of allFiles) {
+      if (file.size > MAX_KB_FILE_SIZE) {
+        ElMessage.warning(`文件「${file.name}」超过 10MB 限制，已跳过`)
+        continue
+      }
       const relPath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name
       await uploadDocument(
         selectedKbId.value,
@@ -254,13 +344,60 @@ async function handleFolderSelected(event: Event) {
       )
       uploadedCount++
     }
-    ElMessage.success(`成功上传文件夹内 ${uploadedCount} 个 Markdown 文件`)
-    await fetchDocuments()
+    if (uploadedCount > 0) {
+      ElMessage.success(`成功上传文件夹内 ${uploadedCount} 个文件`)
+      await fetchDocuments()
+    }
   } catch {
     // Handled by interceptor
   } finally {
     uploading.value = false
     input.value = ''
+  }
+}
+
+async function loadPreviewDoc(
+  docId: number,
+  targetMode?: 'rendered' | 'edit' | 'split' | 'raw'
+) {
+  if (!selectedKbId.value) return
+  rightTab.value = 'preview'
+  if (targetMode) previewMode.value = targetMode
+  loadingPreview.value = true
+  try {
+    const doc = await getDocumentContent(selectedKbId.value, docId)
+    previewDoc.value = doc
+    editFileName.value = doc.file_name
+    editContent.value = doc.content
+  } catch {
+    previewDoc.value = null
+  } finally {
+    loadingPreview.value = false
+  }
+}
+
+async function handleSaveEdit() {
+  if (!selectedKbId.value || !previewDoc.value) return
+  const trimmedName = editFileName.value.trim()
+  if (!trimmedName) {
+    ElMessage.warning('文件名不能为空')
+    return
+  }
+  savingEdit.value = true
+  try {
+    const updated = await updateKbFileContent(selectedKbId.value, previewDoc.value.id, {
+      file_name: trimmedName,
+      content: editContent.value
+    })
+    previewDoc.value = updated
+    editFileName.value = updated.file_name
+    editContent.value = updated.content
+    ElMessage.success('文档已保存')
+    await fetchDocuments(true)
+  } catch {
+    // Handled by interceptor
+  } finally {
+    savingEdit.value = false
   }
 }
 
@@ -271,13 +408,31 @@ async function handleNodeClick(node: KbTreeNode) {
     return
   }
   if (!node.doc || !selectedKbId.value) return
+  const doc = node.doc
   selectedFileNode.value = node
   rightTab.value = 'preview'
+  resetPreviewState()
   loadingPreview.value = true
   try {
-    previewDoc.value = await getDocumentContent(selectedKbId.value, node.doc.id)
+    if (isImageFile(doc.file_name)) {
+      const blob = await getDocumentRawBlob(selectedKbId.value, doc.id)
+      imagePreviewUrl.value = URL.createObjectURL(blob)
+      imageDoc.value = doc
+    } else if (isTextFile(doc.file_name)) {
+      const contentRes = await getDocumentContent(selectedKbId.value, doc.id)
+      if (contentRes.is_binary) {
+        binaryDoc.value = doc
+      } else {
+        previewDoc.value = contentRes
+        editFileName.value = contentRes.file_name
+        editContent.value = contentRes.content
+        previewMode.value = isMarkdownFile(doc.file_name) ? 'rendered' : 'raw'
+      }
+    } else {
+      binaryDoc.value = doc
+    }
   } catch {
-    previewDoc.value = null
+    resetPreviewState()
   } finally {
     loadingPreview.value = false
   }
@@ -349,6 +504,19 @@ async function handlePaste(targetFolder?: string) {
 }
 
 function handleKeydown(e: KeyboardEvent) {
+  if (!(e.ctrlKey || e.metaKey)) return
+  const key = e.key.toLowerCase()
+  if (
+    key === 's' &&
+    previewDoc.value &&
+    rightTab.value === 'preview' &&
+    (previewMode.value === 'edit' || previewMode.value === 'split')
+  ) {
+    e.preventDefault()
+    handleSaveEdit()
+    return
+  }
+
   const target = e.target as HTMLElement | null
   if (
     target &&
@@ -358,8 +526,6 @@ function handleKeydown(e: KeyboardEvent) {
   ) {
     return
   }
-  if (!(e.ctrlKey || e.metaKey)) return
-  const key = e.key.toLowerCase()
   if (key === 'c' && selectedFileNode.value && !selectedFileNode.value.isFolder) {
     e.preventDefault()
     setClipboard(selectedFileNode.value)
@@ -451,6 +617,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   stopPolling()
+  revokeImageUrl()
   window.removeEventListener('keydown', handleKeydown)
 })
 </script>
@@ -513,6 +680,9 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="toolbar-actions">
+            <el-button type="primary" :icon="DocumentAdd" @click="openCreateFileModal">
+              新建 Markdown
+            </el-button>
             <el-button :icon="FolderAdd" @click="openCreateFolderModal">新建文件夹</el-button>
             <el-button
               type="primary"
@@ -521,7 +691,7 @@ onBeforeUnmount(() => {
               :loading="uploading"
               @click="triggerFileUpload()"
             >
-              上传 Markdown 文件
+              上传文件
             </el-button>
             <el-button
               :icon="FolderOpened"
@@ -575,7 +745,6 @@ onBeforeUnmount(() => {
         <input
           ref="fileInputRef"
           type="file"
-          accept=".md,.markdown"
           multiple
           style="display: none"
           @change="handleFilesSelected"
@@ -596,14 +765,14 @@ onBeforeUnmount(() => {
         <!-- Left: Folder & File Tree -->
         <div class="surface-card kb-panel tree-panel">
           <div class="panel-header">
-            <h3 class="panel-title">目录与 Markdown 文件</h3>
+            <h3 class="panel-title">目录与文件</h3>
             <span class="doc-count tabular-nums">{{ documents.length }} 项</span>
           </div>
 
           <div v-loading="loadingDocs" class="tree-scroll">
             <el-empty
               v-if="treeNodes.length === 0"
-              description="暂无文件或文件夹，请点击上方按钮上传 Markdown"
+              description="暂无文件或文件夹，请点击上方按钮上传文件或新建 Markdown"
               :image-size="64"
             />
             <el-tree
@@ -622,8 +791,9 @@ onBeforeUnmount(() => {
               <template #default="{ data }">
                 <div class="tree-node-row">
                   <div class="tree-node-left">
-                    <el-icon :size="15" :color="data.isFolder ? '#D97706' : '#4F46E5'">
+                    <el-icon :size="15" :color="data.isFolder ? '#D97706' : isImageFile(data.label) ? '#059669' : '#4F46E5'">
                       <Folder v-if="data.isFolder" />
+                      <Picture v-else-if="isImageFile(data.label)" />
                       <Document v-else />
                     </el-icon>
                     <span class="tree-node-label">{{ data.label }}</span>
@@ -695,15 +865,69 @@ onBeforeUnmount(() => {
         <!-- Right: Markdown Preview + Keyword Search -->
         <div class="surface-card kb-panel">
           <el-tabs v-model="rightTab">
-            <el-tab-pane label="Markdown 预览" name="preview">
+            <el-tab-pane label="文件预览与编辑" name="preview">
               <div v-if="loadingPreview" class="mt-16">
                 <el-skeleton :rows="6" animated />
+              </div>
+
+              <div v-else-if="imageDoc && imagePreviewUrl" class="preview-container">
+                <div class="preview-header">
+                  <div class="preview-meta">
+                    <span class="preview-filename mono-text">{{ imageDoc.file_name }}</span>
+                    <span class="preview-sub mono-text">
+                      {{ imageDoc.folder_path || '/' }} · {{ formatFileSize(imageDoc.file_size) }}
+                    </span>
+                  </div>
+                  <el-button
+                    type="primary"
+                    size="small"
+                    plain
+                    :icon="Download"
+                    @click="handleDownloadFile(imageDoc.id, imageDoc.file_name)"
+                  >
+                    下载图片
+                  </el-button>
+                </div>
+                <div class="image-preview-box">
+                  <el-image
+                    :src="imagePreviewUrl"
+                    :preview-src-list="[imagePreviewUrl]"
+                    fit="contain"
+                    style="max-height: 480px; width: 100%"
+                  />
+                </div>
+              </div>
+
+              <div v-else-if="binaryDoc" class="binary-file-card">
+                <div class="binary-file-info">
+                  <el-icon :size="36" color="#64748B"><Document /></el-icon>
+                  <div>
+                    <div class="preview-filename mono-text">{{ binaryDoc.file_name }}</div>
+                    <div class="binary-file-meta">
+                      <el-tag size="small" type="info" effect="plain" class="mono-text">
+                        {{ binaryDoc.file_ext || 'binary' }}
+                      </el-tag>
+                      <span class="tabular-nums">{{ formatFileSize(binaryDoc.file_size) }}</span>
+                      <span>暂不支持在线文本预览，请下载后查看</span>
+                    </div>
+                  </div>
+                </div>
+                <el-button
+                  type="primary"
+                  :icon="Download"
+                  @click="handleDownloadFile(binaryDoc.id, binaryDoc.file_name)"
+                >
+                  下载文件
+                </el-button>
               </div>
 
               <div v-else-if="previewDoc" class="preview-container">
                 <div class="preview-header">
                   <div class="preview-meta">
-                    <span class="preview-filename mono-text">{{ previewDoc.file_name }}</span>
+                    <span class="preview-filename mono-text">
+                      {{ previewDoc.file_name }}
+                      <span v-if="hasUnsavedChanges" class="unsaved-dot" title="有未保存修改">●</span>
+                    </span>
                     <span class="preview-sub mono-text">
                       {{ previewDoc.folder_path || '/' }} · {{ formatFileSize(previewDoc.file_size) }}
                     </span>
@@ -711,8 +935,20 @@ onBeforeUnmount(() => {
                   <div class="preview-controls">
                     <el-radio-group v-model="previewMode" size="small">
                       <el-radio-button value="rendered">渲染预览</el-radio-button>
-                      <el-radio-button value="raw">Markdown 原文</el-radio-button>
+                      <el-radio-button value="edit">在线编辑</el-radio-button>
+                      <el-radio-button value="split">分屏编辑</el-radio-button>
+                      <el-radio-button value="raw">原文</el-radio-button>
                     </el-radio-group>
+                    <el-button
+                      v-if="previewMode === 'edit' || previewMode === 'split'"
+                      type="primary"
+                      size="small"
+                      :icon="Check"
+                      :loading="savingEdit"
+                      @click="handleSaveEdit"
+                    >
+                      保存修改
+                    </el-button>
                     <el-button
                       type="primary"
                       size="small"
@@ -730,11 +966,48 @@ onBeforeUnmount(() => {
                   class="markdown-body preview-content"
                   v-html="renderedHtml"
                 />
+                <div v-else-if="previewMode === 'edit'" class="editor-pane">
+                  <el-input
+                    v-model="editFileName"
+                    size="small"
+                    placeholder="文件名（如 guide.md）"
+                    class="mono-text"
+                  >
+                    <template #prepend>文件名</template>
+                  </el-input>
+                  <el-input
+                    v-model="editContent"
+                    type="textarea"
+                    :rows="18"
+                    placeholder="在此编写 Markdown 内容（支持 Ctrl+S 保存）..."
+                    class="mono-text"
+                  />
+                </div>
+                <div v-else-if="previewMode === 'split'" class="split-editor-grid">
+                  <div class="editor-pane">
+                    <el-input
+                      v-model="editFileName"
+                      size="small"
+                      placeholder="文件名（如 guide.md）"
+                      class="mono-text"
+                    >
+                      <template #prepend>文件名</template>
+                    </el-input>
+                    <el-input
+                      v-model="editContent"
+                      type="textarea"
+                      :rows="18"
+                      placeholder="在此编写 Markdown 内容（支持 Ctrl+S 保存）..."
+                      class="mono-text"
+                    />
+                  </div>
+                  <div class="markdown-body editor-split-preview" v-html="liveRenderedHtml" />
+                </div>
                 <pre v-else class="raw-markdown mono-text">{{ previewDoc.content }}</pre>
               </div>
 
               <div v-else class="preview-placeholder">
-                在左侧目录树点击任意 <code>.md</code> 文件，即可在此处预览渲染效果或查看源码。
+                在左侧目录树点击任意文件（支持 Markdown、文本、代码、图片及二进制文件），即可在此处预览、编辑或下载。
               </div>
             </el-tab-pane>
 
@@ -816,6 +1089,41 @@ onBeforeUnmount(() => {
         <el-button @click="createFolderOpen = false">取消</el-button>
         <el-button type="primary" :loading="creatingFolder" @click="handleCreateFolder">
           确认创建
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- Create Markdown File Modal -->
+    <el-dialog v-model="createFileOpen" title="新建 Markdown 文档" width="540px" destroy-on-close>
+      <el-form label-position="top">
+        <el-form-item label="目标目录">
+          <el-input
+            :model-value="selectedFolderPath ? `/${selectedFolderPath}` : '/ (根目录)'"
+            disabled
+            class="mono-text"
+          />
+        </el-form-item>
+        <el-form-item label="文件名">
+          <el-input
+            v-model="createFileForm.file_name"
+            placeholder="例如：guide.md（未带后缀将自动补充 .md）"
+            class="mono-text"
+          />
+        </el-form-item>
+        <el-form-item label="初始内容（选填）">
+          <el-input
+            v-model="createFileForm.content"
+            type="textarea"
+            :rows="6"
+            placeholder="# 文档标题&#10;&#10;在此输入 Markdown 内容..."
+            class="mono-text"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="createFileOpen = false">取消</el-button>
+        <el-button type="primary" :loading="creatingFile" @click="handleCreateFile">
+          创建并编辑
         </el-button>
       </template>
     </el-dialog>
@@ -1115,8 +1423,77 @@ onBeforeUnmount(() => {
   padding-top: 6px;
 }
 
+.unsaved-dot {
+  color: #f59e0b;
+  margin-left: 4px;
+  font-size: 12px;
+}
+
+.editor-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.split-editor-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  align-items: stretch;
+}
+
+.editor-split-preview {
+  border: 1px solid var(--ascp-border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: #ffffff;
+  max-height: 440px;
+  overflow-y: auto;
+}
+
+.image-preview-box {
+  background: #f8fafc;
+  border: 1px solid var(--ascp-border);
+  border-radius: 10px;
+  padding: 16px;
+  display: flex;
+  justify-content: center;
+}
+
+.binary-file-card {
+  margin-top: 16px;
+  padding: 24px;
+  background: #f8fafc;
+  border: 1px solid var(--ascp-border);
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.binary-file-info {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.binary-file-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--ascp-text-muted);
+}
+
 @media (max-width: 1080px) {
   .kb-columns {
+    grid-template-columns: 1fr;
+  }
+
+  .split-editor-grid {
     grid-template-columns: 1fr;
   }
 }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import {
   CopyDocument,
@@ -13,8 +13,8 @@ import {
 import { downloadAgentConfig, downloadSkillPackage, getAssetDetail, subscribeAsset } from '@/api/asset'
 import { createApproval } from '@/api/approval'
 import { invokeAgent, invokeKBQuery, invokeMCP, invokeSkill } from '@/api/invoke'
-import { getDocumentContent, getDocuments } from '@/api/kb'
-import type { AssetItem, KbContentResult } from '@/types/api'
+import { getDocumentContent, getDocumentRawBlob, getDocuments } from '@/api/kb'
+import type { AssetItem, KbContentResult, KbDocument } from '@/types/api'
 import {
   formatDateTime,
   formatFileSize,
@@ -23,7 +23,14 @@ import {
   getVisibilityLabel,
   normalizeList
 } from '@/utils/format'
-import { buildKbTree, confirmAndDownloadKb, type KbTreeNode } from '@/utils/kbDownload'
+import {
+  buildKbTree,
+  confirmAndDownloadKb,
+  isImageFile,
+  isMarkdownFile,
+  isTextFile,
+  type KbTreeNode
+} from '@/utils/kbDownload'
 import { renderMarkdown } from '@/utils/markdown'
 
 const props = defineProps<{
@@ -106,6 +113,9 @@ function initDefaultPayload(asset: AssetItem) {
 const loadingKbTree = ref(false)
 const kbTreeNodes = ref<KbTreeNode[]>([])
 const kbPreviewDoc = ref<KbContentResult | null>(null)
+const kbImagePreviewUrl = ref('')
+const kbImageDoc = ref<KbDocument | null>(null)
+const kbBinaryDoc = ref<KbDocument | null>(null)
 const kbPreviewLoading = ref(false)
 const kbPreviewMode = ref<'rendered' | 'raw'>('rendered')
 
@@ -113,10 +123,24 @@ const kbRenderedHtml = computed(() =>
   kbPreviewDoc.value ? renderMarkdown(kbPreviewDoc.value.content) : ''
 )
 
+function revokeKbImageUrl() {
+  if (kbImagePreviewUrl.value) {
+    URL.revokeObjectURL(kbImagePreviewUrl.value)
+    kbImagePreviewUrl.value = ''
+  }
+}
+
+function resetKbPreviewState() {
+  revokeKbImageUrl()
+  kbPreviewDoc.value = null
+  kbImageDoc.value = null
+  kbBinaryDoc.value = null
+}
+
 async function loadKbFiles(kbId: number) {
   loadingKbTree.value = true
   kbTreeNodes.value = []
-  kbPreviewDoc.value = null
+  resetKbPreviewState()
   try {
     const res = await getDocuments(kbId)
     kbTreeNodes.value = buildKbTree(normalizeList(res).items)
@@ -129,16 +153,35 @@ async function loadKbFiles(kbId: number) {
 
 async function handleKbNodeClick(node: KbTreeNode) {
   if (node.isFolder || !node.doc || !detail.value) return
+  const doc = node.doc
+  resetKbPreviewState()
   kbPreviewLoading.value = true
-  kbPreviewMode.value = 'rendered'
   try {
-    kbPreviewDoc.value = await getDocumentContent(detail.value.id, node.doc.id)
+    if (isImageFile(doc.file_name)) {
+      const blob = await getDocumentRawBlob(detail.value.id, doc.id)
+      kbImagePreviewUrl.value = URL.createObjectURL(blob)
+      kbImageDoc.value = doc
+    } else if (isTextFile(doc.file_name)) {
+      const contentRes = await getDocumentContent(detail.value.id, doc.id)
+      if (contentRes.is_binary) {
+        kbBinaryDoc.value = doc
+      } else {
+        kbPreviewDoc.value = contentRes
+        kbPreviewMode.value = isMarkdownFile(doc.file_name) ? 'rendered' : 'raw'
+      }
+    } else {
+      kbBinaryDoc.value = doc
+    }
   } catch {
-    kbPreviewDoc.value = null
+    resetKbPreviewState()
   } finally {
     kbPreviewLoading.value = false
   }
 }
+
+onBeforeUnmount(() => {
+  revokeKbImageUrl()
+})
 
 async function handleDownloadKbAll() {
   if (!detail.value) return
@@ -654,11 +697,11 @@ async function handleRunInvoke() {
                 </el-descriptions-item>
               </el-descriptions>
 
-              <div class="code-block-label">目录与文件浏览（点击 Markdown 文件可在线预览）</div>
+              <div class="code-block-label">目录与文件浏览（点击文件可在线预览或下载）</div>
               <div v-loading="loadingKbTree" class="kb-tree-box">
                 <el-empty
                   v-if="kbTreeNodes.length === 0"
-                  description="该知识库暂无 Markdown 文件"
+                  description="该知识库暂无文件"
                   :image-size="48"
                 />
                 <el-tree
@@ -707,12 +750,59 @@ async function handleRunInvoke() {
               <div v-if="kbPreviewLoading" class="mt-12">
                 <el-skeleton :rows="4" animated />
               </div>
+              <div v-else-if="kbImageDoc && kbImagePreviewUrl" class="kb-inline-preview mt-12">
+                <div class="kb-preview-head">
+                  <span class="mono-text kb-preview-name">
+                    {{ kbImageDoc.file_name }} ({{ formatFileSize(kbImageDoc.file_size) }})
+                  </span>
+                  <el-button
+                    size="small"
+                    type="primary"
+                    plain
+                    :icon="Download"
+                    @click="handleDownloadKbFile(kbImageDoc.id, kbImageDoc.file_name)"
+                  >
+                    下载图片
+                  </el-button>
+                </div>
+                <div class="kb-image-wrap">
+                  <el-image
+                    :src="kbImagePreviewUrl"
+                    :preview-src-list="[kbImagePreviewUrl]"
+                    fit="contain"
+                    style="max-height: 300px; width: 100%"
+                  />
+                </div>
+              </div>
+              <div v-else-if="kbBinaryDoc" class="kb-inline-preview mt-12">
+                <div class="kb-binary-card">
+                  <div>
+                    <div class="mono-text kb-preview-name">{{ kbBinaryDoc.file_name }}</div>
+                    <div class="kb-binary-meta">
+                      <el-tag size="small" type="info" effect="plain" class="mono-text">
+                        {{ kbBinaryDoc.file_ext || 'binary' }}
+                      </el-tag>
+                      <span class="tabular-nums">{{ formatFileSize(kbBinaryDoc.file_size) }}</span>
+                    </div>
+                  </div>
+                  <el-button
+                    type="primary"
+                    size="small"
+                    :icon="Download"
+                    @click="handleDownloadKbFile(kbBinaryDoc.id, kbBinaryDoc.file_name)"
+                  >
+                    下载文件
+                  </el-button>
+                </div>
+              </div>
               <div v-else-if="kbPreviewDoc" class="kb-inline-preview mt-12">
                 <div class="kb-preview-head">
                   <span class="mono-text kb-preview-name">{{ kbPreviewDoc.file_name }}</span>
                   <div class="kb-preview-actions">
                     <el-radio-group v-model="kbPreviewMode" size="small">
-                      <el-radio-button value="rendered">渲染预览</el-radio-button>
+                      <el-radio-button v-if="isMarkdownFile(kbPreviewDoc.file_name)" value="rendered">
+                        渲染预览
+                      </el-radio-button>
                       <el-radio-button value="raw">原文</el-radio-button>
                     </el-radio-group>
                     <el-button
@@ -727,7 +817,7 @@ async function handleRunInvoke() {
                   </div>
                 </div>
                 <div
-                  v-if="kbPreviewMode === 'rendered'"
+                  v-if="kbPreviewMode === 'rendered' && isMarkdownFile(kbPreviewDoc.file_name)"
                   class="markdown-body kb-preview-body"
                   v-html="kbRenderedHtml"
                 />
@@ -1058,5 +1148,29 @@ async function handleRunInvoke() {
   padding: 14px 16px;
   max-height: 320px;
   overflow-y: auto;
+}
+
+.kb-image-wrap {
+  padding: 14px;
+  display: flex;
+  justify-content: center;
+  background: #f8fafc;
+}
+
+.kb-binary-card {
+  padding: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.kb-binary-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--ascp-text-muted);
 }
 </style>

@@ -154,6 +154,14 @@ onMounted(() => {
         <el-icon><UserFilled /></el-icon>
         <span>添加域成员</span>
       </div>
+      <el-alert
+        v-if="currentDomain?.visibility === 'org_private'"
+        title="组织私有域仅支持添加当前所属组织内的成员，且仅组织创建者或管理员可管理"
+        type="info"
+        show-icon
+        :closable="false"
+        style="margin-bottom: 14px"
+      />
       <el-form
         ref="formRef"
         :model="memberForm"

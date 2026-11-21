@@ -14,6 +14,7 @@ import (
 type GovernanceService interface {
 	SubscribeAsset(userID, assetID uint64) (*model.AssetPermission, error)
 	CreateApproval(userID uint64, req model.CreateApprovalRequest) (*model.ApprovalRequest, error)
+	RequestJoinOrg(userID, orgID uint64, reason string) (*model.ApprovalRequest, error)
 	ListMyRequests(userID uint64) ([]model.ApprovalRequestView, error)
 	ListPendingRequests(userID uint64, isSuperAdmin bool) ([]model.ApprovalRequestView, error)
 	ListHandledRequests(userID uint64) ([]model.ApprovalRequestView, error)
@@ -157,6 +158,64 @@ func (s *governanceService) CreateApproval(userID uint64, req model.CreateApprov
 	return approvalReq, nil
 }
 
+func (s *governanceService) RequestJoinOrg(userID, orgID uint64, reason string) (*model.ApprovalRequest, error) {
+	if s.orgRepo == nil {
+		return nil, NewBadRequest("organization module not configured")
+	}
+	org, err := s.orgRepo.FindByID(orgID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, NewNotFound("organization not found")
+		}
+		return nil, err
+	}
+
+	orgRole, err := s.orgRepo.GetMemberRole(orgID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if orgRole != "" || org.OwnerID == userID {
+		return nil, NewConflict("您已是该组织成员")
+	}
+
+	pending, err := s.govRepo.HasPendingOrgJoin(orgID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if pending {
+		return nil, NewConflict("您已提交过加入申请，请等待审批")
+	}
+
+	if reason == "" {
+		reason = "申请加入组织 " + org.OrgName
+	}
+	requestNo := fmt.Sprintf("APR-%s-%04d", time.Now().Format("20060102150405"), time.Now().Nanosecond()%10000)
+	approvalReq := &model.ApprovalRequest{
+		RequestNo:     requestNo,
+		ApplicantID:   userID,
+		TargetType:    model.ApprovalTargetOrgJoin,
+		AssetID:       org.ID,
+		RequestedPerm: model.OrgRoleMember,
+		DurationDays:  0,
+		Reason:        reason,
+		CurrentStep:   1,
+		TotalSteps:    1,
+		Status:        model.ApprovalStatusPending,
+	}
+	records := []model.ApprovalRecord{
+		{
+			StepNo:     1,
+			StepName:   "组织所有者/管理员审批",
+			ApproverID: org.OwnerID,
+			Action:     model.ApprovalActionPending,
+		},
+	}
+	if err := s.govRepo.CreateApprovalWithRecords(approvalReq, records); err != nil {
+		return nil, err
+	}
+	return approvalReq, nil
+}
+
 func (s *governanceService) ListMyRequests(userID uint64) ([]model.ApprovalRequestView, error) {
 	return s.govRepo.ListMyRequests(userID)
 }
@@ -166,7 +225,14 @@ func (s *governanceService) ListPendingRequests(userID uint64, isSuperAdmin bool
 	if err != nil {
 		return nil, err
 	}
-	return s.govRepo.ListPendingRequests(userID, isSuperAdmin, adminDomainIDs)
+	var adminOrgIDs []uint64
+	if s.orgRepo != nil {
+		adminOrgIDs, err = s.orgRepo.GetUserAdminOrgIDs(userID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return s.govRepo.ListPendingRequests(userID, isSuperAdmin, adminDomainIDs, adminOrgIDs)
 }
 
 func (s *governanceService) ListHandledRequests(userID uint64) ([]model.ApprovalRequestView, error) {
@@ -228,6 +294,39 @@ func (s *governanceService) HandleApproval(userID uint64, isSuperAdmin bool, req
 			actionName = model.AuditActionAssetPublishReject
 		}
 		recordAudit(s.auditRepo, s.userRepo, userID, domain.ID, domain.DomainName, asset.ID, asset.AssetCode, asset.Name, asset.AssetType, actionName, approvalReq.RequestedPerm, req.Comment)
+		return s.govRepo.FindApprovalByID(requestID)
+	}
+
+	if approvalReq.TargetType == model.ApprovalTargetOrgJoin {
+		if s.orgRepo == nil {
+			return nil, NewBadRequest("organization module not configured")
+		}
+		org, err := s.orgRepo.FindByID(approvalReq.AssetID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, NewNotFound("organization not found")
+			}
+			return nil, err
+		}
+		orgRole, err := s.orgRepo.GetMemberRole(org.ID, userID)
+		if err != nil {
+			return nil, err
+		}
+		if org.OwnerID != userID && orgRole != model.OrgRoleOwner && orgRole != model.OrgRoleAdmin {
+			return nil, NewForbidden("only organization owner or admin can handle join approval")
+		}
+		if err := s.govRepo.HandleOrgJoinApproval(approvalReq, currentRecord.ID, userID, req.Action, req.Comment); err != nil {
+			return nil, err
+		}
+		if req.Action == model.ApprovalActionApprove {
+			applicantName := fmt.Sprintf("user#%d", approvalReq.ApplicantID)
+			if s.userRepo != nil {
+				if u, uErr := s.userRepo.FindByID(approvalReq.ApplicantID); uErr == nil {
+					applicantName = u.Username
+				}
+			}
+			recordAudit(s.auditRepo, s.userRepo, userID, 0, "", org.ID, org.OrgCode, org.OrgName, "org", model.AuditActionOrgMemberAdd, applicantName, "审批通过加入组织 "+applicantName)
+		}
 		return s.govRepo.FindApprovalByID(requestID)
 	}
 

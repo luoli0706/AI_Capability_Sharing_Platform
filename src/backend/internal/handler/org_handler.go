@@ -11,15 +11,17 @@ import (
 
 type OrgHandler struct {
 	orgSvc service.OrgService
+	govSvc service.GovernanceService
 }
 
-func NewOrgHandler(orgSvc service.OrgService) *OrgHandler {
-	return &OrgHandler{orgSvc: orgSvc}
+func NewOrgHandler(orgSvc service.OrgService, govSvc service.GovernanceService) *OrgHandler {
+	return &OrgHandler{orgSvc: orgSvc, govSvc: govSvc}
 }
 
 func (h *OrgHandler) ListOrgs(c echo.Context) error {
 	page, pageSize := parsePageParamsWithDefault(c, 12)
 	q := model.OrgQuery{
+		Tab:      c.QueryParam("tab"),
 		Keyword:  c.QueryParam("keyword"),
 		Page:     page,
 		PageSize: pageSize,
@@ -151,4 +153,25 @@ func (h *OrgHandler) RemoveMember(c echo.Context) error {
 		return service.HandleError(c, err)
 	}
 	return response.Success(c, nil)
+}
+
+func (h *OrgHandler) JoinOrg(c echo.Context) error {
+	orgID, ok := parseUintParam(c, "id")
+	if !ok {
+		return nil
+	}
+
+	var req model.JoinOrgRequest
+	if c.Request().ContentLength > 0 {
+		if !bindAndValidate(c, &req) {
+			return nil
+		}
+	}
+
+	userID := middleware.GetUserID(c)
+	approval, err := h.govSvc.RequestJoinOrg(userID, orgID, req.Reason)
+	if err != nil {
+		return service.HandleError(c, err)
+	}
+	return response.Success(c, approval)
 }

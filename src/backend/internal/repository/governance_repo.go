@@ -14,13 +14,15 @@ type GovernanceRepository interface {
 	GetUserSubscribedAssetIDs(userID uint64) ([]uint64, error)
 	UpsertPermission(perm *model.AssetPermission) error
 	CreateApprovalWithRecords(req *model.ApprovalRequest, records []model.ApprovalRecord) error
+	HasPendingOrgJoin(orgID, applicantID uint64) (bool, error)
 	FindApprovalByID(id uint64) (*model.ApprovalRequest, error)
 	ListApprovalRecords(requestID uint64) ([]model.ApprovalRecordView, error)
 	ListMyRequests(applicantID uint64) ([]model.ApprovalRequestView, error)
-	ListPendingRequests(approverID uint64, isSuperAdmin bool, adminDomainIDs []uint64) ([]model.ApprovalRequestView, error)
+	ListPendingRequests(approverID uint64, isSuperAdmin bool, adminDomainIDs, adminOrgIDs []uint64) ([]model.ApprovalRequestView, error)
 	ListHandledRequests(approverID uint64) ([]model.ApprovalRequestView, error)
 	HandleApprovalStep(req *model.ApprovalRequest, recordID uint64, action, comment string, grantPerm *model.AssetPermission) error
 	HandlePublishApproval(req *model.ApprovalRequest, recordID, approverID uint64, action, comment string) error
+	HandleOrgJoinApproval(req *model.ApprovalRequest, recordID, approverID uint64, action, comment string) error
 }
 
 type governanceRepository struct {
@@ -97,6 +99,15 @@ func (r *governanceRepository) CreateApprovalWithRecords(req *model.ApprovalRequ
 	})
 }
 
+func (r *governanceRepository) HasPendingOrgJoin(orgID, applicantID uint64) (bool, error) {
+	var count int64
+	err := r.db.Model(&model.ApprovalRequest{}).
+		Where("target_type = ? AND asset_id = ? AND applicant_id = ? AND status = ?",
+			model.ApprovalTargetOrgJoin, orgID, applicantID, model.ApprovalStatusPending).
+		Count(&count).Error
+	return count > 0, err
+}
+
 func (r *governanceRepository) FindApprovalByID(id uint64) (*model.ApprovalRequest, error) {
 	var req model.ApprovalRequest
 	if err := r.db.First(&req, id).Error; err != nil {
@@ -130,35 +141,47 @@ func (r *governanceRepository) ListMyRequests(applicantID uint64) ([]model.Appro
 	return r.hydrateApprovalViews(reqs)
 }
 
-func (r *governanceRepository) ListPendingRequests(approverID uint64, isSuperAdmin bool, adminDomainIDs []uint64) ([]model.ApprovalRequestView, error) {
+func (r *governanceRepository) ListPendingRequests(approverID uint64, isSuperAdmin bool, adminDomainIDs, adminOrgIDs []uint64) ([]model.ApprovalRequestView, error) {
 	var reqs []model.ApprovalRequest
 	tx := r.db.Table("approval_request").
 		Select("approval_request.*").
 		Joins("INNER JOIN approval_record ON approval_record.request_id = approval_request.id AND approval_record.step_no = approval_request.current_step").
-		Joins("LEFT JOIN ai_asset ON ai_asset.id = approval_request.asset_id").
+		Joins("LEFT JOIN ai_asset ON ai_asset.id = approval_request.asset_id AND approval_request.target_type <> ?", model.ApprovalTargetOrgJoin).
 		Where("approval_request.status = ? AND approval_record.action = ?", model.ApprovalStatusPending, model.ApprovalActionPending)
 
-	var accessCond string
+	var orConds []string
 	var args []interface{}
 	if isSuperAdmin {
-		accessCond = "approval_request.target_type <> ?"
-		args = append(args, model.ApprovalTargetPublish)
+		orConds = append(orConds, "approval_request.target_type NOT IN ?")
+		args = append(args, []string{model.ApprovalTargetPublish, model.ApprovalTargetOrgJoin})
 	} else {
-		accessCond = "(approval_request.target_type <> ? AND approval_record.approver_id = ?)"
-		args = append(args, model.ApprovalTargetPublish, approverID)
+		orConds = append(orConds, "(approval_request.target_type NOT IN ? AND approval_record.approver_id = ?)")
+		args = append(args, []string{model.ApprovalTargetPublish, model.ApprovalTargetOrgJoin}, approverID)
 	}
 
 	if len(adminDomainIDs) > 0 {
-		tx = tx.Where("("+accessCond+" OR (approval_request.target_type = ? AND ai_asset.domain_id IN ?))",
-			append(args, model.ApprovalTargetPublish, adminDomainIDs)...)
-	} else {
-		tx = tx.Where(accessCond, args...)
+		orConds = append(orConds, "(approval_request.target_type = ? AND ai_asset.domain_id IN ?)")
+		args = append(args, model.ApprovalTargetPublish, adminDomainIDs)
 	}
+	if len(adminOrgIDs) > 0 {
+		orConds = append(orConds, "(approval_request.target_type = ? AND approval_request.asset_id IN ?)")
+		args = append(args, model.ApprovalTargetOrgJoin, adminOrgIDs)
+	}
+
+	tx = tx.Where("("+orConds[0]+joinOrConds(orConds[1:])+")", args...)
 
 	if err := tx.Order("approval_request.id DESC").Find(&reqs).Error; err != nil {
 		return nil, err
 	}
 	return r.hydrateApprovalViews(reqs)
+}
+
+func joinOrConds(conds []string) string {
+	out := ""
+	for _, c := range conds {
+		out += " OR " + c
+	}
+	return out
 }
 
 func (r *governanceRepository) ListHandledRequests(approverID uint64) ([]model.ApprovalRequestView, error) {
@@ -182,10 +205,15 @@ func (r *governanceRepository) hydrateApprovalViews(reqs []model.ApprovalRequest
 
 	reqIDs := make([]uint64, 0, len(reqs))
 	assetIDs := make([]uint64, 0, len(reqs))
+	orgIDs := make([]uint64, 0, len(reqs))
 	userIDSet := make(map[uint64]struct{})
 	for _, req := range reqs {
 		reqIDs = append(reqIDs, req.ID)
-		assetIDs = append(assetIDs, req.AssetID)
+		if req.TargetType == model.ApprovalTargetOrgJoin {
+			orgIDs = append(orgIDs, req.AssetID)
+		} else {
+			assetIDs = append(assetIDs, req.AssetID)
+		}
 		userIDSet[req.ApplicantID] = struct{}{}
 	}
 
@@ -195,17 +223,37 @@ func (r *governanceRepository) hydrateApprovalViews(reqs []model.ApprovalRequest
 		AssetType  string
 		DomainName string
 	}
-	var assets []assetInfo
-	if err := r.db.Table("ai_asset").
-		Select("ai_asset.id, ai_asset.name, ai_asset.asset_type, COALESCE(biz_domain.domain_name, '') AS domain_name").
-		Joins("LEFT JOIN biz_domain ON biz_domain.id = ai_asset.domain_id AND biz_domain.deleted_at IS NULL").
-		Where("ai_asset.id IN ?", assetIDs).
-		Scan(&assets).Error; err != nil {
-		return nil, err
+	assetMap := make(map[uint64]assetInfo, len(assetIDs))
+	if len(assetIDs) > 0 {
+		var assets []assetInfo
+		if err := r.db.Table("ai_asset").
+			Select("ai_asset.id, ai_asset.name, ai_asset.asset_type, COALESCE(biz_domain.domain_name, '') AS domain_name").
+			Joins("LEFT JOIN biz_domain ON biz_domain.id = ai_asset.domain_id AND biz_domain.deleted_at IS NULL").
+			Where("ai_asset.id IN ?", assetIDs).
+			Scan(&assets).Error; err != nil {
+			return nil, err
+		}
+		for _, a := range assets {
+			assetMap[a.ID] = a
+		}
 	}
-	assetMap := make(map[uint64]assetInfo, len(assets))
-	for _, a := range assets {
-		assetMap[a.ID] = a
+
+	orgMap := make(map[uint64]string, len(orgIDs))
+	if len(orgIDs) > 0 {
+		type orgRow struct {
+			ID      uint64
+			OrgName string
+		}
+		var orgs []orgRow
+		if err := r.db.Table("biz_organization").
+			Select("id, org_name").
+			Where("id IN ?", orgIDs).
+			Scan(&orgs).Error; err != nil {
+			return nil, err
+		}
+		for _, o := range orgs {
+			orgMap[o.ID] = o.OrgName
+		}
 	}
 
 	var allRecords []model.ApprovalRecord
@@ -250,17 +298,28 @@ func (r *governanceRepository) hydrateApprovalViews(reqs []model.ApprovalRequest
 
 	views := make([]model.ApprovalRequestView, 0, len(reqs))
 	for _, req := range reqs {
-		a := assetMap[req.AssetID]
 		recs := recMap[req.ID]
 		if recs == nil {
 			recs = []model.ApprovalRecordView{}
 		}
+		var assetName, assetType, domainName string
+		if req.TargetType == model.ApprovalTargetOrgJoin {
+			orgName := orgMap[req.AssetID]
+			assetName = orgName
+			assetType = "org"
+			domainName = orgName
+		} else {
+			a := assetMap[req.AssetID]
+			assetName = a.Name
+			assetType = a.AssetType
+			domainName = a.DomainName
+		}
 		views = append(views, model.ApprovalRequestView{
 			ApprovalRequest: req,
 			ApplicantName:   userMap[req.ApplicantID],
-			AssetName:       a.Name,
-			AssetType:       a.AssetType,
-			DomainName:      a.DomainName,
+			AssetName:       assetName,
+			AssetType:       assetType,
+			DomainName:      domainName,
 			Records:         recs,
 		})
 	}
@@ -335,6 +394,44 @@ func (r *governanceRepository) HandlePublishApproval(req *model.ApprovalRequest,
 		return tx.Model(&model.AIAsset{}).Where("id = ?", req.AssetID).Updates(map[string]interface{}{
 			"status":          model.AssetStatusPublished,
 			"current_version": req.RequestedPerm,
+		}).Error
+	})
+}
+
+func (r *governanceRepository) HandleOrgJoinApproval(req *model.ApprovalRequest, recordID, approverID uint64, action, comment string) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		now := time.Now()
+		if err := tx.Model(&model.ApprovalRecord{}).Where("id = ?", recordID).Updates(map[string]interface{}{
+			"approver_id": approverID,
+			"action":      action,
+			"comment":     comment,
+			"handled_at":  now,
+		}).Error; err != nil {
+			return err
+		}
+
+		if action == model.ApprovalActionReject {
+			return tx.Model(&model.ApprovalRequest{}).Where("id = ?", req.ID).
+				Update("status", model.ApprovalStatusRejected).Error
+		}
+
+		if err := tx.Model(&model.ApprovalRequest{}).Where("id = ?", req.ID).
+			Update("status", model.ApprovalStatusApproved).Error; err != nil {
+			return err
+		}
+
+		var existing model.OrganizationMember
+		err := tx.Where("org_id = ? AND user_id = ?", req.AssetID, req.ApplicantID).First(&existing).Error
+		if err == nil {
+			return nil
+		}
+		if err != gorm.ErrRecordNotFound {
+			return err
+		}
+		return tx.Create(&model.OrganizationMember{
+			OrgID:   req.AssetID,
+			UserID:  req.ApplicantID,
+			OrgRole: model.OrgRoleMember,
 		}).Error
 	})
 }

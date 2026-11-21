@@ -260,6 +260,16 @@ func (s *domainService) AddMember(operatorID uint64, domainID uint64, req model.
 		return NewForbidden("cannot modify domain creator role")
 	}
 
+	if domain.Visibility == model.DomainVisibilityOrgPrivate && domain.OrgID > 0 && s.orgRepo != nil {
+		orgRole, err := s.orgRepo.GetMemberRole(domain.OrgID, targetUser.ID)
+		if err != nil {
+			return err
+		}
+		if orgRole == "" {
+			return NewBadRequest("组织私有域只能添加当前组织内的成员")
+		}
+	}
+
 	existingRole, err := s.domainRepo.GetMemberRole(domainID, targetUser.ID)
 	if err != nil {
 		return err

@@ -18,6 +18,7 @@ type KBRepository interface {
 	ListMatchingFiles(kbAssetID uint64, scope string, docID uint64, folderPath string) ([]model.KBDocument, error)
 	FileExistsInFolder(kbAssetID uint64, folderPath, fileName string, excludeDocID uint64) (bool, error)
 	MoveDocument(kbAssetID, docID uint64, targetFolder string) error
+	ReplaceDocumentChunks(kbAssetID uint64, doc *model.KBDocument, chunks []model.KBChunk) error
 	CompleteDocumentParsing(kbAssetID, docID uint64, chunks []model.KBChunk) error
 	FailDocumentParsing(docID uint64, errMsg string) error
 	ListChunks(kbAssetID, docID uint64, page, pageSize int) ([]model.KBChunk, int64, error)
@@ -140,6 +141,32 @@ func (r *kbRepository) MoveDocument(kbAssetID, docID uint64, targetFolder string
 	return r.db.Model(&model.KBDocument{}).
 		Where("id = ? AND kb_asset_id = ? AND is_folder = ?", docID, kbAssetID, false).
 		Update("folder_path", targetFolder).Error
+}
+
+func (r *kbRepository) ReplaceDocumentChunks(kbAssetID uint64, doc *model.KBDocument, chunks []model.KBChunk) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&model.KBDocument{}).Where("id = ? AND kb_asset_id = ?", doc.ID, kbAssetID).Updates(map[string]interface{}{
+			"file_name":    doc.FileName,
+			"file_ext":     doc.FileExt,
+			"file_size":    doc.FileSize,
+			"file_path":    doc.FilePath,
+			"file_hash":    doc.FileHash,
+			"parse_status": model.ParseStatusCompleted,
+			"chunk_count":  len(chunks),
+			"error_msg":    "",
+		}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("kb_asset_id = ? AND doc_id = ?", kbAssetID, doc.ID).Delete(&model.KBChunk{}).Error; err != nil {
+			return err
+		}
+		if len(chunks) > 0 {
+			if err := tx.CreateInBatches(&chunks, 100).Error; err != nil {
+				return err
+			}
+		}
+		return recalculateKBCounts(tx, kbAssetID)
+	})
 }
 
 func (r *kbRepository) CompleteDocumentParsing(kbAssetID, docID uint64, chunks []model.KBChunk) error {

@@ -42,6 +42,26 @@ func (h *KBHandler) CreateFolder(c echo.Context) error {
 	return response.Success(c, folder)
 }
 
+func (h *KBHandler) CreateMarkdownFile(c echo.Context) error {
+	kbID, ok := parseUintParam(c, "id")
+	if !ok {
+		return nil
+	}
+
+	var req model.CreateKBFileRequest
+	if !bindAndValidate(c, &req) {
+		return nil
+	}
+
+	userID := middleware.GetUserID(c)
+	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
+	doc, err := h.kbSvc.CreateMarkdownFile(userID, isSuperAdmin, kbID, req)
+	if err != nil {
+		return service.HandleError(c, err)
+	}
+	return response.Success(c, doc)
+}
+
 func (h *KBHandler) UploadDocument(c echo.Context) error {
 	kbID, ok := parseUintParam(c, "id")
 	if !ok {
@@ -113,6 +133,54 @@ func (h *KBHandler) GetDocumentContent(c echo.Context) error {
 		return service.HandleError(c, err)
 	}
 	return response.Success(c, res)
+}
+
+func (h *KBHandler) GetDocumentRaw(c echo.Context) error {
+	kbID, ok := parseUintParam(c, "id")
+	if !ok {
+		return nil
+	}
+	docID, ok := parseUintParam(c, "docId")
+	if !ok {
+		return nil
+	}
+
+	userID := middleware.GetUserID(c)
+	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
+	fileName, mimeType, isSVG, data, err := h.kbSvc.GetDocumentRaw(userID, isSuperAdmin, kbID, docID)
+	if err != nil {
+		return service.HandleError(c, err)
+	}
+
+	c.Response().Header().Set(echo.HeaderContentDisposition, fmt.Sprintf(`inline; filename="%s"`, fileName))
+	if isSVG {
+		c.Response().Header().Set("Content-Security-Policy", "sandbox")
+	}
+	return c.Blob(http.StatusOK, mimeType, data)
+}
+
+func (h *KBHandler) UpdateDocumentContent(c echo.Context) error {
+	kbID, ok := parseUintParam(c, "id")
+	if !ok {
+		return nil
+	}
+	docID, ok := parseUintParam(c, "docId")
+	if !ok {
+		return nil
+	}
+
+	var req model.UpdateKBFileRequest
+	if !bindAndValidate(c, &req) {
+		return nil
+	}
+
+	userID := middleware.GetUserID(c)
+	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
+	doc, err := h.kbSvc.UpdateMarkdownContent(userID, isSuperAdmin, kbID, docID, req)
+	if err != nil {
+		return service.HandleError(c, err)
+	}
+	return response.Success(c, doc)
 }
 
 func (h *KBHandler) ListChunks(c echo.Context) error {

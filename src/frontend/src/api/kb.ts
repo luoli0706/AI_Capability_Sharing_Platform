@@ -1,4 +1,4 @@
-import request, { apiDelete, apiGet, apiPost } from './request'
+import request, { apiDelete, apiGet, apiPost, apiPut } from './request'
 import type {
   KbChunk,
   KbContentResult,
@@ -17,6 +17,27 @@ export function createKbFolder(kbId: number, folder_path: string): Promise<KbDoc
   return apiPost<KbDocument, { folder_path: string }>(`/kb/${kbId}/folders`, {
     folder_path
   })
+}
+
+export function createKbFile(
+  kbId: number,
+  data: { folder_path?: string; file_name: string; content: string }
+): Promise<KbDocument> {
+  return apiPost<KbDocument, { folder_path?: string; file_name: string; content: string }>(
+    `/kb/${kbId}/files`,
+    data
+  )
+}
+
+export function updateKbFileContent(
+  kbId: number,
+  docId: number,
+  data: { file_name?: string; content: string }
+): Promise<KbContentResult> {
+  return apiPut<KbContentResult, { file_name?: string; content: string }>(
+    `/kb/${kbId}/documents/${docId}/content`,
+    data
+  )
 }
 
 export function uploadDocument(
@@ -46,6 +67,13 @@ export function getDocuments(
 
 export function getDocumentContent(kbId: number, docId: number): Promise<KbContentResult> {
   return apiGet<KbContentResult>(`/kb/${kbId}/documents/${docId}/content`)
+}
+
+export async function getDocumentRawBlob(kbId: number, docId: number): Promise<Blob> {
+  const res = await request.get<Blob>(`/kb/${kbId}/documents/${docId}/raw`, {
+    responseType: 'blob'
+  })
+  return res.data
 }
 
 export function getDocumentChunks(

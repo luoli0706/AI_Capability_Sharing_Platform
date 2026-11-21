@@ -1,6 +1,7 @@
 import { apiDelete, apiGet, apiPost, apiPut } from './request'
 import type {
   AddOrgMemberPayload,
+  ApprovalRequest,
   CreateOrgPayload,
   OrgDetail,
   OrgItem,
@@ -10,6 +11,7 @@ import type {
 } from '@/types/api'
 
 export function getOrgs(params?: {
+  tab?: 'mine' | 'square'
   page?: number
   page_size?: number
   keyword?: string
@@ -48,4 +50,8 @@ export function addOrgMember(
 
 export function removeOrgMember(orgId: number, userId: number): Promise<null> {
   return apiDelete<null>(`/orgs/${orgId}/members/${userId}`)
+}
+
+export function joinOrg(orgId: number, reason?: string): Promise<ApprovalRequest> {
+  return apiPost<ApprovalRequest, { reason?: string }>(`/orgs/${orgId}/join`, { reason })
 }

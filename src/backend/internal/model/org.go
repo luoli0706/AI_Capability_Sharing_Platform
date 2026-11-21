@@ -70,9 +70,14 @@ type OrgMemberItem struct {
 }
 
 type OrgQuery struct {
+	Tab      string
 	Keyword  string
 	Page     int
 	PageSize int
+}
+
+type JoinOrgRequest struct {
+	Reason string `json:"reason" validate:"max=512"`
 }
 
 type CreateOrgRequest struct {

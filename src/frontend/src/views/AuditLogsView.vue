@@ -41,6 +41,8 @@ const actionGroups = [
     label: '知识库文件操作',
     options: [
       { label: '新建文件夹', value: 'kb_folder_create' },
+      { label: '新建文档', value: 'kb.file_create' },
+      { label: '编辑文档', value: 'kb.file_update' },
       { label: '上传文件', value: 'kb_file_upload' },
       { label: '移动文件', value: 'kb_file_move' },
       { label: '复制文件', value: 'kb_file_copy' },
@@ -82,6 +84,8 @@ const ACTION_META_MAP: Record<
   asset_delete: { label: '删除资产', tagType: 'danger' },
   asset_rollback: { label: '版本回滚', tagType: 'warning' },
   kb_folder_create: { label: '新建文件夹', tagType: 'primary' },
+  'kb.file_create': { label: '新建文档', tagType: 'primary' },
+  'kb.file_update': { label: '编辑文档', tagType: 'info' },
   kb_file_upload: { label: '上传文件', tagType: 'success' },
   kb_file_move: { label: '移动文件', tagType: 'warning' },
   kb_file_copy: { label: '复制文件', tagType: 'info' },

@@ -13,6 +13,8 @@ const (
 	AuditActionAssetDelete        = "asset.delete"
 
 	AuditActionKBFolderCreate = "kb.folder_create"
+	AuditActionKBFileCreate   = "kb.file_create"
+	AuditActionKBFileUpdate   = "kb.file_update"
 	AuditActionKBFileUpload   = "kb.file_upload"
 	AuditActionKBFileMove     = "kb.file_move"
 	AuditActionKBFileCopy     = "kb.file_copy"

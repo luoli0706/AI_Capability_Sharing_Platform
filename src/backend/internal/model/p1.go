@@ -28,6 +28,7 @@ const (
 
 	ApprovalTargetAccess  = "asset_access"
 	ApprovalTargetPublish = "asset_publish"
+	ApprovalTargetOrgJoin = "org_join"
 
 	ApprovalStatusPending   = "pending"
 	ApprovalStatusApproved  = "approved"
@@ -210,6 +211,17 @@ type MoveKBDocumentRequest struct {
 type CopyKBDocumentRequest struct {
 	TargetFolderPath string `json:"target_folder_path" validate:"max=512"`
 	NewName          string `json:"new_name" validate:"max=255"`
+}
+
+type CreateKBFileRequest struct {
+	FolderPath string `json:"folder_path" validate:"max=512"`
+	FileName   string `json:"file_name" validate:"required,max=255"`
+	Content    string `json:"content"`
+}
+
+type UpdateKBFileRequest struct {
+	FileName string `json:"file_name" validate:"max=255"`
+	Content  string `json:"content"`
 }
 
 type KBPreviewFile struct {

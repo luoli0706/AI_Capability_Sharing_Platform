@@ -3,8 +3,25 @@ import { downloadKbFiles, getKbDownloadPreview, type KbDownloadParams } from '@/
 import { formatFileSize } from '@/utils/format'
 import type { KbDocument } from '@/types/api'
 
+export const MAX_KB_FILE_SIZE = 10 * 1024 * 1024
+
+export function isImageFile(fileName: string): boolean {
+  return /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i.test(fileName)
+}
+
+export function isMarkdownFile(fileName: string): boolean {
+  return /\.(md|markdown)$/i.test(fileName)
+}
+
+export function isTextFile(fileName: string): boolean {
+  return (
+    isMarkdownFile(fileName) ||
+    /\.(txt|json|ya?ml|csv|xml|html?|css|js|ts|go|py|sql|sh|log|ini|conf)$/i.test(fileName)
+  )
+}
+
 const SCOPE_LABELS: Record<KbDownloadParams['scope'], string> = {
-  file: '单个 Markdown 文件',
+  file: '单个文件',
   folder: '文件夹（递归包含子目录与文件）',
   all: '整个知识库'
 }

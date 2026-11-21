@@ -341,6 +341,7 @@ export interface KbContentResult {
   folder_path: string
   file_size: number
   content: string
+  is_binary?: boolean
 }
 
 export interface KbDownloadPreview {
@@ -381,17 +382,21 @@ export interface ApprovalRecord {
   created_at?: string
 }
 
+export type ApprovalTargetType = 'asset_access' | 'asset_publish' | 'org_join'
+
 export interface ApprovalRequest {
   id: number
   request_no: string
   applicant_id: number
   applicant_name?: string
   applicant_domain_id: number
-  target_type: string
+  target_type: ApprovalTargetType | string
   asset_id: number
   asset_name?: string
   asset_code?: string
   asset_type?: AssetType
+  org_id?: number
+  org_name?: string
   requested_perm: string
   duration_days: number
   reason: string
