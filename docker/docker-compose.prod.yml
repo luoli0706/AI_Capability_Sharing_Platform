@@ -2,6 +2,7 @@ services:
   mysql:
     image: mysql:8.0
     container_name: ascp-mysql
+    profiles: ["bundled-mysql"]
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-ascp123456}
@@ -22,16 +23,16 @@ services:
       - ascp-net
 
   backend:
+    image: ascp-backend:local
     build:
       context: ../src/backend
       dockerfile: ../../docker/backend.Dockerfile
     container_name: ascp-backend
     restart: unless-stopped
-    depends_on:
-      mysql:
-        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      MYSQL_HOST: ${MYSQL_HOST:-mysql}
+      MYSQL_HOST: ${MYSQL_HOST:-host.docker.internal}
       MYSQL_PORT: ${MYSQL_PORT:-3306}
       MYSQL_USER: ${MYSQL_USER:-root}
       MYSQL_PASSWORD: ${MYSQL_ROOT_PASSWORD:-ascp123456}
@@ -50,6 +51,7 @@ services:
       - ascp-net
 
   frontend:
+    image: ascp-frontend:local
     build:
       context: ../src/frontend
       dockerfile: ../../docker/frontend.Dockerfile

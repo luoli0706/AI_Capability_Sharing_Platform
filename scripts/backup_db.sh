@@ -31,6 +31,8 @@ read_env_var() {
   printf '%s' "$val"
 }
 
+MYSQL_HOST="${MYSQL_HOST:-$(read_env_var MYSQL_HOST "$ENV_FILE" || printf '127.0.0.1')}"
+MYSQL_PORT="${MYSQL_PORT:-$(read_env_var MYSQL_PORT "$ENV_FILE" || printf '3306')}"
 MYSQL_USER="${MYSQL_USER:-$(read_env_var MYSQL_USER "$ENV_FILE" || printf 'root')}"
 MYSQL_DATABASE="${MYSQL_DATABASE:-$(read_env_var MYSQL_DATABASE "$ENV_FILE" || printf 'ascp')}"
 if [ -z "${MYSQL_PASSWORD:-}" ]; then
@@ -54,10 +56,17 @@ run_mysqldump() {
   if [ -n "${MOCK_MYSQLDUMP_CMD:-}" ]; then
     # Local test hook: allows testing backup/rotation without a running container
     eval "$MOCK_MYSQLDUMP_CMD"
-  else
+  elif command -v docker >/dev/null 2>&1 && [ "$(docker inspect -f '{{.State.Running}}' "$MYSQL_CONTAINER" 2>/dev/null || true)" = "true" ]; then
     docker exec -e MYSQL_PWD="$MYSQL_PASSWORD" "$MYSQL_CONTAINER" \
-      mysqldump --single-transaction --routines --triggers \
+      mysqldump --single-transaction --routines --triggers --no-tablespaces \
       -u"$MYSQL_USER" "$MYSQL_DATABASE"
+  else
+    local host="$MYSQL_HOST"
+    if [ "$host" = "host.docker.internal" ] || [ "$host" = "mysql" ]; then
+      host="127.0.0.1"
+    fi
+    MYSQL_PWD="$MYSQL_PASSWORD" mysqldump --single-transaction --routines --triggers --no-tablespaces \
+      -h"$host" -P"$MYSQL_PORT" -u"$MYSQL_USER" "$MYSQL_DATABASE"
   fi
 }
 
@@ -65,8 +74,9 @@ log "Starting MySQL backup for database '${MYSQL_DATABASE}' -> ${FINAL_FILE}"
 
 set +e
 run_mysqldump | gzip -c > "$TMP_FILE"
-rc_dump="${PIPESTATUS[0]}"
-rc_gzip="${PIPESTATUS[1]}"
+pipe_statuses=("${PIPESTATUS[@]}")
+rc_dump="${pipe_statuses[0]:-1}"
+rc_gzip="${pipe_statuses[1]:-1}"
 set -e
 
 if [ "$rc_dump" -ne 0 ] || [ "$rc_gzip" -ne 0 ]; then
