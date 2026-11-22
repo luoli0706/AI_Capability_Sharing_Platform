@@ -79,16 +79,16 @@ type KBService interface {
 	CreateFolder(userID uint64, isSuperAdmin bool, kbID uint64, folderPath string) (*model.KBDocument, error)
 	CreateMarkdownFile(userID uint64, isSuperAdmin bool, kbID uint64, req model.CreateKBFileRequest) (*model.KBDocument, error)
 	UploadDocuments(userID uint64, isSuperAdmin bool, kbID uint64, folderPath, relativePath string, files []*multipart.FileHeader) ([]model.KBDocument, error)
-	ListDocuments(userID uint64, isSuperAdmin bool, kbID uint64) ([]model.KBDocument, error)
-	ListDocumentsLazy(userID uint64, isSuperAdmin bool, kbID uint64, parentFolder string) ([]model.KBDocument, error)
-	GetDocumentContent(userID uint64, isSuperAdmin bool, kbID, docID uint64, obf bool) (map[string]interface{}, error)
-	GetDocumentRaw(userID uint64, isSuperAdmin bool, kbID, docID uint64, obf bool) (fileName, mimeType string, isSVG bool, data []byte, err error)
+	ListDocuments(userID uint64, isSuperAdmin bool, kbID, refDomainID uint64) ([]model.KBDocument, error)
+	ListDocumentsLazy(userID uint64, isSuperAdmin bool, kbID uint64, parentFolder string, refDomainID uint64) ([]model.KBDocument, error)
+	GetDocumentContent(userID uint64, isSuperAdmin bool, kbID, docID uint64, obf bool, refDomainID uint64) (map[string]interface{}, error)
+	GetDocumentRaw(userID uint64, isSuperAdmin bool, kbID, docID uint64, obf bool, refDomainID uint64) (fileName, mimeType string, isSVG bool, data []byte, err error)
 	UpdateMarkdownContent(userID uint64, isSuperAdmin bool, kbID, docID uint64, req model.UpdateKBFileRequest) (*model.KBDocument, error)
-	ListChunks(userID uint64, isSuperAdmin bool, kbID, docID uint64, page, pageSize int) ([]model.KBChunk, int64, error)
+	ListChunks(userID uint64, isSuperAdmin bool, kbID, docID uint64, page, pageSize int, refDomainID uint64) ([]model.KBChunk, int64, error)
 	DeleteDocument(userID uint64, isSuperAdmin bool, kbID, docID uint64) error
-	Search(userID uint64, isSuperAdmin bool, kbID uint64, req model.KBSearchRequest) ([]model.KBSearchHit, error)
-	GetDownloadPreview(userID uint64, isSuperAdmin bool, kbID uint64, scope string, docID uint64, folderPath string) (*model.KBDownloadPreview, error)
-	DownloadKB(userID uint64, isSuperAdmin bool, kbID uint64, scope string, docID uint64, folderPath string) (filename, contentType string, data []byte, err error)
+	Search(userID uint64, isSuperAdmin bool, kbID uint64, req model.KBSearchRequest, refDomainID uint64) ([]model.KBSearchHit, error)
+	GetDownloadPreview(userID uint64, isSuperAdmin bool, kbID uint64, scope string, docID uint64, folderPath string, refDomainID uint64) (*model.KBDownloadPreview, error)
+	DownloadKB(userID uint64, isSuperAdmin bool, kbID uint64, scope string, docID uint64, folderPath string, refDomainID uint64) (filename, contentType string, data []byte, err error)
 	MoveDocument(userID uint64, isSuperAdmin bool, kbID, docID uint64, targetFolderPath string) (*model.KBDocument, error)
 	CopyDocument(userID uint64, isSuperAdmin bool, kbID, docID uint64, targetFolderPath, newName string) (*model.KBDocument, error)
 	EncryptExistingPlainFiles(ctx context.Context) (int, error)
@@ -583,8 +583,8 @@ func resolveUploadTarget(baseFolder, relativePath, origFilename string) (folder 
 	return baseFolder, path.Base(replaced), nil
 }
 
-func (s *kbService) ListDocuments(userID uint64, isSuperAdmin bool, kbID uint64) ([]model.KBDocument, error) {
-	if _, err := s.ensureKBViewPermission(userID, isSuperAdmin, kbID); err != nil {
+func (s *kbService) ListDocuments(userID uint64, isSuperAdmin bool, kbID, refDomainID uint64) ([]model.KBDocument, error) {
+	if _, err := s.ensureKBViewPermission(userID, isSuperAdmin, kbID, refDomainID, 0); err != nil {
 		return nil, err
 	}
 	docs, err := s.kbRepo.ListDocuments(kbID)
@@ -596,8 +596,8 @@ func (s *kbService) ListDocuments(userID uint64, isSuperAdmin bool, kbID uint64)
 }
 
 // ListDocumentsLazy returns only direct child folders and files under parentFolder.
-func (s *kbService) ListDocumentsLazy(userID uint64, isSuperAdmin bool, kbID uint64, parentFolder string) ([]model.KBDocument, error) {
-	if _, err := s.ensureKBViewPermission(userID, isSuperAdmin, kbID); err != nil {
+func (s *kbService) ListDocumentsLazy(userID uint64, isSuperAdmin bool, kbID uint64, parentFolder string, refDomainID uint64) ([]model.KBDocument, error) {
+	if _, err := s.ensureKBViewPermission(userID, isSuperAdmin, kbID, refDomainID, 0); err != nil {
 		return nil, err
 	}
 	normParent, err := NormalizeFolderPath(parentFolder)
@@ -642,8 +642,8 @@ func (s *kbService) enrichDocumentUploaders(docs []model.KBDocument) {
 	}
 }
 
-func (s *kbService) GetDocumentContent(userID uint64, isSuperAdmin bool, kbID, docID uint64, obf bool) (map[string]interface{}, error) {
-	if _, err := s.ensureKBViewPermission(userID, isSuperAdmin, kbID); err != nil {
+func (s *kbService) GetDocumentContent(userID uint64, isSuperAdmin bool, kbID, docID uint64, obf bool, refDomainID uint64) (map[string]interface{}, error) {
+	if _, err := s.ensureKBViewPermission(userID, isSuperAdmin, kbID, refDomainID, docID); err != nil {
 		return nil, err
 	}
 	doc, err := s.kbRepo.FindDocumentByID(kbID, docID)
@@ -700,8 +700,8 @@ func (s *kbService) GetDocumentContent(userID uint64, isSuperAdmin bool, kbID, d
 	}, nil
 }
 
-func (s *kbService) GetDocumentRaw(userID uint64, isSuperAdmin bool, kbID, docID uint64, obf bool) (string, string, bool, []byte, error) {
-	if _, err := s.ensureKBViewPermission(userID, isSuperAdmin, kbID); err != nil {
+func (s *kbService) GetDocumentRaw(userID uint64, isSuperAdmin bool, kbID, docID uint64, obf bool, refDomainID uint64) (string, string, bool, []byte, error) {
+	if _, err := s.ensureKBViewPermission(userID, isSuperAdmin, kbID, refDomainID, docID); err != nil {
 		return "", "", false, nil, err
 	}
 	doc, err := s.kbRepo.FindDocumentByID(kbID, docID)
@@ -739,8 +739,8 @@ func (s *kbService) GetDocumentRaw(userID uint64, isSuperAdmin bool, kbID, docID
 	return doc.FileName, mimeType, isSVG, raw, nil
 }
 
-func (s *kbService) ListChunks(userID uint64, isSuperAdmin bool, kbID, docID uint64, page, pageSize int) ([]model.KBChunk, int64, error) {
-	if _, err := s.ensureKBViewPermission(userID, isSuperAdmin, kbID); err != nil {
+func (s *kbService) ListChunks(userID uint64, isSuperAdmin bool, kbID, docID uint64, page, pageSize int, refDomainID uint64) ([]model.KBChunk, int64, error) {
+	if _, err := s.ensureKBViewPermission(userID, isSuperAdmin, kbID, refDomainID, docID); err != nil {
 		return nil, 0, err
 	}
 	if _, err := s.kbRepo.FindDocumentByID(kbID, docID); err != nil {
@@ -950,8 +950,8 @@ func (s *kbService) deduplicateFileName(kbID uint64, targetFolder, fileName stri
 	return fmt.Sprintf("%s-copy-%d%s", base, os.Getpid(), ext), nil
 }
 
-func (s *kbService) Search(userID uint64, isSuperAdmin bool, kbID uint64, req model.KBSearchRequest) ([]model.KBSearchHit, error) {
-	if _, err := s.ensureKBViewPermission(userID, isSuperAdmin, kbID); err != nil {
+func (s *kbService) Search(userID uint64, isSuperAdmin bool, kbID uint64, req model.KBSearchRequest, refDomainID uint64) ([]model.KBSearchHit, error) {
+	if _, err := s.ensureKBViewPermission(userID, isSuperAdmin, kbID, refDomainID, 0); err != nil {
 		return nil, err
 	}
 	topK := req.TopK
@@ -964,8 +964,12 @@ func (s *kbService) Search(userID uint64, isSuperAdmin bool, kbID uint64, req mo
 	return s.kbRepo.SearchChunks(kbID, req.Query, topK)
 }
 
-func (s *kbService) GetDownloadPreview(userID uint64, isSuperAdmin bool, kbID uint64, scope string, docID uint64, folderPath string) (*model.KBDownloadPreview, error) {
-	if _, err := s.ensureKBViewPermission(userID, isSuperAdmin, kbID); err != nil {
+func (s *kbService) GetDownloadPreview(userID uint64, isSuperAdmin bool, kbID uint64, scope string, docID uint64, folderPath string, refDomainID uint64) (*model.KBDownloadPreview, error) {
+	permDocID := uint64(0)
+	if scope == "file" && docID > 0 {
+		permDocID = docID
+	}
+	if _, err := s.ensureKBViewPermission(userID, isSuperAdmin, kbID, refDomainID, permDocID); err != nil {
 		return nil, err
 	}
 
@@ -1000,8 +1004,12 @@ func (s *kbService) GetDownloadPreview(userID uint64, isSuperAdmin bool, kbID ui
 	}, nil
 }
 
-func (s *kbService) DownloadKB(userID uint64, isSuperAdmin bool, kbID uint64, scope string, docID uint64, folderPath string) (string, string, []byte, error) {
-	detail, err := s.ensureKBViewPermission(userID, isSuperAdmin, kbID)
+func (s *kbService) DownloadKB(userID uint64, isSuperAdmin bool, kbID uint64, scope string, docID uint64, folderPath string, refDomainID uint64) (string, string, []byte, error) {
+	permDocID := uint64(0)
+	if scope == "file" && docID > 0 {
+		permDocID = docID
+	}
+	detail, err := s.ensureKBViewPermission(userID, isSuperAdmin, kbID, refDomainID, permDocID)
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -1117,8 +1125,24 @@ func (s *kbService) ensureKBEditPermission(userID uint64, isSuperAdmin bool, kbI
 	return detail, nil
 }
 
-func (s *kbService) ensureKBViewPermission(userID uint64, isSuperAdmin bool, kbID uint64) (*model.AssetDetail, error) {
-	detail, err := s.assetRepo.GetDetailByID(kbID)
+func (s *kbService) ensureKBViewPermission(userID uint64, isSuperAdmin bool, kbID, refDomainID, docID uint64) (*model.AssetDetail, error) {
+	return ensureKBViewAccessWithCrossRef(
+		s.assetRepo, s.domainRepo, s.orgRepo, s.govRepo, s.crossRefRepo,
+		userID, isSuperAdmin, kbID, refDomainID, docID,
+	)
+}
+
+func ensureKBViewAccessWithCrossRef(
+	assetRepo repository.AssetRepository,
+	domainRepo repository.DomainRepository,
+	orgRepo repository.OrgRepository,
+	govRepo repository.GovernanceRepository,
+	crossRefRepo repository.CrossRefRepository,
+	userID uint64,
+	isSuperAdmin bool,
+	kbID, refDomainID, docID uint64,
+) (*model.AssetDetail, error) {
+	detail, err := assetRepo.GetDetailByID(kbID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, NewNotFound("knowledge base not found")
@@ -1131,7 +1155,7 @@ func (s *kbService) ensureKBViewPermission(userID uint64, isSuperAdmin bool, kbI
 	if isSuperAdmin || detail.OwnerID == userID {
 		return detail, nil
 	}
-	role, err := s.domainRepo.GetMemberRole(detail.DomainID, userID)
+	role, err := domainRepo.GetMemberRole(detail.DomainID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -1143,12 +1167,32 @@ func (s *kbService) ensureKBViewPermission(userID uint64, isSuperAdmin bool, kbI
 			return detail, nil
 		}
 		if detail.Visibility == model.VisibilityDomain {
-			if ok, _ := hasDomainAccess(s.domainRepo, s.orgRepo, detail.DomainID, userID); ok {
+			if ok, _ := hasDomainAccess(domainRepo, orgRepo, detail.DomainID, userID); ok {
 				return detail, nil
 			}
 		}
-		if s.govRepo != nil {
-			if perm, _ := s.govRepo.GetActiveUserPermission(kbID, userID); perm != nil {
+		if govRepo != nil {
+			if perm, _ := govRepo.GetActiveUserPermission(kbID, userID); perm != nil {
+				return detail, nil
+			}
+		}
+	}
+	if refDomainID > 0 && crossRefRepo != nil {
+		hasTargetAccess, err := hasDomainAccess(domainRepo, orgRepo, refDomainID, userID)
+		if err != nil {
+			return nil, err
+		}
+		if hasTargetAccess {
+			var hasRef bool
+			if docID == 0 {
+				hasRef, err = crossRefRepo.HasActiveAssetRef(refDomainID, kbID)
+			} else {
+				hasRef, err = crossRefRepo.HasActiveDocOrAssetRef(refDomainID, kbID, docID)
+			}
+			if err != nil {
+				return nil, err
+			}
+			if hasRef {
 				return detail, nil
 			}
 		}

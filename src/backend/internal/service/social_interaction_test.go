@@ -759,29 +759,29 @@ func TestKBInteractionsAndUploaderEnrichment(t *testing.T) {
 	kbSvc.SetInteractionRepo(interRepo)
 
 	// Uploader enrichment in ListDocuments & ListDocumentsLazy
-	docs, err := kbSvc.ListDocuments(2, false, 20)
+	docs, err := kbSvc.ListDocuments(2, false, 20, 0)
 	if err != nil || len(docs) != 1 || docs[0].Uploader == nil || docs[0].Uploader.Username != "alice" {
 		t.Fatalf("expected uploader alice in ListDocuments, got %+v err=%v", docs, err)
 	}
 
-	lazyDocs, err := kbSvc.ListDocumentsLazy(2, false, 20, "")
+	lazyDocs, err := kbSvc.ListDocumentsLazy(2, false, 20, "", 0)
 	if err != nil || len(lazyDocs) != 1 || lazyDocs[0].Uploader == nil || lazyDocs[0].Uploader.Nickname != "Alice" {
 		t.Fatalf("expected uploader Alice in ListDocumentsLazy, got %+v err=%v", lazyDocs, err)
 	}
 
 	// Like visibility: user 2 likes, user 3 sees like_count=1 and like_users=[alice]
-	likeRes, err := interSvc.ToggleLike(2, false, 20, 100)
+	likeRes, err := interSvc.ToggleLike(2, false, 20, 100, 0)
 	if err != nil || likeRes.LikeCount != 1 || !likeRes.LikedByMe {
 		t.Fatalf("unexpected ToggleLike response: %+v err=%v", likeRes, err)
 	}
 
 	// Favorite invisibility: user 2 favorites, user 3 sees favorited_by_me=false and NO favorite_count/favorite_users in JSON
-	fav, err := interSvc.ToggleFavorite(2, false, 20, 100)
+	fav, err := interSvc.ToggleFavorite(2, false, 20, 100, 0)
 	if err != nil || !fav {
 		t.Fatalf("expected favorited=true, got %v err=%v", fav, err)
 	}
 
-	interForBob, err := interSvc.GetInteractions(3, false, 20, 100)
+	interForBob, err := interSvc.GetInteractions(3, false, 20, 100, 0)
 	if err != nil {
 		t.Fatalf("GetInteractions failed: %v", err)
 	}
@@ -801,15 +801,15 @@ func TestKBInteractionsAndUploaderEnrichment(t *testing.T) {
 	cm, err := interSvc.CreateComment(2, false, 20, 100, model.CreateKBCommentRequest{
 		QuoteText: "important line",
 		Content:   "Please clarify this section",
-	})
+	}, 0)
 	if err != nil || cm.QuoteText != "important line" || cm.Author.Username != "alice" {
 		t.Fatalf("unexpected comment: %+v err=%v", cm, err)
 	}
 
-	err = interSvc.DeleteComment(3, false, 20, 100, cm.ID)
+	err = interSvc.DeleteComment(3, false, 20, 100, cm.ID, 0)
 	assertAppErrStatus(t, err, http.StatusForbidden)
 
-	if err := interSvc.DeleteComment(1, false, 20, 100, cm.ID); err != nil {
+	if err := interSvc.DeleteComment(1, false, 20, 100, cm.ID, 0); err != nil {
 		t.Fatalf("domain owner should be able to delete comment, got err=%v", err)
 	}
 

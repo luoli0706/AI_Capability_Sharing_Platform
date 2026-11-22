@@ -109,14 +109,15 @@ func (h *KBHandler) ListDocuments(c echo.Context) error {
 
 	userID := middleware.GetUserID(c)
 	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
+	refDomainID := parseOptionalUintQuery(c, "ref_domain_id")
 	var (
 		list []model.KBDocument
 		err  error
 	)
 	if c.QueryParam("lazy") == "1" {
-		list, err = h.kbSvc.ListDocumentsLazy(userID, isSuperAdmin, kbID, c.QueryParam("folder_path"))
+		list, err = h.kbSvc.ListDocumentsLazy(userID, isSuperAdmin, kbID, c.QueryParam("folder_path"), refDomainID)
 	} else {
-		list, err = h.kbSvc.ListDocuments(userID, isSuperAdmin, kbID)
+		list, err = h.kbSvc.ListDocuments(userID, isSuperAdmin, kbID, refDomainID)
 	}
 	if err != nil {
 		return service.HandleError(c, err)
@@ -137,7 +138,8 @@ func (h *KBHandler) GetDocumentContent(c echo.Context) error {
 	userID := middleware.GetUserID(c)
 	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
 	obf := c.QueryParam("obf") == "1"
-	res, err := h.kbSvc.GetDocumentContent(userID, isSuperAdmin, kbID, docID, obf)
+	refDomainID := parseOptionalUintQuery(c, "ref_domain_id")
+	res, err := h.kbSvc.GetDocumentContent(userID, isSuperAdmin, kbID, docID, obf, refDomainID)
 	if err != nil {
 		return service.HandleError(c, err)
 	}
@@ -157,7 +159,8 @@ func (h *KBHandler) GetDocumentRaw(c echo.Context) error {
 	userID := middleware.GetUserID(c)
 	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
 	obf := c.QueryParam("obf") == "1"
-	fileName, mimeType, isSVG, data, err := h.kbSvc.GetDocumentRaw(userID, isSuperAdmin, kbID, docID, obf)
+	refDomainID := parseOptionalUintQuery(c, "ref_domain_id")
+	fileName, mimeType, isSVG, data, err := h.kbSvc.GetDocumentRaw(userID, isSuperAdmin, kbID, docID, obf, refDomainID)
 	if err != nil {
 		return service.HandleError(c, err)
 	}
@@ -209,7 +212,8 @@ func (h *KBHandler) ListChunks(c echo.Context) error {
 
 	userID := middleware.GetUserID(c)
 	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
-	list, total, err := h.kbSvc.ListChunks(userID, isSuperAdmin, kbID, docID, page, pageSize)
+	refDomainID := parseOptionalUintQuery(c, "ref_domain_id")
+	list, total, err := h.kbSvc.ListChunks(userID, isSuperAdmin, kbID, docID, page, pageSize, refDomainID)
 	if err != nil {
 		return service.HandleError(c, err)
 	}
@@ -252,7 +256,8 @@ func (h *KBHandler) Search(c echo.Context) error {
 
 	userID := middleware.GetUserID(c)
 	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
-	hits, err := h.kbSvc.Search(userID, isSuperAdmin, kbID, req)
+	refDomainID := parseOptionalUintQuery(c, "ref_domain_id")
+	hits, err := h.kbSvc.Search(userID, isSuperAdmin, kbID, req, refDomainID)
 	if err != nil {
 		return service.HandleError(c, err)
 	}
@@ -270,7 +275,8 @@ func (h *KBHandler) DownloadPreview(c echo.Context) error {
 
 	userID := middleware.GetUserID(c)
 	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
-	preview, err := h.kbSvc.GetDownloadPreview(userID, isSuperAdmin, kbID, scope, docID, folderPath)
+	refDomainID := parseOptionalUintQuery(c, "ref_domain_id")
+	preview, err := h.kbSvc.GetDownloadPreview(userID, isSuperAdmin, kbID, scope, docID, folderPath, refDomainID)
 	if err != nil {
 		return service.HandleError(c, err)
 	}
@@ -288,7 +294,8 @@ func (h *KBHandler) Download(c echo.Context) error {
 
 	userID := middleware.GetUserID(c)
 	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
-	filename, contentType, data, err := h.kbSvc.DownloadKB(userID, isSuperAdmin, kbID, scope, docID, folderPath)
+	refDomainID := parseOptionalUintQuery(c, "ref_domain_id")
+	filename, contentType, data, err := h.kbSvc.DownloadKB(userID, isSuperAdmin, kbID, scope, docID, folderPath, refDomainID)
 	if err != nil {
 		return service.HandleError(c, err)
 	}

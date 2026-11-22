@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { Connection, Delete, Plus, Refresh } from '@element-plus/icons-vue'
+import { useRouter } from 'vue-router'
+import { Connection, Delete, Plus, Refresh, View } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   createCrossRef,
@@ -28,6 +29,8 @@ const props = withDefaults(
     defaultRefType: 'asset'
   }
 )
+
+const router = useRouter()
 
 const loading = ref(false)
 const crossRefs = ref<DomainCrossRefItem[]>([])
@@ -176,6 +179,17 @@ async function handleSubmit() {
   }
 }
 
+function canBrowseContent(row: DomainCrossRefItem): boolean {
+  return row.status === 'active' && (row.ref_type === 'kb_file' || row.asset_type === 'kb')
+}
+
+function handleBrowseContent(row: DomainCrossRefItem) {
+  router.push({
+    path: `/domains/${props.domainId}/knowledge-bases`,
+    query: { crossRefId: String(row.id) }
+  })
+}
+
 async function handleDelete(item: DomainCrossRefItem) {
   if (!props.domainId) return
   try {
@@ -295,11 +309,23 @@ onMounted(() => {
         </template>
       </el-table-column>
 
-      <el-table-column label="操作" width="90" fixed="right">
+      <el-table-column label="操作" width="170" fixed="right">
         <template #default="{ row }">
-          <el-button link type="danger" size="small" :icon="Delete" @click="handleDelete(row)">
-            删除
-          </el-button>
+          <div class="row-actions">
+            <el-button
+              v-if="canBrowseContent(row)"
+              link
+              type="primary"
+              size="small"
+              :icon="View"
+              @click="handleBrowseContent(row)"
+            >
+              浏览内容
+            </el-button>
+            <el-button link type="danger" size="small" :icon="Delete" @click="handleDelete(row)">
+              删除
+            </el-button>
+          </div>
         </template>
       </el-table-column>
 
@@ -486,5 +512,11 @@ onMounted(() => {
 .desc-cell {
   font-size: 13px;
   color: var(--ascp-text-secondary);
+}
+
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 </style>

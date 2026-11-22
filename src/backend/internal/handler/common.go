@@ -29,6 +29,18 @@ func parseUintParam(c echo.Context, name string) (uint64, bool) {
 	return id, true
 }
 
+func parseOptionalUintQuery(c echo.Context, name string) uint64 {
+	raw := c.QueryParam(name)
+	if raw == "" {
+		return 0
+	}
+	v, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
 func parsePageParams(c echo.Context) (int, int) {
 	page, _ := strconv.Atoi(c.QueryParam("page"))
 	if page <= 0 {

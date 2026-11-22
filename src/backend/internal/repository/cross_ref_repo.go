@@ -19,6 +19,8 @@ type CrossRefRepository interface {
 	ListSourceDomains(isSuperAdmin bool, accessibleDomainIDs []uint64, excludeDomainID uint64) ([]model.BizDomain, error)
 	ListPublishedAssetsByDomain(domainID uint64) ([]model.AIAsset, error)
 	ListKBFilesByAssetIDs(kbAssetIDs []uint64) ([]model.KBDocument, error)
+	HasActiveAssetRef(targetDomainID, sourceAssetID uint64) (bool, error)
+	HasActiveDocOrAssetRef(targetDomainID, sourceAssetID, sourceDocID uint64) (bool, error)
 }
 
 type crossRefRepository struct {
@@ -126,30 +128,33 @@ func (r *crossRefRepository) ListByTargetDomain(targetDomainID uint64, includePe
 		}
 	}
 
-	assetTypes := make(map[uint64]string)
+	type assetMeta struct {
+		ID        uint64
+		Name      string
+		AssetType string
+	}
+	assetMetas := make(map[uint64]assetMeta)
 	if len(assetIDSet) > 0 {
-		var rows []struct {
-			ID        uint64
-			AssetType string
-		}
-		if err := r.db.Table("ai_asset").Select("id, asset_type").
+		var rows []assetMeta
+		if err := r.db.Table("ai_asset").Select("id, name, asset_type").
 			Where("id IN ?", mapKeysToSlice(assetIDSet)).Scan(&rows).Error; err != nil {
 			return nil, err
 		}
 		for _, row := range rows {
-			assetTypes[row.ID] = row.AssetType
+			assetMetas[row.ID] = row
 		}
 	}
 
 	type docMeta struct {
-		ID       uint64
-		FileExt  string
-		FileSize uint64
+		ID         uint64
+		FolderPath string
+		FileExt    string
+		FileSize   uint64
 	}
 	docMetas := make(map[uint64]docMeta)
 	if len(docIDSet) > 0 {
 		var rows []docMeta
-		if err := r.db.Table("kb_document").Select("id, file_ext, file_size").
+		if err := r.db.Table("kb_document").Select("id, folder_path, file_ext, file_size").
 			Where("id IN ?", mapKeysToSlice(docIDSet)).Scan(&rows).Error; err != nil {
 			return nil, err
 		}
@@ -160,6 +165,7 @@ func (r *crossRefRepository) ListByTargetDomain(targetDomainID uint64, includePe
 
 	views := make([]model.CrossRefView, 0, len(refs))
 	for _, ref := range refs {
+		meta := assetMetas[ref.SourceAssetID]
 		view := model.CrossRefView{
 			ID:                ref.ID,
 			TargetDomainID:    ref.TargetDomainID,
@@ -175,12 +181,14 @@ func (r *crossRefRepository) ListByTargetDomain(targetDomainID uint64, includePe
 			Status:            ref.Status,
 			ApprovalRequestID: ref.ApprovalRequestID,
 			CreatedAt:         ref.CreatedAt,
-			AssetType:         assetTypes[ref.SourceAssetID],
+			AssetType:         meta.AssetType,
 		}
 		if ref.RefType == model.CrossRefTypeKBFile {
-			if meta, ok := docMetas[ref.SourceDocID]; ok {
-				view.FileExt = meta.FileExt
-				view.FileSize = meta.FileSize
+			view.KBName = meta.Name
+			if doc, ok := docMetas[ref.SourceDocID]; ok {
+				view.FolderPath = doc.FolderPath
+				view.FileExt = doc.FileExt
+				view.FileSize = doc.FileSize
 			}
 		}
 		views = append(views, view)
@@ -288,6 +296,26 @@ func (r *crossRefRepository) ListKBFilesByAssetIDs(kbAssetIDs []uint64) ([]model
 	err := r.db.Where("kb_asset_id IN ? AND is_folder = ?", kbAssetIDs, false).
 		Order("id DESC").Find(&docs).Error
 	return docs, err
+}
+
+func (r *crossRefRepository) HasActiveAssetRef(targetDomainID, sourceAssetID uint64) (bool, error) {
+	var count int64
+	err := r.db.Model(&model.DomainCrossRef{}).
+		Where("target_domain_id = ? AND status = ? AND ref_type = ? AND source_asset_id = ?",
+			targetDomainID, model.CrossRefStatusActive, model.CrossRefTypeAsset, sourceAssetID).
+		Count(&count).Error
+	return count > 0, err
+}
+
+func (r *crossRefRepository) HasActiveDocOrAssetRef(targetDomainID, sourceAssetID, sourceDocID uint64) (bool, error) {
+	var count int64
+	err := r.db.Model(&model.DomainCrossRef{}).
+		Where("target_domain_id = ? AND status = ? AND ((ref_type = ? AND source_asset_id = ?) OR (ref_type = ? AND source_asset_id = ? AND source_doc_id = ?))",
+			targetDomainID, model.CrossRefStatusActive,
+			model.CrossRefTypeAsset, sourceAssetID,
+			model.CrossRefTypeKBFile, sourceAssetID, sourceDocID).
+		Count(&count).Error
+	return count > 0, err
 }
 
 func mapKeysToSlice(m map[uint64]struct{}) []uint64 {

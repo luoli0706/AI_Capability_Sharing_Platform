@@ -95,6 +95,7 @@ func main() {
 	domainSvc.SetCrossRefRepo(crossRefRepo)
 	govSvc.SetCrossRefRepo(crossRefRepo)
 	kbInteractionSvc := service.NewKBInteractionService(kbInteractionRepo, kbRepo, assetRepo, domainRepo, govRepo, orgRepo, userRepo)
+	kbInteractionSvc.SetCrossRefRepo(crossRefRepo)
 
 	// Handlers
 	authHandler := handler.NewAuthHandler(authSvc)

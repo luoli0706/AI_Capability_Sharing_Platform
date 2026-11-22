@@ -203,7 +203,7 @@ func TestKBDownloadPreviewAndZip(t *testing.T) {
 	kbSvc := NewKBService(kbRepo, assetRepo, domainRepo, nil, nil, tmpDir, "test-storage-secret")
 
 	// 1. Recursive folder preview ("guides" includes "guides/intro.md" + "guides/api/auth.md")
-	prevFolder, err := kbSvc.GetDownloadPreview(10, false, 1, "folder", 0, "/guides/")
+	prevFolder, err := kbSvc.GetDownloadPreview(10, false, 1, "folder", 0, "/guides/", 0)
 	if err != nil {
 		t.Fatalf("GetDownloadPreview folder failed: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestKBDownloadPreviewAndZip(t *testing.T) {
 	}
 
 	// 2. All files preview
-	prevAll, err := kbSvc.GetDownloadPreview(10, false, 1, "all", 0, "")
+	prevAll, err := kbSvc.GetDownloadPreview(10, false, 1, "all", 0, "", 0)
 	if err != nil {
 		t.Fatalf("GetDownloadPreview all failed: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestKBDownloadPreviewAndZip(t *testing.T) {
 	}
 
 	// 3. Single file preview
-	prevFile, err := kbSvc.GetDownloadPreview(10, false, 1, "file", 2, "")
+	prevFile, err := kbSvc.GetDownloadPreview(10, false, 1, "file", 2, "", 0)
 	if err != nil {
 		t.Fatalf("GetDownloadPreview file failed: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestKBDownloadPreviewAndZip(t *testing.T) {
 	}
 
 	// 4. Download folder as zip and inspect entries
-	fn, ct, zipBytes, err := kbSvc.DownloadKB(10, false, 1, "folder", 0, "guides")
+	fn, ct, zipBytes, err := kbSvc.DownloadKB(10, false, 1, "folder", 0, "guides", 0)
 	if err != nil {
 		t.Fatalf("DownloadKB folder failed: %v", err)
 	}
@@ -480,7 +480,7 @@ func TestKBAnyFileUploadSizeLimitAndRawPreview(t *testing.T) {
 	}
 
 	// 2. GetDocumentContent returns is_binary=true and empty content
-	contentRes, err := kbSvc.GetDocumentContent(10, false, 1, docs[0].ID, false)
+	contentRes, err := kbSvc.GetDocumentContent(10, false, 1, docs[0].ID, false, 0)
 	if err != nil {
 		t.Fatalf("GetDocumentContent failed: %v", err)
 	}
@@ -489,7 +489,7 @@ func TestKBAnyFileUploadSizeLimitAndRawPreview(t *testing.T) {
 	}
 
 	// 3. GetDocumentRaw returns exact PNG bytes & image/png
-	fn, mt, isSVG, raw, err := kbSvc.GetDocumentRaw(10, false, 1, docs[0].ID, false)
+	fn, mt, isSVG, raw, err := kbSvc.GetDocumentRaw(10, false, 1, docs[0].ID, false, 0)
 	if err != nil {
 		t.Fatalf("GetDocumentRaw failed: %v", err)
 	}
@@ -513,7 +513,7 @@ func TestKBAnyFileUploadSizeLimitAndRawPreview(t *testing.T) {
 		t.Fatalf("UploadDocuments .md failed: %v", err)
 	}
 
-	prev, err := kbSvc.GetDownloadPreview(10, false, 1, "all", 0, "")
+	prev, err := kbSvc.GetDownloadPreview(10, false, 1, "all", 0, "", 0)
 	if err != nil {
 		t.Fatalf("GetDownloadPreview failed: %v", err)
 	}
@@ -522,7 +522,7 @@ func TestKBAnyFileUploadSizeLimitAndRawPreview(t *testing.T) {
 		t.Fatalf("expected 2 files / %d bytes, got %+v", wantTotal, prev)
 	}
 
-	zipName, zipCT, zipData, err := kbSvc.DownloadKB(10, false, 1, "all", 0, "")
+	zipName, zipCT, zipData, err := kbSvc.DownloadKB(10, false, 1, "all", 0, "", 0)
 	if err != nil || zipName != "kb-media.zip" || zipCT != "application/zip" {
 		t.Fatalf("DownloadKB failed: name=%s ct=%s err=%v", zipName, zipCT, err)
 	}
@@ -565,7 +565,7 @@ func TestKBAtRestEncryptionAndTransportObfuscation(t *testing.T) {
 	}
 
 	// 2. GetDocumentContent (obf=false) returns exact plaintext
-	plainRes, err := kbSvc.GetDocumentContent(10, false, 1, doc.ID, false)
+	plainRes, err := kbSvc.GetDocumentContent(10, false, 1, doc.ID, false, 0)
 	if err != nil {
 		t.Fatalf("GetDocumentContent(obf=false) failed: %v", err)
 	}
@@ -574,7 +574,7 @@ func TestKBAtRestEncryptionAndTransportObfuscation(t *testing.T) {
 	}
 
 	// 3. GetDocumentContent (obf=true) returns obfuscated=true, payload, and empty content
-	obfRes, err := kbSvc.GetDocumentContent(10, false, 1, doc.ID, true)
+	obfRes, err := kbSvc.GetDocumentContent(10, false, 1, doc.ID, true, 0)
 	if err != nil {
 		t.Fatalf("GetDocumentContent(obf=true) failed: %v", err)
 	}
@@ -595,11 +595,11 @@ func TestKBAtRestEncryptionAndTransportObfuscation(t *testing.T) {
 	}
 
 	// 4. GetDocumentRaw (obf=false & obf=true)
-	_, mtPlain, _, rawPlain, err := kbSvc.GetDocumentRaw(10, false, 1, doc.ID, false)
+	_, mtPlain, _, rawPlain, err := kbSvc.GetDocumentRaw(10, false, 1, doc.ID, false, 0)
 	if err != nil || !strings.HasPrefix(mtPlain, "text/markdown") || string(rawPlain) != plainText {
 		t.Fatalf("GetDocumentRaw(obf=false) mismatch: mt=%s err=%v", mtPlain, err)
 	}
-	_, mtObf, _, rawObf, err := kbSvc.GetDocumentRaw(10, false, 1, doc.ID, true)
+	_, mtObf, _, rawObf, err := kbSvc.GetDocumentRaw(10, false, 1, doc.ID, true, 0)
 	if err != nil || mtObf != "application/octet-stream" {
 		t.Fatalf("GetDocumentRaw(obf=true) mismatch: mt=%s err=%v", mtObf, err)
 	}
@@ -609,7 +609,7 @@ func TestKBAtRestEncryptionAndTransportObfuscation(t *testing.T) {
 	}
 
 	// 5. DownloadKB returns exact plaintext (single file)
-	_, _, dlPlain, err := kbSvc.DownloadKB(10, false, 1, "file", doc.ID, "")
+	_, _, dlPlain, err := kbSvc.DownloadKB(10, false, 1, "file", doc.ID, "", 0)
 	if err != nil || string(dlPlain) != plainText {
 		t.Fatalf("DownloadKB file mismatch: err=%v", err)
 	}
@@ -690,7 +690,7 @@ func TestListDocumentsLazy(t *testing.T) {
 	}
 
 	// 1. Root "" as domain member (userID 20): returns top-level folders ("guides", "notes") + root file ("readme.md"), NOT nested grandchild files
-	rootDocs, err := kbSvc.ListDocumentsLazy(20, false, 1, "")
+	rootDocs, err := kbSvc.ListDocumentsLazy(20, false, 1, "", 0)
 	if err != nil {
 		t.Fatalf("ListDocumentsLazy root failed: %v", err)
 	}
@@ -704,7 +704,7 @@ func TestListDocumentsLazy(t *testing.T) {
 	}
 
 	// 2. Subfolder "guides" (and unnormalized "/guides/"): returns "guides/api" folder + "guides/intro.md", NOT "guides/api/auth.md"
-	guideDocs, err := kbSvc.ListDocumentsLazy(20, false, 1, "/guides/")
+	guideDocs, err := kbSvc.ListDocumentsLazy(20, false, 1, "/guides/", 0)
 	if err != nil {
 		t.Fatalf("ListDocumentsLazy guides failed: %v", err)
 	}
@@ -717,12 +717,12 @@ func TestListDocumentsLazy(t *testing.T) {
 	}
 
 	// 3. Invalid traversal path is rejected
-	if _, err := kbSvc.ListDocumentsLazy(20, false, 1, "../secret"); err == nil {
+	if _, err := kbSvc.ListDocumentsLazy(20, false, 1, "../secret", 0); err == nil {
 		t.Fatal("expected error for invalid folder_path traversal")
 	}
 
 	// 4. Non-member cannot access domain-visibility KB
-	if _, err := kbSvc.ListDocumentsLazy(99, false, 1, ""); err == nil {
+	if _, err := kbSvc.ListDocumentsLazy(99, false, 1, "", 0); err == nil {
 		t.Fatal("expected forbidden error for non-member on domain KB")
 	}
 }

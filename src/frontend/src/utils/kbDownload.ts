@@ -29,9 +29,10 @@ const SCOPE_LABELS: Record<KbDownloadParams['scope'], string> = {
 export async function confirmAndDownloadKb(
   kbId: number,
   params: KbDownloadParams,
-  fallbackFilename: string
+  fallbackFilename: string,
+  refDomainId?: number
 ): Promise<void> {
-  const preview = await getKbDownloadPreview(kbId, params)
+  const preview = await getKbDownloadPreview(kbId, params, refDomainId)
   if (!preview || preview.file_count === 0) {
     ElMessage.warning('所选范围内暂无可下载的文件')
     return
@@ -61,7 +62,7 @@ export async function confirmAndDownloadKb(
         ? fallbackFilename
         : `${fallbackFilename}.zip`
 
-  await downloadKbFiles(kbId, params, finalName)
+  await downloadKbFiles(kbId, params, finalName, refDomainId)
   ElMessage.success('已开始下载')
 }
 

@@ -57,6 +57,8 @@ type CrossRefView struct {
 	FileExt           string    `json:"file_ext,omitempty"`
 	FileSize          uint64    `json:"file_size,omitempty"`
 	AssetType         string    `json:"asset_type,omitempty"`
+	KBName            string    `json:"kb_name,omitempty"`
+	FolderPath        string    `json:"folder_path,omitempty"`
 }
 
 type CrossRefSourceAssetItem struct {

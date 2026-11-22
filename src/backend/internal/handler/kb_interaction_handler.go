@@ -28,7 +28,8 @@ func (h *KBInteractionHandler) GetInteractions(c echo.Context) error {
 	}
 	userID := middleware.GetUserID(c)
 	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
-	res, err := h.interactionSvc.GetInteractions(userID, isSuperAdmin, kbID, docID)
+	refDomainID := parseOptionalUintQuery(c, "ref_domain_id")
+	res, err := h.interactionSvc.GetInteractions(userID, isSuperAdmin, kbID, docID, refDomainID)
 	if err != nil {
 		return service.HandleError(c, err)
 	}
@@ -46,7 +47,8 @@ func (h *KBInteractionHandler) ToggleLike(c echo.Context) error {
 	}
 	userID := middleware.GetUserID(c)
 	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
-	res, err := h.interactionSvc.ToggleLike(userID, isSuperAdmin, kbID, docID)
+	refDomainID := parseOptionalUintQuery(c, "ref_domain_id")
+	res, err := h.interactionSvc.ToggleLike(userID, isSuperAdmin, kbID, docID, refDomainID)
 	if err != nil {
 		return service.HandleError(c, err)
 	}
@@ -64,7 +66,8 @@ func (h *KBInteractionHandler) ToggleFavorite(c echo.Context) error {
 	}
 	userID := middleware.GetUserID(c)
 	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
-	favorited, err := h.interactionSvc.ToggleFavorite(userID, isSuperAdmin, kbID, docID)
+	refDomainID := parseOptionalUintQuery(c, "ref_domain_id")
+	favorited, err := h.interactionSvc.ToggleFavorite(userID, isSuperAdmin, kbID, docID, refDomainID)
 	if err != nil {
 		return service.HandleError(c, err)
 	}
@@ -82,7 +85,8 @@ func (h *KBInteractionHandler) ListComments(c echo.Context) error {
 	}
 	userID := middleware.GetUserID(c)
 	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
-	list, err := h.interactionSvc.ListComments(userID, isSuperAdmin, kbID, docID)
+	refDomainID := parseOptionalUintQuery(c, "ref_domain_id")
+	list, err := h.interactionSvc.ListComments(userID, isSuperAdmin, kbID, docID, refDomainID)
 	if err != nil {
 		return service.HandleError(c, err)
 	}
@@ -104,7 +108,8 @@ func (h *KBInteractionHandler) CreateComment(c echo.Context) error {
 	}
 	userID := middleware.GetUserID(c)
 	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
-	item, err := h.interactionSvc.CreateComment(userID, isSuperAdmin, kbID, docID, req)
+	refDomainID := parseOptionalUintQuery(c, "ref_domain_id")
+	item, err := h.interactionSvc.CreateComment(userID, isSuperAdmin, kbID, docID, req, refDomainID)
 	if err != nil {
 		return service.HandleError(c, err)
 	}
@@ -126,7 +131,8 @@ func (h *KBInteractionHandler) DeleteComment(c echo.Context) error {
 	}
 	userID := middleware.GetUserID(c)
 	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
-	if err := h.interactionSvc.DeleteComment(userID, isSuperAdmin, kbID, docID, commentID); err != nil {
+	refDomainID := parseOptionalUintQuery(c, "ref_domain_id")
+	if err := h.interactionSvc.DeleteComment(userID, isSuperAdmin, kbID, docID, commentID, refDomainID); err != nil {
 		return service.HandleError(c, err)
 	}
 	return response.Success(c, map[string]interface{}{"ok": true})

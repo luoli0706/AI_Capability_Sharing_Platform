@@ -83,18 +83,31 @@ export function uploadDocument(
   })
 }
 
+function withRefDomainId<T extends Record<string, unknown>>(
+  params?: T,
+  refDomainId?: number
+): (T & { ref_domain_id?: number }) | { ref_domain_id: number } | undefined {
+  if (!refDomainId) return params
+  return { ...(params ?? ({} as T)), ref_domain_id: refDomainId }
+}
+
 export function getDocuments(
   kbId: number,
-  params?: { lazy?: boolean; folder_path?: string }
+  params?: { lazy?: boolean; folder_path?: string },
+  refDomainId?: number
 ): Promise<PaginatedData<KbDocument> | KbDocument[]> {
   return apiGet<PaginatedData<KbDocument> | KbDocument[]>(`/kb/${kbId}/documents`, {
-    params
+    params: withRefDomainId(params, refDomainId)
   })
 }
 
-export async function getDocumentContent(kbId: number, docId: number): Promise<KbContentResult> {
+export async function getDocumentContent(
+  kbId: number,
+  docId: number,
+  refDomainId?: number
+): Promise<KbContentResult> {
   const res = await apiGet<KbContentResult>(`/kb/${kbId}/documents/${docId}/content`, {
-    params: { obf: '1' }
+    params: withRefDomainId({ obf: '1' }, refDomainId)
   })
   if (res.obfuscated && res.payload) {
     res.content = deobfuscateBase64ToText(res.payload)
@@ -105,10 +118,11 @@ export async function getDocumentContent(kbId: number, docId: number): Promise<K
 export async function getDocumentRawBlob(
   kbId: number,
   docId: number,
-  fileName?: string
+  fileName?: string,
+  refDomainId?: number
 ): Promise<Blob> {
   const res = await request.get<ArrayBuffer>(`/kb/${kbId}/documents/${docId}/raw`, {
-    params: { obf: '1' },
+    params: withRefDomainId({ obf: '1' }, refDomainId),
     responseType: 'arraybuffer'
   })
   const rawBytes = new Uint8Array(res.data)
@@ -119,9 +133,12 @@ export async function getDocumentRawBlob(
 
 export function getDocumentChunks(
   kbId: number,
-  docId: number
+  docId: number,
+  refDomainId?: number
 ): Promise<PaginatedData<KbChunk> | KbChunk[]> {
-  return apiGet<PaginatedData<KbChunk> | KbChunk[]>(`/kb/${kbId}/documents/${docId}/chunks`)
+  return apiGet<PaginatedData<KbChunk> | KbChunk[]>(`/kb/${kbId}/documents/${docId}/chunks`, {
+    params: withRefDomainId(undefined, refDomainId)
+  })
 }
 
 export function deleteDocument(kbId: number, docId: number): Promise<null> {
@@ -153,28 +170,34 @@ export function copyDocument(
 
 export function searchKB(
   kbId: number,
-  data: { query: string; top_k?: number }
+  data: { query: string; top_k?: number },
+  refDomainId?: number
 ): Promise<PaginatedData<KbChunk> | KbChunk[]> {
   return apiPost<PaginatedData<KbChunk> | KbChunk[], { query: string; top_k?: number }>(
     `/kb/${kbId}/search`,
-    data
+    data,
+    { params: withRefDomainId(undefined, refDomainId) }
   )
 }
 
 export function getKbDownloadPreview(
   kbId: number,
-  params: KbDownloadParams
+  params: KbDownloadParams,
+  refDomainId?: number
 ): Promise<KbDownloadPreview> {
-  return apiGet<KbDownloadPreview>(`/kb/${kbId}/download/preview`, { params })
+  return apiGet<KbDownloadPreview>(`/kb/${kbId}/download/preview`, {
+    params: withRefDomainId({ ...params }, refDomainId)
+  })
 }
 
 export async function downloadKbFiles(
   kbId: number,
   params: KbDownloadParams,
-  filename: string
+  filename: string,
+  refDomainId?: number
 ): Promise<void> {
   const res = await request.get<Blob>(`/kb/${kbId}/download`, {
-    params,
+    params: withRefDomainId({ ...params }, refDomainId),
     responseType: 'blob'
   })
   const blobUrl = URL.createObjectURL(res.data)
@@ -189,56 +212,72 @@ export async function downloadKbFiles(
 
 export function getDocumentInteractions(
   kbAssetId: number,
-  docId: number
+  docId: number,
+  refDomainId?: number
 ): Promise<KbDocumentInteractions> {
-  return apiGet<KbDocumentInteractions>(`/kb/${kbAssetId}/documents/${docId}/interactions`)
+  return apiGet<KbDocumentInteractions>(`/kb/${kbAssetId}/documents/${docId}/interactions`, {
+    params: withRefDomainId(undefined, refDomainId)
+  })
 }
 
 export function toggleDocumentLike(
   kbAssetId: number,
-  docId: number
+  docId: number,
+  refDomainId?: number
 ): Promise<{ liked_by_me?: boolean; liked?: boolean; like_count: number; like_users?: UserBrief[] }> {
   return apiPost<{
     liked_by_me?: boolean
     liked?: boolean
     like_count: number
     like_users?: UserBrief[]
-  }>(`/kb/${kbAssetId}/documents/${docId}/like`)
+  }>(`/kb/${kbAssetId}/documents/${docId}/like`, undefined, {
+    params: withRefDomainId(undefined, refDomainId)
+  })
 }
 
 export function toggleDocumentFavorite(
   kbAssetId: number,
-  docId: number
+  docId: number,
+  refDomainId?: number
 ): Promise<{ favorited_by_me?: boolean; favorited?: boolean }> {
   return apiPost<{ favorited_by_me?: boolean; favorited?: boolean }>(
-    `/kb/${kbAssetId}/documents/${docId}/favorite`
+    `/kb/${kbAssetId}/documents/${docId}/favorite`,
+    undefined,
+    { params: withRefDomainId(undefined, refDomainId) }
   )
 }
 
 export function listDocumentComments(
   kbAssetId: number,
-  docId: number
+  docId: number,
+  refDomainId?: number
 ): Promise<{ list: KbCommentItem[] } | KbCommentItem[]> {
   return apiGet<{ list: KbCommentItem[] } | KbCommentItem[]>(
-    `/kb/${kbAssetId}/documents/${docId}/comments`
+    `/kb/${kbAssetId}/documents/${docId}/comments`,
+    { params: withRefDomainId(undefined, refDomainId) }
   )
 }
 
 export function createDocumentComment(
   kbAssetId: number,
   docId: number,
-  data: { content: string; quote_text?: string; parent_id?: number }
+  data: { content: string; quote_text?: string; parent_id?: number },
+  refDomainId?: number
 ): Promise<KbCommentItem> {
   return apiPost<KbCommentItem, { content: string; quote_text?: string; parent_id?: number }>(
     `/kb/${kbAssetId}/documents/${docId}/comments`,
-    data
+    data,
+    { params: withRefDomainId(undefined, refDomainId) }
   )
 }
 
 export function deleteDocumentComment(
   kbAssetId: number,
   docId: number,
-  commentId: number
+  commentId: number,
+  refDomainId?: number
 ): Promise<null> {
-  return apiDelete<null>(`/kb/${kbAssetId}/documents/${docId}/comments/${commentId}`)
+  return apiDelete<null>(`/kb/${kbAssetId}/documents/${docId}/comments/${commentId}`, {
+    params: withRefDomainId(undefined, refDomainId)
+  })
 }

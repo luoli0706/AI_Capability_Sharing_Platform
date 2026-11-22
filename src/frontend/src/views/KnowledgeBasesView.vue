@@ -30,6 +30,7 @@ import {
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getAssets } from '@/api/asset'
+import { getDomainCrossRefs } from '@/api/crossRef'
 import CrossRefSection from '@/components/CrossRefSection.vue'
 import { extractFilesFromDrop, getFileRelativePath, isFileDragEvent } from '@/utils/dropFiles'
 import {
@@ -54,6 +55,7 @@ import {
 import { useDomainStore } from '@/stores/domain'
 import type {
   AssetItem,
+  DomainCrossRefItem,
   KbChunk,
   KbCommentItem,
   KbContentResult,
@@ -86,19 +88,96 @@ const domainStore = useDomainStore()
 const domainId = computed(() => Number(route.params.domainId))
 const currentDomain = computed(() => domainStore.getDomainById(domainId.value))
 
+type KbEntryKind = 'own' | 'cross_kb' | 'cross_files'
+
+interface KbSelectorEntry {
+  key: string
+  kind: KbEntryKind
+  id: number
+  name: string
+  assetCode?: string
+  sourceDomainName?: string
+  crossRefId?: number
+  asset?: AssetItem
+  crossRef?: DomainCrossRefItem
+}
+
 const loadingKbs = ref(false)
 const kbList = ref<AssetItem[]>([])
+const activeCrossRefs = ref<DomainCrossRefItem[]>([])
 const kbTotal = ref(0)
 const kbPage = ref(1)
 const kbPageSize = ref(20)
-const selectedKbId = ref<number | null>(null)
-const selectedKb = computed(
-  () => kbList.value.find((k) => k.id === selectedKbId.value) ?? null
+const selectedEntryKey = ref<string>('')
+const selectedCrossFileRef = ref<DomainCrossRefItem | null>(null)
+
+const crossKbRefs = computed(() =>
+  activeCrossRefs.value.filter((r) => r.ref_type === 'asset' && r.asset_type === 'kb')
 )
+const crossFileRefs = computed(() =>
+  activeCrossRefs.value.filter((r) => r.ref_type === 'kb_file')
+)
+
+const kbSelectorEntries = computed<KbSelectorEntry[]>(() => {
+  const entries: KbSelectorEntry[] = kbList.value.map((kb) => ({
+    key: `own:${kb.id}`,
+    kind: 'own',
+    id: kb.id,
+    name: kb.name,
+    assetCode: kb.asset_code,
+    asset: kb
+  }))
+  for (const refItem of crossKbRefs.value) {
+    entries.push({
+      key: `cross-kb:${refItem.id}`,
+      kind: 'cross_kb',
+      id: refItem.source_asset_id,
+      name: refItem.title,
+      sourceDomainName: refItem.source_domain_name || `域 #${refItem.source_domain_id}`,
+      crossRefId: refItem.id,
+      crossRef: refItem
+    })
+  }
+  if (crossFileRefs.value.length > 0) {
+    entries.push({
+      key: 'cross-files',
+      kind: 'cross_files',
+      id: -1,
+      name: '跨域引用文件'
+    })
+  }
+  return entries
+})
+
+const selectedEntry = computed(
+  () => kbSelectorEntries.value.find((e) => e.key === selectedEntryKey.value) ?? null
+)
+const isCrossKbMode = computed(() => selectedEntry.value?.kind === 'cross_kb')
+const isCrossFilesMode = computed(() => selectedEntry.value?.kind === 'cross_files')
+const isReadOnlyKb = computed(() => isCrossKbMode.value || isCrossFilesMode.value)
+const activeRefDomainId = computed(() => (isReadOnlyKb.value ? domainId.value : undefined))
+const selectedKbId = computed<number | null>(() => {
+  if (!selectedEntry.value) return null
+  if (selectedEntry.value.kind === 'cross_files') {
+    return selectedCrossFileRef.value?.source_asset_id ?? null
+  }
+  return selectedEntry.value.id
+})
+const selectedKb = computed(() => selectedEntry.value?.asset ?? null)
+
+function getEntryLabel(entry: KbSelectorEntry): string {
+  if (entry.kind === 'own') {
+    return entry.assetCode ? `${entry.name} (${entry.assetCode})` : entry.name
+  }
+  if (entry.kind === 'cross_kb') {
+    return `${entry.name} [跨引用 · 只读]`
+  }
+  return `${entry.name} [跨引用 · 只读]`
+}
 
 const loadingDocs = ref(false)
 const treeRefreshSeed = ref(0)
-const treeKey = computed(() => `${selectedKbId.value || 0}-${treeRefreshSeed.value}`)
+const treeKey = computed(() => `${selectedEntryKey.value || 'none'}-${treeRefreshSeed.value}`)
 const treeProps = {
   label: 'label',
   children: 'children',
@@ -248,6 +327,7 @@ function stopPolling() {
 
 function startPollingIfNeeded() {
   stopPolling()
+  if (isCrossFilesMode.value) return
   const hasPending = Object.values(folderFilesCache.value)
     .flat()
     .some((d) => !d.is_folder && (d.parse_status === 'pending' || d.parse_status === 'processing'))
@@ -259,8 +339,9 @@ function startPollingIfNeeded() {
 }
 
 async function pollPendingFolders() {
-  if (!selectedKbId.value) return
+  if (!selectedKbId.value || isCrossFilesMode.value) return
   const kbId = selectedKbId.value
+  const refDomId = activeRefDomainId.value
   const pendingEntries = Object.entries(folderFilesCache.value).filter(([, list]) =>
     list.some((d) => !d.is_folder && (d.parse_status === 'pending' || d.parse_status === 'processing'))
   )
@@ -271,7 +352,7 @@ async function pollPendingFolders() {
   let anyChanged = false
   for (const [folderPath, prevList] of pendingEntries) {
     try {
-      const res = await getDocuments(kbId, { lazy: true, folder_path: folderPath })
+      const res = await getDocuments(kbId, { lazy: true, folder_path: folderPath }, refDomId)
       const items = normalizeList(res).items
       const nextFiles = extractImmediateFiles(items, folderPath)
       const prevStatusMap = new Map(prevList.map((d) => [d.id, d.parse_status]))
@@ -293,37 +374,81 @@ async function fetchKbs() {
   if (!domainId.value) return
   loadingKbs.value = true
   try {
-    const res = await getAssets({
-      scope: 'workspace',
-      domain_id: domainId.value,
-      asset_type: 'kb',
-      page: kbPage.value,
-      page_size: kbPageSize.value
-    })
-    const normalized = normalizeList(res)
+    const [assetsRes, crossRefsRes] = await Promise.all([
+      getAssets({
+        scope: 'workspace',
+        domain_id: domainId.value,
+        asset_type: 'kb',
+        page: kbPage.value,
+        page_size: kbPageSize.value
+      }),
+      getDomainCrossRefs(domainId.value, false).catch(() => [])
+    ])
+    const normalized = normalizeList(assetsRes)
     kbList.value = normalized.items
     kbTotal.value = normalized.total
-    if (kbList.value.length > 0) {
-      const queryKbId = Number(route.query.kbId)
-      if (Number.isFinite(queryKbId) && kbList.value.some((k) => k.id === queryKbId)) {
-        selectedKbId.value = queryKbId
-      } else if (!kbList.value.some((k) => k.id === selectedKbId.value)) {
-        selectedKbId.value = kbList.value[0].id
-      }
-      refreshTree()
-      await tryOpenQueryDocument()
+    activeCrossRefs.value = normalizeList(crossRefsRes).items
+
+    if (kbSelectorEntries.value.length > 0) {
+      await applyRouteOrDefaultSelection()
     } else {
-      selectedKbId.value = null
+      selectedEntryKey.value = ''
+      selectedCrossFileRef.value = null
       folderFilesCache.value = {}
       rootEmpty.value = true
     }
   } catch {
     kbList.value = []
+    activeCrossRefs.value = []
     kbTotal.value = 0
-    selectedKbId.value = null
+    selectedEntryKey.value = ''
+    selectedCrossFileRef.value = null
     folderFilesCache.value = {}
   } finally {
     loadingKbs.value = false
+  }
+}
+
+async function applyRouteOrDefaultSelection() {
+  const queryCrossRefId = Number(route.query.crossRefId)
+  if (Number.isFinite(queryCrossRefId) && queryCrossRefId > 0) {
+    const targetRef = activeCrossRefs.value.find((r) => r.id === queryCrossRefId)
+    if (targetRef) {
+      if (targetRef.ref_type === 'asset' && targetRef.asset_type === 'kb') {
+        const entryKey = `cross-kb:${targetRef.id}`
+        if (kbSelectorEntries.value.some((e) => e.key === entryKey)) {
+          handleSelectEntry(entryKey)
+          return
+        }
+      } else if (targetRef.ref_type === 'kb_file') {
+        if (kbSelectorEntries.value.some((e) => e.key === 'cross-files')) {
+          handleSelectEntry('cross-files')
+          await openCrossFileRef(targetRef)
+          return
+        }
+      }
+    }
+  }
+
+  const queryKbId = Number(route.query.kbId)
+  if (Number.isFinite(queryKbId) && queryKbId > 0) {
+    const ownKey = `own:${queryKbId}`
+    if (kbSelectorEntries.value.some((e) => e.key === ownKey)) {
+      selectedEntryKey.value = ownKey
+      selectedCrossFileRef.value = null
+      refreshTree()
+      await tryOpenQueryDocument()
+      return
+    }
+  }
+
+  if (!kbSelectorEntries.value.some((e) => e.key === selectedEntryKey.value)) {
+    selectedEntryKey.value = kbSelectorEntries.value[0].key
+    selectedCrossFileRef.value = null
+  }
+  if (!isCrossFilesMode.value) {
+    refreshTree()
+    await tryOpenQueryDocument()
   }
 }
 
@@ -338,18 +463,19 @@ async function loadKbTreeNode(
   node: { level: number; data?: KbTreeNode },
   resolve: (data: KbTreeNode[]) => void
 ) {
-  if (!selectedKbId.value) {
+  if (isCrossFilesMode.value || !selectedKbId.value) {
     resolve([])
     return
   }
   const kbId = selectedKbId.value
+  const refDomId = activeRefDomainId.value
   const folderPath = node.level === 0 ? '' : (node.data?.folderPath || '')
   if (node.level === 0) {
     loadingDocs.value = true
     rootEmpty.value = false
   }
   try {
-    const res = await getDocuments(kbId, { lazy: true, folder_path: folderPath })
+    const res = await getDocuments(kbId, { lazy: true, folder_path: folderPath }, refDomId)
     const items = normalizeList(res).items
     const files = extractImmediateFiles(items, folderPath)
     folderFilesCache.value = { ...folderFilesCache.value, [folderPath]: files }
@@ -371,14 +497,42 @@ async function loadKbTreeNode(
   }
 }
 
-function handleSelectKb(id: number) {
-  selectedKbId.value = id
+function handleSelectEntry(key: string) {
+  selectedEntryKey.value = key
+  selectedCrossFileRef.value = null
   selectedFolderPath.value = ''
   selectedFileNode.value = null
   resetPreviewState()
+  resetSocialState()
   searchResults.value = []
   hasSearched.value = false
-  refreshTree()
+  if (isCrossFilesMode.value) {
+    rightTab.value = 'preview'
+    stopPolling()
+    folderFilesCache.value = {}
+    rootEmpty.value = crossFileRefs.value.length === 0
+  } else {
+    refreshTree()
+  }
+}
+
+async function openCrossFileRef(refItem: DomainCrossRefItem) {
+  selectedCrossFileRef.value = refItem
+  const syntheticDoc: KbDocument = {
+    id: refItem.source_doc_id,
+    kb_asset_id: refItem.source_asset_id,
+    file_name: refItem.title,
+    file_ext: refItem.file_ext || '',
+    file_size: refItem.file_size || 0,
+    folder_path: refItem.folder_path || '',
+    is_folder: false,
+    parse_status: 'completed',
+    chunk_count: 0,
+    uploader_id: refItem.created_by,
+    created_at: refItem.created_at,
+    updated_at: refItem.created_at
+  }
+  await openFileDoc(syntheticDoc, refItem.source_asset_id)
 }
 
 function openCreateFolderModal() {
@@ -500,24 +654,24 @@ async function handleFolderSelected(event: Event) {
 }
 
 function handleKbDragEnter(e: DragEvent) {
-  if (!isFileDragEvent(e) || !selectedKbId.value) return
+  if (isReadOnlyKb.value || !isFileDragEvent(e) || !selectedKbId.value) return
   e.preventDefault()
   kbDragDepth.value++
 }
 
 function handleKbDragOver(e: DragEvent) {
-  if (!isFileDragEvent(e) || !selectedKbId.value) return
+  if (isReadOnlyKb.value || !isFileDragEvent(e) || !selectedKbId.value) return
   e.preventDefault()
   if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
 }
 
 function handleKbDragLeave(e: DragEvent) {
-  if (!isFileDragEvent(e)) return
+  if (isReadOnlyKb.value || !isFileDragEvent(e)) return
   kbDragDepth.value = Math.max(0, kbDragDepth.value - 1)
 }
 
 async function handleKbDrop(e: DragEvent) {
-  if (!isFileDragEvent(e)) return
+  if (isReadOnlyKb.value || !isFileDragEvent(e)) return
   e.preventDefault()
   kbDragDepth.value = 0
   if (!selectedKbId.value) return
@@ -534,10 +688,15 @@ async function loadPreviewDoc(
   if (!kbId) return
   const requestSeq = ++previewRequestSeq
   rightTab.value = 'preview'
-  if (targetMode) previewMode.value = targetMode
+  if (targetMode) {
+    previewMode.value =
+      isReadOnlyKb.value && (targetMode === 'edit' || targetMode === 'split')
+        ? 'rendered'
+        : targetMode
+  }
   loadingPreview.value = true
   try {
-    const doc = await getDocumentContent(kbId, docId)
+    const doc = await getDocumentContent(kbId, docId, activeRefDomainId.value)
     if (requestSeq !== previewRequestSeq || selectedKbId.value !== kbId) return
     previewDoc.value = doc
     editFileName.value = doc.file_name
@@ -593,8 +752,9 @@ async function fetchAndCacheImageUrl(doc: KbDocument): Promise<string | null> {
   }
 
   const requestSessionSeq = previewSessionSeq
+  const refDomId = activeRefDomainId.value
   const promise = (async (): Promise<string | null> => {
-    const blob = await getDocumentRawBlob(requestKbId, doc.id, doc.file_name)
+    const blob = await getDocumentRawBlob(requestKbId, doc.id, doc.file_name, refDomId)
     const url = URL.createObjectURL(blob)
     if (selectedKbId.value !== requestKbId || previewSessionSeq !== requestSessionSeq) {
       URL.revokeObjectURL(url)
@@ -781,6 +941,7 @@ function resetSocialState() {
 }
 
 async function loadDocSocialData(kbId: number, docId: number, requestSeq = previewRequestSeq) {
+  const refDomId = activeRefDomainId.value
   const isStale = () =>
     requestSeq !== previewRequestSeq ||
     selectedKbId.value !== kbId ||
@@ -789,7 +950,7 @@ async function loadDocSocialData(kbId: number, docId: number, requestSeq = previ
   loadingInteractions.value = true
   loadingComments.value = true
   try {
-    const res = await getDocumentInteractions(kbId, docId)
+    const res = await getDocumentInteractions(kbId, docId, refDomId)
     if (isStale()) return
     interactions.value = res
   } catch {
@@ -801,7 +962,7 @@ async function loadDocSocialData(kbId: number, docId: number, requestSeq = previ
   }
   if (isStale()) return
   try {
-    const res = await listDocumentComments(kbId, docId)
+    const res = await listDocumentComments(kbId, docId, refDomId)
     if (isStale()) return
     comments.value = Array.isArray(res) ? res : (res.list ?? [])
   } catch {
@@ -816,15 +977,16 @@ async function loadDocSocialData(kbId: number, docId: number, requestSeq = previ
 
 async function handleToggleLike() {
   if (!selectedKbId.value || !currentSelectedDoc.value || togglingLike.value) return
+  const refDomId = activeRefDomainId.value
   togglingLike.value = true
   try {
-    const res = await toggleDocumentLike(selectedKbId.value, currentSelectedDoc.value.id)
+    const res = await toggleDocumentLike(selectedKbId.value, currentSelectedDoc.value.id, refDomId)
     interactions.value.like_count = res.like_count
     interactions.value.liked_by_me = Boolean(res.liked_by_me ?? res.liked)
     if (res.like_users) {
       interactions.value.like_users = res.like_users
     } else {
-      const fresh = await getDocumentInteractions(selectedKbId.value, currentSelectedDoc.value.id)
+      const fresh = await getDocumentInteractions(selectedKbId.value, currentSelectedDoc.value.id, refDomId)
       interactions.value = fresh
     }
   } catch {
@@ -838,7 +1000,11 @@ async function handleToggleFavorite() {
   if (!selectedKbId.value || !currentSelectedDoc.value || togglingFavorite.value) return
   togglingFavorite.value = true
   try {
-    const res = await toggleDocumentFavorite(selectedKbId.value, currentSelectedDoc.value.id)
+    const res = await toggleDocumentFavorite(
+      selectedKbId.value,
+      currentSelectedDoc.value.id,
+      activeRefDomainId.value
+    )
     const nextFav = Boolean(res.favorited_by_me ?? res.favorited)
     interactions.value.favorited_by_me = nextFav
     ElMessage.success(nextFav ? '已添加到我的收藏' : '已取消收藏')
@@ -858,10 +1024,15 @@ async function handleSubmitComment() {
   }
   submittingComment.value = true
   try {
-    const created = await createDocumentComment(selectedKbId.value, currentSelectedDoc.value.id, {
-      content,
-      quote_text: commentQuote.value.trim() || undefined
-    })
+    const created = await createDocumentComment(
+      selectedKbId.value,
+      currentSelectedDoc.value.id,
+      {
+        content,
+        quote_text: commentQuote.value.trim() || undefined
+      },
+      activeRefDomainId.value
+    )
     comments.value = [created, ...comments.value]
     interactions.value.comment_count = comments.value.length
     commentQuote.value = ''
@@ -882,7 +1053,12 @@ async function handleDeleteComment(comment: KbCommentItem) {
       cancelButtonText: '取消',
       type: 'warning'
     })
-    await deleteDocumentComment(selectedKbId.value, currentSelectedDoc.value.id, comment.id)
+    await deleteDocumentComment(
+      selectedKbId.value,
+      currentSelectedDoc.value.id,
+      comment.id,
+      activeRefDomainId.value
+    )
     comments.value = comments.value.filter((c) => c.id !== comment.id)
     interactions.value.comment_count = comments.value.length
     ElMessage.success('已删除')
@@ -891,9 +1067,10 @@ async function handleDeleteComment(comment: KbCommentItem) {
   }
 }
 
-async function openFileDoc(doc: KbDocument) {
-  const kbId = selectedKbId.value
+async function openFileDoc(doc: KbDocument, overrideKbId?: number) {
+  const kbId = overrideKbId ?? selectedKbId.value
   if (!kbId) return
+  const refDomId = activeRefDomainId.value
   selectedFileNode.value = {
     key: `file-${doc.id}`,
     label: doc.file_name,
@@ -916,24 +1093,28 @@ async function openFileDoc(doc: KbDocument) {
   void loadDocSocialData(kbId, doc.id, requestSeq)
 
   if (isImageFile(doc.file_name)) {
-    const cleanFolder = (doc.folder_path || '').replace(/^\/+|\/+$/g, '')
-    let folderDocs = folderFilesCache.value[cleanFolder]
-    if (!folderDocs) {
-      try {
-        const res = await getDocuments(kbId, { lazy: true, folder_path: cleanFolder })
-        if (isStale()) return
-        folderDocs = extractImmediateFiles(normalizeList(res).items, cleanFolder)
-        folderFilesCache.value = { ...folderFilesCache.value, [cleanFolder]: folderDocs }
-      } catch {
-        if (isStale()) return
-        folderDocs = [doc]
+    if (isCrossFilesMode.value) {
+      sameFolderImages.value = [doc]
+    } else {
+      const cleanFolder = (doc.folder_path || '').replace(/^\/+|\/+$/g, '')
+      let folderDocs = folderFilesCache.value[cleanFolder]
+      if (!folderDocs) {
+        try {
+          const res = await getDocuments(kbId, { lazy: true, folder_path: cleanFolder }, refDomId)
+          if (isStale()) return
+          folderDocs = extractImmediateFiles(normalizeList(res).items, cleanFolder)
+          folderFilesCache.value = { ...folderFilesCache.value, [cleanFolder]: folderDocs }
+        } catch {
+          if (isStale()) return
+          folderDocs = [doc]
+        }
       }
+      if (isStale()) return
+      const imgs = folderDocs
+        .filter((d) => !d.is_folder && isImageFile(d.file_name))
+        .sort((a, b) => a.file_name.localeCompare(b.file_name))
+      sameFolderImages.value = imgs.length > 0 ? imgs : [doc]
     }
-    if (isStale()) return
-    const imgs = folderDocs
-      .filter((d) => !d.is_folder && isImageFile(d.file_name))
-      .sort((a, b) => a.file_name.localeCompare(b.file_name))
-    sameFolderImages.value = imgs.length > 0 ? imgs : [doc]
     imageDoc.value = doc
     try {
       const url = await ensureImageUrl(doc)
@@ -950,7 +1131,7 @@ async function openFileDoc(doc: KbDocument) {
   loadingPreview.value = true
   try {
     if (isTextFile(doc.file_name)) {
-      const contentRes = await getDocumentContent(kbId, doc.id)
+      const contentRes = await getDocumentContent(kbId, doc.id, refDomId)
       if (isStale()) return
       if (contentRes.is_binary) {
         binaryDoc.value = doc
@@ -978,7 +1159,7 @@ async function tryOpenQueryDocument() {
   const queryDocId = Number(route.query.docId)
   if (!Number.isFinite(queryDocId) || queryDocId <= 0 || !selectedKbId.value) return
   try {
-    const res = await getDocuments(selectedKbId.value)
+    const res = await getDocuments(selectedKbId.value, undefined, activeRefDomainId.value)
     const docs = normalizeList(res).items
     const match = docs.find((d) => !d.is_folder && d.id === queryDocId)
     if (match) {
@@ -1000,6 +1181,7 @@ async function handleNodeClick(node: KbTreeNode) {
 }
 
 function allowDrag(draggingNode: { data: KbTreeNode }): boolean {
+  if (isReadOnlyKb.value) return false
   return !draggingNode.data.isFolder && Boolean(draggingNode.data.doc)
 }
 
@@ -1096,6 +1278,7 @@ function handleKeydown(e: KeyboardEvent) {
   if (!(e.ctrlKey || e.metaKey)) return
   const key = e.key.toLowerCase()
   if (
+    !isReadOnlyKb.value &&
     key === 's' &&
     previewDoc.value &&
     rightTab.value === 'preview' &&
@@ -1115,6 +1298,7 @@ function handleKeydown(e: KeyboardEvent) {
   ) {
     return
   }
+  if (isReadOnlyKb.value) return
   if (key === 'c' && selectedFileNode.value && !selectedFileNode.value.isFolder) {
     e.preventDefault()
     setClipboard(selectedFileNode.value)
@@ -1148,31 +1332,40 @@ async function handleDeleteNode(node: KbTreeNode) {
 }
 
 async function handleDownloadAll() {
-  if (!selectedKbId.value || !selectedKb.value) return
+  if (!selectedKbId.value || isCrossFilesMode.value) return
+  const fallbackName = selectedKb.value?.asset_code || selectedEntry.value?.name || 'knowledge-base'
   await confirmAndDownloadKb(
     selectedKbId.value,
     { scope: 'all' },
-    `${selectedKb.value.asset_code || 'knowledge-base'}.zip`
+    `${fallbackName}.zip`,
+    activeRefDomainId.value
   )
 }
 
 async function handleDownloadFolder(folderPath: string, folderLabel?: string) {
-  if (!selectedKbId.value) return
+  if (!selectedKbId.value || isCrossFilesMode.value) return
   const name = folderLabel || folderPath.split('/').pop() || 'folder'
   await confirmAndDownloadKb(
     selectedKbId.value,
     { scope: 'folder', folder_path: folderPath },
-    `${name}.zip`
+    `${name}.zip`,
+    activeRefDomainId.value
   )
 }
 
-async function handleDownloadFile(docId: number, fileName: string) {
-  if (!selectedKbId.value) return
-  await confirmAndDownloadKb(selectedKbId.value, { scope: 'file', doc_id: docId }, fileName)
+async function handleDownloadFile(docId: number, fileName: string, overrideKbId?: number) {
+  const kbId = overrideKbId ?? selectedKbId.value
+  if (!kbId) return
+  await confirmAndDownloadKb(
+    kbId,
+    { scope: 'file', doc_id: docId },
+    fileName,
+    activeRefDomainId.value
+  )
 }
 
 async function handleSearchTest() {
-  if (!selectedKbId.value) return
+  if (!selectedKbId.value || isCrossFilesMode.value) return
   if (!searchQuery.value.trim()) {
     ElMessage.warning('请输入检索关键词')
     return
@@ -1181,10 +1374,14 @@ async function handleSearchTest() {
   hasSearched.value = true
   searchPage.value = 1
   try {
-    const res = await searchKB(selectedKbId.value, {
-      query: searchQuery.value.trim(),
-      top_k: searchTopK.value
-    })
+    const res = await searchKB(
+      selectedKbId.value,
+      {
+        query: searchQuery.value.trim(),
+        top_k: searchTopK.value
+      },
+      activeRefDomainId.value
+    )
     searchResults.value = normalizeList(res).items
   } catch {
     searchResults.value = []
@@ -1197,6 +1394,14 @@ watch(domainId, () => {
   stopPolling()
   fetchKbs()
 })
+
+watch(
+  () => route.query.crossRefId,
+  async (val) => {
+    if (!val || loadingKbs.value) return
+    await applyRouteOrDefaultSelection()
+  }
+)
 
 onMounted(() => {
   domainStore.fetchDomains()
@@ -1236,8 +1441,8 @@ onUnmounted(() => {
       <el-skeleton :rows="4" animated />
     </div>
 
-    <div v-else-if="kbList.length === 0" class="surface-card empty-box">
-      <el-empty description="当前域尚未创建私有知识库资产">
+    <div v-else-if="kbSelectorEntries.length === 0" class="surface-card empty-box">
+      <el-empty description="当前域尚未创建私有知识库资产，也暂无生效的跨域知识库引用">
         <el-button type="primary" @click="router.push(`/domains/${domainId}/assets`)">
           去创建知识库资产
         </el-button>
@@ -1245,6 +1450,23 @@ onUnmounted(() => {
     </div>
 
     <div v-else class="kb-workspace">
+      <el-alert
+        v-if="isReadOnlyKb"
+        type="info"
+        :closable="false"
+        show-icon
+        class="readonly-banner"
+      >
+        <template #title>
+          <span>
+            只读模式：当前正在浏览跨域引用的知识库内容（不可新增、编辑、移动或删除原域资源）
+            <template v-if="isCrossKbMode && selectedEntry?.sourceDomainName">
+              · 来源域：<strong>{{ selectedEntry.sourceDomainName }}</strong>
+            </template>
+          </span>
+        </template>
+      </el-alert>
+
       <!-- KB Selector & Toolbar -->
       <div class="surface-card kb-toolbar-card">
         <div class="toolbar-top">
@@ -1252,17 +1474,40 @@ onUnmounted(() => {
             <el-icon :size="18" color="#4F46E5"><Collection /></el-icon>
             <span class="selector-label">当前知识库：</span>
             <el-select
-              :model-value="selectedKbId"
+              :model-value="selectedEntryKey"
               class="kb-select"
-              @change="handleSelectKb"
+              @change="handleSelectEntry"
             >
               <el-option
-                v-for="kb in kbList"
-                :key="kb.id"
-                :label="`${kb.name} (${kb.asset_code})`"
-                :value="kb.id"
-              />
+                v-for="entry in kbSelectorEntries"
+                :key="entry.key"
+                :label="getEntryLabel(entry)"
+                :value="entry.key"
+              >
+                <div class="kb-option-row">
+                  <span class="kb-option-name">
+                    {{ entry.kind === 'own' && entry.assetCode ? `${entry.name} (${entry.assetCode})` : entry.name }}
+                  </span>
+                  <div v-if="entry.kind === 'cross_kb'" class="kb-option-badges">
+                    <el-tag size="small" type="warning" effect="light">跨引用</el-tag>
+                    <el-tag size="small" type="info" effect="plain">只读</el-tag>
+                    <span class="kb-option-source">来自: {{ entry.sourceDomainName }}</span>
+                  </div>
+                  <div v-else-if="entry.kind === 'cross_files'" class="kb-option-badges">
+                    <el-tag size="small" type="success" effect="light">跨引用 · 只读</el-tag>
+                    <span class="kb-option-source">{{ crossFileRefs.length }} 个文件</span>
+                  </div>
+                </div>
+              </el-option>
             </el-select>
+            <template v-if="isCrossKbMode && selectedEntry">
+              <el-tag size="small" type="warning" effect="light">跨引用</el-tag>
+              <el-tag size="small" type="info" effect="plain">只读</el-tag>
+              <span class="selector-source-hint">来自: {{ selectedEntry.sourceDomainName }}</span>
+            </template>
+            <template v-else-if="isCrossFilesMode">
+              <el-tag size="small" type="success" effect="light">跨引用 · 只读</el-tag>
+            </template>
             <el-pagination
               v-if="kbTotal > kbPageSize"
               v-model:current-page="kbPage"
@@ -1275,51 +1520,62 @@ onUnmounted(() => {
           </div>
 
           <div class="toolbar-actions">
-            <el-button type="primary" :icon="DocumentAdd" @click="openCreateFileModal">
-              新建 Markdown
-            </el-button>
-            <el-button :icon="FolderAdd" @click="openCreateFolderModal">新建文件夹</el-button>
+            <template v-if="!isReadOnlyKb">
+              <el-button type="primary" :icon="DocumentAdd" @click="openCreateFileModal">
+                新建 Markdown
+              </el-button>
+              <el-button :icon="FolderAdd" @click="openCreateFolderModal">新建文件夹</el-button>
+              <el-button
+                type="primary"
+                plain
+                :icon="Upload"
+                :loading="uploading"
+                @click="triggerFileUpload()"
+              >
+                上传文件
+              </el-button>
+              <el-button
+                :icon="FolderOpened"
+                :loading="uploading"
+                @click="triggerFolderUpload"
+              >
+                上传文件夹
+              </el-button>
+              <el-button
+                :icon="DocumentCopy"
+                :disabled="!clipboardFile"
+                :loading="pasting"
+                @click="handlePaste()"
+              >
+                {{ clipboardFile ? `粘贴 (${clipboardFile.fileName})` : '粘贴' }}
+              </el-button>
+            </template>
             <el-button
-              type="primary"
-              plain
-              :icon="Upload"
-              :loading="uploading"
-              @click="triggerFileUpload()"
-            >
-              上传文件
-            </el-button>
-            <el-button
-              :icon="FolderOpened"
-              :loading="uploading"
-              @click="triggerFolderUpload"
-            >
-              上传文件夹
-            </el-button>
-            <el-button
-              :icon="DocumentCopy"
-              :disabled="!clipboardFile"
-              :loading="pasting"
-              @click="handlePaste()"
-            >
-              {{ clipboardFile ? `粘贴 (${clipboardFile.fileName})` : '粘贴' }}
-            </el-button>
-            <el-button
+              v-if="!isCrossFilesMode"
               type="primary"
               :icon="Download"
               @click="handleDownloadAll"
             >
               下载整个知识库
             </el-button>
-            <el-button :icon="Refresh" @click="refreshTree()">刷新</el-button>
+            <el-button :icon="Refresh" @click="isCrossFilesMode ? fetchKbs() : refreshTree()">
+              刷新
+            </el-button>
           </div>
         </div>
 
-        <div v-if="selectedFolderPath" class="active-folder-bar">
+        <div v-if="selectedFolderPath && !isCrossFilesMode" class="active-folder-bar">
           <span>
             当前选中目录：<strong class="mono-text">{{ selectedFolderPath }}</strong>
           </span>
           <div class="folder-bar-btns">
-            <el-button link type="primary" size="small" @click="triggerFileUpload(selectedFolderPath)">
+            <el-button
+              v-if="!isReadOnlyKb"
+              link
+              type="primary"
+              size="small"
+              @click="triggerFileUpload(selectedFolderPath)"
+            >
               在此上传
             </el-button>
             <el-button
@@ -1375,14 +1631,60 @@ onUnmounted(() => {
           </div>
 
           <div class="panel-header">
-            <h3 class="panel-title">目录与文件</h3>
-            <span class="doc-count tabular-nums">{{ loadedDocCount }} 项 · 支持桌面拖拽上传</span>
+            <h3 class="panel-title">{{ isCrossFilesMode ? '跨域引用文件' : '目录与文件' }}</h3>
+            <span class="doc-count tabular-nums">
+              <template v-if="isCrossFilesMode">{{ crossFileRefs.length }} 个文件 · 只读浏览</template>
+              <template v-else>{{ loadedDocCount }} 项 · {{ isReadOnlyKb ? '只读浏览' : '支持桌面拖拽上传' }}</template>
+            </span>
           </div>
 
-          <div v-loading="loadingDocs" class="tree-scroll">
+          <div v-if="isCrossFilesMode" class="tree-scroll cross-files-list">
+            <el-empty
+              v-if="crossFileRefs.length === 0"
+              description="暂无生效的跨域引用知识库文件"
+              :image-size="64"
+            />
+            <div
+              v-for="refItem in crossFileRefs"
+              :key="refItem.id"
+              class="cross-file-item"
+              :class="{ 'is-active': selectedCrossFileRef?.id === refItem.id }"
+              @click="openCrossFileRef(refItem)"
+            >
+              <div class="cross-file-main">
+                <el-icon :size="16" :color="isImageFile(refItem.title) ? '#059669' : '#4F46E5'">
+                  <Picture v-if="isImageFile(refItem.title)" />
+                  <Document v-else />
+                </el-icon>
+                <div class="cross-file-info">
+                  <div class="cross-file-title-row">
+                    <span class="cross-file-name">{{ refItem.title }}</span>
+                    <span v-if="refItem.file_size" class="tree-node-size tabular-nums">
+                      {{ formatFileSize(refItem.file_size) }}
+                    </span>
+                  </div>
+                  <div class="cross-file-meta">
+                    <span v-if="refItem.kb_name" class="cross-file-kb">{{ refItem.kb_name }}</span>
+                    <span v-if="refItem.folder_path" class="cross-file-path mono-text">/{{ refItem.folder_path }}</span>
+                    <span class="cross-file-domain">来自: {{ refItem.source_domain_name || `域 #${refItem.source_domain_id}` }}</span>
+                  </div>
+                </div>
+              </div>
+              <el-button
+                link
+                type="primary"
+                size="small"
+                @click.stop="handleDownloadFile(refItem.source_doc_id, refItem.title, refItem.source_asset_id)"
+              >
+                下载
+              </el-button>
+            </div>
+          </div>
+
+          <div v-else v-loading="loadingDocs" class="tree-scroll">
             <el-empty
               v-if="rootEmpty"
-              description="暂无文件或文件夹，请点击上方按钮上传文件或新建 Markdown"
+              :description="isReadOnlyKb ? '该知识库暂无文件或文件夹' : '暂无文件或文件夹，请点击上方按钮上传文件或新建 Markdown'"
               :image-size="64"
             />
             <el-tree
@@ -1394,7 +1696,7 @@ onUnmounted(() => {
               node-key="key"
               :default-expand-all="false"
               highlight-current
-              draggable
+              :draggable="!isReadOnlyKb"
               :allow-drag="allowDrag"
               :allow-drop="allowDrop"
               :expand-on-click-node="false"
@@ -1425,7 +1727,7 @@ onUnmounted(() => {
 
                   <div class="tree-node-actions">
                     <el-button
-                      v-if="data.isFolder && clipboardFile"
+                      v-if="!isReadOnlyKb && data.isFolder && clipboardFile"
                       link
                       type="success"
                       size="small"
@@ -1444,6 +1746,7 @@ onUnmounted(() => {
                     </el-button>
                     <template v-else-if="data.doc">
                       <el-button
+                        v-if="!isReadOnlyKb"
                         link
                         type="info"
                         size="small"
@@ -1461,7 +1764,7 @@ onUnmounted(() => {
                       </el-button>
                     </template>
                     <el-button
-                      v-if="data.doc"
+                      v-if="!isReadOnlyKb && data.doc"
                       link
                       type="danger"
                       size="small"
@@ -1478,7 +1781,7 @@ onUnmounted(() => {
         <!-- Right: Markdown Preview + Keyword Search -->
         <div class="surface-card kb-panel">
           <el-tabs v-model="rightTab">
-            <el-tab-pane label="文件预览与编辑" name="preview">
+            <el-tab-pane :label="isReadOnlyKb ? '文件预览' : '文件预览与编辑'" name="preview">
               <div v-if="loadingPreview" class="mt-16">
                 <el-skeleton :rows="6" animated />
               </div>
@@ -1653,12 +1956,12 @@ onUnmounted(() => {
                   <div class="preview-controls">
                     <el-radio-group v-model="previewMode" size="small">
                       <el-radio-button value="rendered">渲染预览</el-radio-button>
-                      <el-radio-button value="edit">在线编辑</el-radio-button>
-                      <el-radio-button value="split">分屏编辑</el-radio-button>
+                      <el-radio-button v-if="!isReadOnlyKb" value="edit">在线编辑</el-radio-button>
+                      <el-radio-button v-if="!isReadOnlyKb" value="split">分屏编辑</el-radio-button>
                       <el-radio-button value="raw">原文</el-radio-button>
                     </el-radio-group>
                     <el-button
-                      v-if="previewMode === 'edit' || previewMode === 'split'"
+                      v-if="!isReadOnlyKb && (previewMode === 'edit' || previewMode === 'split')"
                       type="primary"
                       size="small"
                       :icon="Check"
@@ -1809,11 +2112,15 @@ onUnmounted(() => {
               </template>
 
               <div v-else class="preview-placeholder">
-                在左侧目录树点击任意文件（支持 Markdown、文本、代码、图片及二进制文件），即可在此处预览、编辑或下载。
+                {{
+                  isReadOnlyKb
+                    ? '在左侧点击任意文件（支持 Markdown、文本、代码、图片及二进制文件），即可在此处预览或下载。'
+                    : '在左侧目录树点击任意文件（支持 Markdown、文本、代码、图片及二进制文件），即可在此处预览、编辑或下载。'
+                }}
               </div>
             </el-tab-pane>
 
-            <el-tab-pane label="关键词检索" name="search">
+            <el-tab-pane v-if="!isCrossFilesMode" label="关键词检索" name="search">
               <div class="recall-controls">
                 <el-input
                   v-model="searchQuery"
@@ -2077,8 +2384,118 @@ onUnmounted(() => {
 }
 
 .kb-select {
-  width: 260px;
+  width: 320px;
   max-width: 100%;
+}
+
+.readonly-banner {
+  border-radius: 10px;
+}
+
+.kb-option-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+}
+
+.kb-option-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kb-option-badges {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.kb-option-source,
+.selector-source-hint {
+  font-size: 12px;
+  color: var(--ascp-text-muted);
+}
+
+.cross-files-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cross-file-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.cross-file-item:hover {
+  background: #f8fafc;
+  border-color: #cbd5e1;
+}
+
+.cross-file-item.is-active {
+  background: var(--ascp-primary-soft);
+  border-color: var(--ascp-primary);
+}
+
+.cross-file-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.cross-file-info {
+  min-width: 0;
+  flex: 1;
+}
+
+.cross-file-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cross-file-name {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--ascp-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cross-file-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 3px;
+  font-size: 11.5px;
+  color: var(--ascp-text-muted);
+}
+
+.cross-file-kb {
+  color: var(--ascp-text-secondary);
+  font-weight: 500;
+}
+
+.cross-file-path {
+  color: var(--ascp-text-muted);
+}
+
+.cross-file-domain {
+  color: var(--ascp-primary);
 }
 
 .selector-label {

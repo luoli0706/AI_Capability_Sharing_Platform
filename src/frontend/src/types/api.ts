@@ -554,6 +554,8 @@ export interface DomainCrossRefItem {
   file_ext?: string
   file_size?: number
   asset_type?: string
+  kb_name?: string
+  folder_path?: string
 }
 
 export interface CreateCrossRefPayload {
