@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import {
   ArrowLeft,
   ArrowRight,
+  Close,
   CopyDocument,
   Document,
   Download,
@@ -12,6 +14,7 @@ import {
   Picture,
   Promotion,
   Share,
+  TopRight,
   VideoPlay
 } from '@element-plus/icons-vue'
 import ShareAssetDialog from '@/components/ShareAssetDialog.vue'
@@ -48,6 +51,21 @@ const props = defineProps<{
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
 }>()
+
+const router = useRouter()
+
+function openFullPage() {
+  if (!detail.value) return
+  visible.value = false
+  if (detail.value.asset_type === 'kb') {
+    router.push({
+      path: `/domains/${detail.value.domain_id}/knowledge-bases`,
+      query: { kbId: String(detail.value.id) }
+    })
+    return
+  }
+  router.push(`/assets/${detail.value.id}`)
+}
 
 const loading = ref(false)
 const detail = ref<AssetItem | null>(null)
@@ -507,12 +525,47 @@ async function handleRunInvoke() {
 </script>
 
 <template>
-  <el-drawer
+  <el-dialog
     v-model="visible"
-    title="AI 资产详情"
-    size="660px"
+    width="min(1120px, 94vw)"
+    top="4vh"
+    :show-close="false"
     destroy-on-close
+    class="asset-subwindow-dialog"
   >
+    <template #header="{ close }">
+      <div class="subwindow-header">
+        <div class="subwindow-title-group">
+          <span class="subwindow-title">{{ detail?.name || 'AI 资产详情' }}</span>
+          <el-tag v-if="typeMeta" :type="typeMeta.tagType" effect="light" size="small">
+            {{ typeMeta.label }}
+          </el-tag>
+          <el-tag v-if="statusMeta" :type="statusMeta.tagType" effect="plain" size="small">
+            {{ statusMeta.label }}
+          </el-tag>
+          <span v-if="detail" class="version-pill mono-text">{{ detail.current_version || 'v0.1.0' }}</span>
+        </div>
+        <div class="subwindow-header-actions">
+          <el-button
+            v-if="detail"
+            size="small"
+            type="primary"
+            plain
+            :icon="TopRight"
+            @click="openFullPage"
+          >
+            {{ detail.asset_type === 'kb' ? '进入知识库' : '全页打开' }}
+          </el-button>
+          <el-button
+            size="small"
+            circle
+            :icon="Close"
+            title="关闭子窗口"
+            @click="close"
+          />
+        </div>
+      </div>
+    </template>
     <div v-if="loading" class="drawer-loading">
       <el-skeleton :rows="8" animated />
     </div>
@@ -1071,7 +1124,7 @@ async function handleRunInvoke() {
       :domain-id="detail.domain_id"
       :domain-name="detail.domain_name"
     />
-  </el-drawer>
+  </el-dialog>
 </template>
 
 <style scoped>
@@ -1346,5 +1399,54 @@ async function handleRunInvoke() {
   margin-top: 6px;
   font-size: 12.5px;
   color: var(--ascp-text-muted);
+}
+
+.subwindow-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--ascp-border);
+}
+
+.subwindow-title-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.subwindow-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--ascp-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subwindow-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+:deep(.asset-subwindow-dialog) {
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+:deep(.asset-subwindow-dialog .el-dialog__header) {
+  margin-right: 0;
+  padding: 16px 20px 0;
+}
+
+:deep(.asset-subwindow-dialog .el-dialog__body) {
+  padding: 16px 20px 22px;
+  max-height: 82vh;
+  overflow-y: auto;
 }
 </style>

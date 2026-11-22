@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { MoreFilled, Plus, Search } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -27,6 +27,7 @@ import {
 } from '@/utils/format'
 
 const route = useRoute()
+const router = useRouter()
 const domainStore = useDomainStore()
 const { domains } = storeToRefs(domainStore)
 
@@ -110,6 +111,17 @@ function openEdit(asset: AssetItem) {
 function openDetail(asset: AssetItem) {
   detailAssetId.value = asset.id
   detailDrawerOpen.value = true
+}
+
+function navigateToAsset(asset: AssetItem) {
+  if (asset.asset_type === 'kb') {
+    router.push({
+      path: `/domains/${asset.domain_id}/knowledge-bases`,
+      query: { kbId: String(asset.id) }
+    })
+    return
+  }
+  router.push(`/assets/${asset.id}`)
 }
 
 function openVersions(asset: AssetItem) {
@@ -268,11 +280,17 @@ onMounted(() => {
     </div>
 
     <div class="surface-card table-card">
-      <el-table v-loading="loading" :data="assets" stripe style="width: 100%">
+      <el-table
+        v-loading="loading"
+        :data="assets"
+        stripe
+        style="width: 100%"
+        @row-dblclick="(row: AssetItem) => openDetail(row)"
+      >
         <el-table-column label="资产名称 / 编码" min-width="220">
           <template #default="{ row }">
             <div class="asset-name-cell">
-              <span class="cell-name" @click="openDetail(row)">{{ row.name }}</span>
+              <span class="cell-name">{{ row.name }}</span>
               <span class="cell-code mono-text">{{ row.asset_code }}</span>
             </div>
           </template>
@@ -321,7 +339,9 @@ onMounted(() => {
         <el-table-column label="操作" width="240" fixed="right">
           <template #default="{ row }">
             <div class="action-group">
-              <el-button link type="primary" size="small" @click="openDetail(row)">详情</el-button>
+              <el-button link type="primary" size="small" @click="navigateToAsset(row)">
+                {{ row.asset_type === 'kb' ? '进入知识库' : '进入详情' }}
+              </el-button>
               <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
               <el-button
                 v-if="row.status === 'draft' || row.status === 'deprecated'"

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowLeft,
@@ -181,6 +181,7 @@ function getEntryLabel(entry: KbSelectorEntry): string {
 const loadingDocs = ref(false)
 const treeRefreshSeed = ref(0)
 const treeKey = computed(() => `${selectedEntryKey.value || 'none'}-${treeRefreshSeed.value}`)
+const expandedNodeKeys = ref<Set<string>>(new Set())
 const treeProps = {
   label: 'label',
   children: 'children',
@@ -352,7 +353,7 @@ async function pollPendingFolders() {
     stopPolling()
     return
   }
-  let anyChanged = false
+  const changedFolders: string[] = []
   for (const [folderPath, prevList] of pendingEntries) {
     try {
       const res = await getDocuments(kbId, { lazy: true, folder_path: folderPath }, refDomId)
@@ -360,15 +361,15 @@ async function pollPendingFolders() {
       const nextFiles = extractImmediateFiles(items, folderPath)
       const prevStatusMap = new Map(prevList.map((d) => [d.id, d.parse_status]))
       if (nextFiles.some((d) => prevStatusMap.get(d.id) !== d.parse_status)) {
-        anyChanged = true
+        changedFolders.push(folderPath)
       }
       folderFilesCache.value = { ...folderFilesCache.value, [folderPath]: nextFiles }
     } catch {
       // Ignore polling error
     }
   }
-  if (anyChanged) {
-    treeRefreshSeed.value++
+  if (changedFolders.length > 0) {
+    await refreshAfterMutation(changedFolders)
   }
   startPollingIfNeeded()
 }
@@ -455,10 +456,143 @@ async function applyRouteOrDefaultSelection() {
   }
 }
 
-function refreshTree() {
+function handleNodeExpand(data: KbTreeNode) {
+  if (data.isFolder && data.key) {
+    const next = new Set(expandedNodeKeys.value)
+    next.add(data.key)
+    expandedNodeKeys.value = next
+  }
+}
+
+function handleNodeCollapse(data: KbTreeNode) {
+  if (data.isFolder && data.key) {
+    const next = new Set(expandedNodeKeys.value)
+    next.delete(data.key)
+    expandedNodeKeys.value = next
+  }
+}
+
+async function restoreExpandedFolders(prefix?: string) {
+  const tree = kbTreeRef.value
+  if (!tree) return
+  const prefixFilter =
+    prefix !== undefined ? `folder:${prefix.replace(/^\/+|\/+$/g, '')}/` : null
+  const keys = Array.from(expandedNodeKeys.value)
+    .filter((k) => k.startsWith('folder:') && (!prefixFilter || k.startsWith(prefixFilter)))
+    .sort((a, b) => a.split('/').length - b.split('/').length)
+
+  for (const key of keys) {
+    const node = tree.getNode(key)
+    if (!node) {
+      const next = new Set(expandedNodeKeys.value)
+      next.delete(key)
+      expandedNodeKeys.value = next
+      continue
+    }
+    if (!node.loaded) {
+      await new Promise<void>((resolve) => {
+        node.expand(() => resolve(), true)
+      })
+    } else {
+      node.expanded = true
+    }
+  }
+
+  if (currentSelectedDoc.value) {
+    tree.setCurrentKey(`file:${currentSelectedDoc.value.id}`)
+  }
+}
+
+async function refreshFolderInPlace(folderPath: string) {
+  if (isCrossFilesMode.value || !selectedKbId.value) return
+  const kbId = selectedKbId.value
+  const refDomId = activeRefDomainId.value
+  const cleanPath = folderPath.replace(/^\/+|\/+$/g, '')
+
+  if (cleanPath === '') {
+    try {
+      const res = await getDocuments(kbId, { lazy: true, folder_path: '' }, refDomId)
+      const items = normalizeList(res).items
+      const files = extractImmediateFiles(items, '')
+      folderFilesCache.value = { ...folderFilesCache.value, '': files }
+      const nodes = buildImmediateKbTreeNodes(items, '')
+      rootEmpty.value = nodes.length === 0
+      await nextTick()
+      const store = kbTreeRef.value?.store as { setData?: (data: KbTreeNode[]) => void } | undefined
+      if (store?.setData) {
+        store.setData(nodes)
+        await nextTick()
+        await restoreExpandedFolders()
+      } else {
+        treeRefreshSeed.value++
+      }
+      startPollingIfNeeded()
+    } catch {
+      // Ignore refresh error
+    }
+    return
+  }
+
+  const nodeKey = `folder:${cleanPath}`
+  const folderNode = kbTreeRef.value?.getNode(nodeKey)
+  if (!folderNode) {
+    const parts = cleanPath.split('/').filter(Boolean)
+    let ancestorPath = ''
+    for (let i = parts.length - 1; i >= 1; i--) {
+      const candidate = parts.slice(0, i).join('/')
+      if (kbTreeRef.value?.getNode(`folder:${candidate}`)) {
+        ancestorPath = candidate
+        break
+      }
+    }
+    await refreshFolderInPlace(ancestorPath)
+    return
+  }
+
+  try {
+    const res = await getDocuments(kbId, { lazy: true, folder_path: cleanPath }, refDomId)
+    const items = normalizeList(res).items
+    const files = extractImmediateFiles(items, cleanPath)
+    folderFilesCache.value = { ...folderFilesCache.value, [cleanPath]: files }
+    const nodes = buildImmediateKbTreeNodes(items, cleanPath)
+    kbTreeRef.value?.updateKeyChildren(nodeKey, nodes)
+    folderNode.loaded = true
+    folderNode.expanded = true
+    if (!expandedNodeKeys.value.has(nodeKey)) {
+      const next = new Set(expandedNodeKeys.value)
+      next.add(nodeKey)
+      expandedNodeKeys.value = next
+    }
+    await nextTick()
+    await restoreExpandedFolders(cleanPath)
+    startPollingIfNeeded()
+  } catch {
+    // Ignore refresh error
+  }
+}
+
+async function refreshAfterMutation(affectedFolderPaths: string[]) {
+  const seen = new Set<string>()
+  const uniquePaths: string[] = []
+  for (const p of affectedFolderPaths) {
+    const clean = (p || '').replace(/^\/+|\/+$/g, '')
+    if (!seen.has(clean)) {
+      seen.add(clean)
+      uniquePaths.push(clean)
+    }
+  }
+  for (const p of uniquePaths) {
+    await refreshFolderInPlace(p)
+  }
+}
+
+function refreshTree(preserveExpanded = false) {
   stopPolling()
   folderFilesCache.value = {}
   rootEmpty.value = false
+  if (!preserveExpanded) {
+    expandedNodeKeys.value = new Set()
+  }
   treeRefreshSeed.value++
 }
 
@@ -487,6 +621,9 @@ async function loadKbTreeNode(
       rootEmpty.value = nodes.length === 0
     }
     resolve(nodes)
+    if (node.level === 0 && expandedNodeKeys.value.size > 0) {
+      void nextTick(() => restoreExpandedFolders())
+    }
     startPollingIfNeeded()
   } catch {
     if (node.level === 0) {
@@ -556,7 +693,9 @@ async function handleCreateFolder() {
     ElMessage.success('文件夹已创建')
     createFolderOpen.value = false
     selectedFolderPath.value = clean
-    refreshTree()
+    const parentPath = clean.includes('/') ? clean.slice(0, clean.lastIndexOf('/')) : ''
+    await refreshFolderInPlace(parentPath)
+    await expandFolderPathInTree(clean)
   } catch {
     // Handled by interceptor
   } finally {
@@ -590,7 +729,7 @@ async function handleCreateFile() {
     })
     ElMessage.success(`已新建文档「${created.file_name}」`)
     createFileOpen.value = false
-    refreshTree()
+    await refreshFolderInPlace(selectedFolderPath.value || '')
     await loadPreviewDoc(created.id, 'split')
   } catch {
     // Handled by interceptor
@@ -633,7 +772,7 @@ async function uploadFileList(files: File[], preserveRelativePath = false) {
     }
     if (uploadedCount > 0) {
       ElMessage.success(`成功上传 ${uploadedCount} 个文件`)
-      refreshTree()
+      await refreshFolderInPlace(selectedFolderPath.value || '')
     }
   } catch {
     // Handled by interceptor
@@ -731,7 +870,7 @@ async function handleSaveEdit() {
     editFileName.value = updated.file_name
     editContent.value = updated.content
     ElMessage.success('文档已保存')
-    refreshTree()
+    await refreshFolderInPlace(selectedFileNode.value?.folderPath || '')
   } catch {
     // Handled by interceptor
   } finally {
@@ -1248,15 +1387,18 @@ async function expandFolderPathInTree(folderPath: string) {
   if (!clean) return
   const segments = clean.split('/').filter(Boolean)
   let currentPath = ''
+  const nextExpanded = new Set(expandedNodeKeys.value)
   for (const seg of segments) {
     currentPath = currentPath ? `${currentPath}/${seg}` : seg
     const key = `folder:${currentPath}`
+    nextExpanded.add(key)
     const treeNode = kbTreeRef.value?.getNode(key)
     if (!treeNode) break
     await new Promise<void>((resolve) => {
       treeNode.expand(() => resolve(), true)
     })
   }
+  expandedNodeKeys.value = nextExpanded
   kbTreeRef.value?.setCurrentKey(`folder:${clean}`)
 }
 
@@ -1314,15 +1456,20 @@ async function handleNodeDrop(
 ) {
   const doc = draggingNode.data.doc
   if (!doc || !selectedKbId.value) return
-  const targetFolderPath = dropType === 'inner' ? dropNode.data.folderPath : ''
+  const sourceFolderPath = (doc.folder_path || '').replace(/^\/+|\/+$/g, '')
+  const targetFolderPath = (dropType === 'inner' ? dropNode.data.folderPath : '').replace(/^\/+|\/+$/g, '')
   try {
     await moveDocument(selectedKbId.value, doc.id, targetFolderPath)
+    doc.folder_path = targetFolderPath
+    if (selectedFileNode.value?.doc?.id === doc.id) {
+      selectedFileNode.value.folderPath = targetFolderPath
+    }
     ElMessage.success(
       targetFolderPath ? `已移动「${doc.file_name}」至 ${targetFolderPath}` : `已移动「${doc.file_name}」至根目录`
     )
-    refreshTree()
+    await refreshAfterMutation([sourceFolderPath, targetFolderPath])
   } catch {
-    refreshTree()
+    await refreshAfterMutation([sourceFolderPath, targetFolderPath])
   }
 }
 
@@ -1349,7 +1496,7 @@ async function handlePaste(targetFolder?: string) {
     ElMessage.success(
       targetPath ? `已粘贴至目录 ${targetPath}` : '已粘贴至根目录'
     )
-    refreshTree()
+    await refreshFolderInPlace((targetPath || '').replace(/^\/+|\/+$/g, ''))
   } catch {
     // Handled by interceptor
   } finally {
@@ -1430,13 +1577,33 @@ async function handleDeleteNode(node: KbTreeNode) {
     })
     await deleteDocument(selectedKbId.value, node.doc.id)
     ElMessage.success('已删除')
-    if (!node.isFolder && previewDoc.value?.id === node.doc.id) {
-      previewDoc.value = null
+    let parentFolder = ''
+    if (node.isFolder) {
+      const fp = node.folderPath.replace(/^\/+|\/+$/g, '')
+      parentFolder = fp.includes('/') ? fp.slice(0, fp.lastIndexOf('/')) : ''
+      const nextExpanded = new Set(expandedNodeKeys.value)
+      for (const key of Array.from(nextExpanded)) {
+        if (key === `folder:${fp}` || key.startsWith(`folder:${fp}/`)) {
+          nextExpanded.delete(key)
+        }
+      }
+      expandedNodeKeys.value = nextExpanded
+      if (selectedFolderPath.value === node.folderPath || selectedFolderPath.value.startsWith(`${fp}/`)) {
+        selectedFolderPath.value = ''
+      }
+      const activeDocFolder = (currentSelectedDoc.value?.folder_path || '').replace(/^\/+|\/+$/g, '')
+      if (currentSelectedDoc.value && (activeDocFolder === fp || activeDocFolder.startsWith(`${fp}/`))) {
+        resetPreviewState()
+        selectedFileNode.value = null
+      }
+    } else {
+      parentFolder = (node.doc.folder_path || '').replace(/^\/+|\/+$/g, '')
+      if (currentSelectedDoc.value?.id === node.doc.id) {
+        resetPreviewState()
+        selectedFileNode.value = null
+      }
     }
-    if (node.isFolder && selectedFolderPath.value === node.folderPath) {
-      selectedFolderPath.value = ''
-    }
-    refreshTree()
+    await refreshFolderInPlace(parentFolder)
   } catch {
     // Cancelled or failed
   }
@@ -1670,7 +1837,7 @@ onUnmounted(() => {
             >
               下载整个知识库
             </el-button>
-            <el-button :icon="Refresh" @click="isCrossFilesMode ? fetchKbs() : refreshTree()">
+            <el-button :icon="Refresh" @click="isCrossFilesMode ? fetchKbs() : refreshTree(true)">
               刷新
             </el-button>
           </div>
@@ -1814,6 +1981,8 @@ onUnmounted(() => {
               :allow-drop="allowDrop"
               :expand-on-click-node="false"
               @node-click="handleNodeClick"
+              @node-expand="handleNodeExpand"
+              @node-collapse="handleNodeCollapse"
               @node-drop="handleNodeDrop"
             >
               <template #default="{ data }">

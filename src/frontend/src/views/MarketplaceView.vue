@@ -134,7 +134,7 @@ function openDetail(asset: AssetItem) {
   detailDrawerOpen.value = true
 }
 
-function handleCardDblClick(asset: AssetItem) {
+function navigateToAsset(asset: AssetItem) {
   detailDrawerOpen.value = false
   if (asset.asset_type === 'kb') {
     router.push({
@@ -225,9 +225,8 @@ onBeforeUnmount(() => {
         :key="asset.id"
         class="surface-card asset-card"
         tabindex="0"
-        @click="openDetail(asset)"
-        @dblclick="handleCardDblClick(asset)"
-        @keyup.enter="openDetail(asset)"
+        title="双击预览详情"
+        @dblclick="openDetail(asset)"
       >
         <div class="card-top">
           <div class="type-badge-wrap">
@@ -283,9 +282,19 @@ onBeforeUnmount(() => {
               {{ getOwnerLabel(asset) }}
             </router-link>
           </div>
-          <div class="invoke-stat tabular-nums" title="累计调用次数">
-            <el-icon :size="14"><Histogram /></el-icon>
-            <span>{{ asset.invoke_count ?? 0 }}</span>
+          <div class="footer-right">
+            <div class="invoke-stat tabular-nums" title="累计调用次数">
+              <el-icon :size="14"><Histogram /></el-icon>
+              <span>{{ asset.invoke_count ?? 0 }}</span>
+            </div>
+            <el-button
+              size="small"
+              type="primary"
+              plain
+              @click.stop="navigateToAsset(asset)"
+            >
+              {{ asset.asset_type === 'kb' ? '进入知识库' : '进入详情' }}
+            </el-button>
           </div>
         </div>
       </article>
@@ -508,6 +517,13 @@ onBeforeUnmount(() => {
 .meta-domain {
   color: var(--ascp-text-secondary);
   font-weight: 500;
+}
+
+.footer-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
 }
 
 .invoke-stat {
