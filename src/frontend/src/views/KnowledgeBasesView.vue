@@ -22,16 +22,19 @@ import {
   Refresh,
   RefreshRight,
   Search,
+  Share,
   Star,
   StarFilled,
   Upload,
   ZoomIn,
   ZoomOut
 } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox, type ElTree } from 'element-plus'
 import { getAssets } from '@/api/asset'
 import { getDomainCrossRefs } from '@/api/crossRef'
+import { getMyFavorites } from '@/api/user'
 import CrossRefSection from '@/components/CrossRefSection.vue'
+import ShareAssetDialog from '@/components/ShareAssetDialog.vue'
 import { extractFilesFromDrop, getFileRelativePath, isFileDragEvent } from '@/utils/dropFiles'
 import {
   copyDocument,
@@ -996,6 +999,90 @@ async function handleToggleLike() {
   }
 }
 
+const favoritedDocIds = ref<Set<number>>(new Set())
+const togglingFolderFavId = ref<number | null>(null)
+const kbTreeRef = ref<InstanceType<typeof ElTree> | null>(null)
+
+const shareDialogOpen = ref(false)
+const shareTarget = ref<{
+  assetId: number
+  assetName: string
+  assetType: string
+  domainId: number
+  domainName?: string
+  docId?: number
+  docName?: string
+  isFolder?: boolean
+  refDomainId?: number
+} | null>(null)
+
+async function loadMyFavorites() {
+  try {
+    const res = await getMyFavorites()
+    const list = Array.isArray(res) ? res : (res.list ?? [])
+    favoritedDocIds.value = new Set(list.map((item) => item.doc_id))
+  } catch {
+    // Ignore
+  }
+}
+
+function updateFavoritedDocId(docId: number, isFav: boolean) {
+  const next = new Set(favoritedDocIds.value)
+  if (isFav) {
+    next.add(docId)
+  } else {
+    next.delete(docId)
+  }
+  favoritedDocIds.value = next
+}
+
+async function handleToggleFolderFavorite(doc: KbDocument) {
+  if (!selectedKbId.value || togglingFolderFavId.value === doc.id) return
+  togglingFolderFavId.value = doc.id
+  try {
+    const res = await toggleDocumentFavorite(selectedKbId.value, doc.id, activeRefDomainId.value)
+    const nextFav = Boolean(res.favorited_by_me ?? res.favorited)
+    updateFavoritedDocId(doc.id, nextFav)
+    ElMessage.success(nextFav ? '已收藏该文件夹' : '已取消收藏')
+  } catch {
+    // Handled by interceptor
+  } finally {
+    togglingFolderFavId.value = null
+  }
+}
+
+function openShareDialogForCurrentDoc() {
+  if (!selectedKbId.value || !selectedKb.value || !currentSelectedDoc.value) return
+  shareTarget.value = {
+    assetId: selectedKbId.value,
+    assetName: selectedKb.value.name,
+    assetType: 'kb',
+    domainId: selectedKb.value.domain_id || domainId.value,
+    domainName: selectedKb.value.domain_name || currentDomain.value?.domain_name,
+    docId: currentSelectedDoc.value.id,
+    docName: currentSelectedDoc.value.file_name,
+    isFolder: Boolean(currentSelectedDoc.value.is_folder),
+    refDomainId: activeRefDomainId.value
+  }
+  shareDialogOpen.value = true
+}
+
+function openShareDialogForNode(node: KbTreeNode) {
+  if (!selectedKbId.value || !selectedKb.value || !node.doc) return
+  shareTarget.value = {
+    assetId: selectedKbId.value,
+    assetName: selectedKb.value.name,
+    assetType: 'kb',
+    domainId: selectedKb.value.domain_id || domainId.value,
+    domainName: selectedKb.value.domain_name || currentDomain.value?.domain_name,
+    docId: node.doc.id,
+    docName: node.label,
+    isFolder: node.isFolder,
+    refDomainId: activeRefDomainId.value
+  }
+  shareDialogOpen.value = true
+}
+
 async function handleToggleFavorite() {
   if (!selectedKbId.value || !currentSelectedDoc.value || togglingFavorite.value) return
   togglingFavorite.value = true
@@ -1007,6 +1094,7 @@ async function handleToggleFavorite() {
     )
     const nextFav = Boolean(res.favorited_by_me ?? res.favorited)
     interactions.value.favorited_by_me = nextFav
+    updateFavoritedDocId(currentSelectedDoc.value.id, nextFav)
     ElMessage.success(nextFav ? '已添加到我的收藏' : '已取消收藏')
   } catch {
     // Handled by interceptor
@@ -1155,15 +1243,38 @@ async function openFileDoc(doc: KbDocument, overrideKbId?: number) {
   }
 }
 
+async function expandFolderPathInTree(folderPath: string) {
+  const clean = folderPath.replace(/^\/+|\/+$/g, '')
+  if (!clean) return
+  const segments = clean.split('/').filter(Boolean)
+  let currentPath = ''
+  for (const seg of segments) {
+    currentPath = currentPath ? `${currentPath}/${seg}` : seg
+    const key = `folder:${currentPath}`
+    const treeNode = kbTreeRef.value?.getNode(key)
+    if (!treeNode) break
+    await new Promise<void>((resolve) => {
+      treeNode.expand(() => resolve(), true)
+    })
+  }
+  kbTreeRef.value?.setCurrentKey(`folder:${clean}`)
+}
+
 async function tryOpenQueryDocument() {
   const queryDocId = Number(route.query.docId)
   if (!Number.isFinite(queryDocId) || queryDocId <= 0 || !selectedKbId.value) return
   try {
     const res = await getDocuments(selectedKbId.value, undefined, activeRefDomainId.value)
     const docs = normalizeList(res).items
-    const match = docs.find((d) => !d.is_folder && d.id === queryDocId)
-    if (match) {
+    const match = docs.find((d) => d.id === queryDocId)
+    if (!match) return
+    if (!match.is_folder) {
       await openFileDoc(match)
+    } else {
+      const folderPath = (match.folder_path || match.file_name || '').replace(/^\/+|\/+$/g, '')
+      selectedFolderPath.value = folderPath
+      selectedFileNode.value = null
+      await expandFolderPathInTree(folderPath)
     }
   } catch {
     // Ignore
@@ -1406,6 +1517,7 @@ watch(
 onMounted(() => {
   domainStore.fetchDomains()
   fetchKbs()
+  void loadMyFavorites()
   window.addEventListener('keydown', handleKeydown)
 })
 
@@ -1688,6 +1800,7 @@ onUnmounted(() => {
               :image-size="64"
             />
             <el-tree
+              ref="kbTreeRef"
               v-show="!rootEmpty"
               :key="treeKey"
               lazy
@@ -1726,6 +1839,25 @@ onUnmounted(() => {
                   </div>
 
                   <div class="tree-node-actions">
+                    <el-button
+                      v-if="data.isFolder && data.doc"
+                      link
+                      :type="favoritedDocIds.has(data.doc.id) ? 'warning' : 'info'"
+                      size="small"
+                      :icon="favoritedDocIds.has(data.doc.id) ? StarFilled : Star"
+                      :loading="togglingFolderFavId === data.doc.id"
+                      :title="favoritedDocIds.has(data.doc.id) ? '取消收藏文件夹' : '收藏文件夹'"
+                      @click.stop="handleToggleFolderFavorite(data.doc)"
+                    />
+                    <el-button
+                      v-if="data.isFolder && data.doc"
+                      link
+                      type="info"
+                      size="small"
+                      :icon="Share"
+                      title="分享文件夹"
+                      @click.stop="openShareDialogForNode(data)"
+                    />
                     <el-button
                       v-if="!isReadOnlyKb && data.isFolder && clipboardFile"
                       link
@@ -1861,6 +1993,14 @@ onUnmounted(() => {
                       @click="handleToggleFavorite"
                     >
                       {{ interactions.favorited_by_me ? '已收藏' : '收藏' }}
+                    </el-button>
+
+                    <el-button
+                      size="small"
+                      :icon="Share"
+                      @click="openShareDialogForCurrentDoc"
+                    >
+                      分享
                     </el-button>
                   </div>
                 </div>
@@ -2184,6 +2324,20 @@ onUnmounted(() => {
     </div>
 
     <!-- Create Folder Modal -->
+    <ShareAssetDialog
+      v-if="shareTarget"
+      v-model="shareDialogOpen"
+      :asset-id="shareTarget.assetId"
+      :asset-name="shareTarget.assetName"
+      :asset-type="shareTarget.assetType"
+      :domain-id="shareTarget.domainId"
+      :domain-name="shareTarget.domainName"
+      :doc-id="shareTarget.docId"
+      :doc-name="shareTarget.docName"
+      :is-folder="shareTarget.isFolder"
+      :ref-domain-id="shareTarget.refDomainId"
+    />
+
     <el-dialog v-model="createFolderOpen" title="新建文件夹" width="420px" destroy-on-close>
       <el-form label-position="top" @submit.prevent="handleCreateFolder">
         <el-form-item label="文件夹路径">

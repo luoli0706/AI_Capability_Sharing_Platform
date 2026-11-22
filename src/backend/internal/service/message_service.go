@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -12,20 +13,56 @@ import (
 	"gorm.io/gorm"
 )
 
-const maxMessageRunes = 4000
+const (
+	maxMessageRunes  = 4000
+	maxCardNoteRunes = 500
+)
 
 type MessageService interface {
+	SetAssetAccessRepos(
+		assetRepo repository.AssetRepository,
+		kbRepo repository.KBRepository,
+		domainRepo repository.DomainRepository,
+		orgRepo repository.OrgRepository,
+		govRepo repository.GovernanceRepository,
+		crossRefRepo repository.CrossRefRepository,
+	)
 	GetUnreadCount(userID uint64) (int64, error)
 	ListConversations(userID uint64) ([]model.ConversationItem, error)
+	ListContacts(userID uint64) ([]model.ContactUserItem, error)
 	CreateOrGetConversation(userID, targetUserID uint64) (*model.ConversationItem, error)
 	ListMessages(userID, convID uint64, beforeID uint64, limit int) ([]model.UserMessage, bool, error)
 	SendMessage(userID, convID uint64, content string) (*model.UserMessage, error)
+	SendMessageReq(userID uint64, isSuperAdmin bool, convID uint64, req model.SendMessageRequest) (*model.UserMessage, error)
+	ShareAssetCard(senderID uint64, isSuperAdmin bool, req model.ShareAssetCardRequest) (int, error)
 	MarkRead(userID, convID uint64) error
 }
 
 type messageService struct {
-	msgRepo  repository.MessageRepository
-	userRepo repository.UserRepository
+	msgRepo      repository.MessageRepository
+	userRepo     repository.UserRepository
+	assetRepo    repository.AssetRepository
+	kbRepo       repository.KBRepository
+	domainRepo   repository.DomainRepository
+	orgRepo      repository.OrgRepository
+	govRepo      repository.GovernanceRepository
+	crossRefRepo repository.CrossRefRepository
+}
+
+func (s *messageService) SetAssetAccessRepos(
+	assetRepo repository.AssetRepository,
+	kbRepo repository.KBRepository,
+	domainRepo repository.DomainRepository,
+	orgRepo repository.OrgRepository,
+	govRepo repository.GovernanceRepository,
+	crossRefRepo repository.CrossRefRepository,
+) {
+	s.assetRepo = assetRepo
+	s.kbRepo = kbRepo
+	s.domainRepo = domainRepo
+	s.orgRepo = orgRepo
+	s.govRepo = govRepo
+	s.crossRefRepo = crossRefRepo
 }
 
 func NewMessageService(msgRepo repository.MessageRepository, userRepo repository.UserRepository) MessageService {
@@ -37,6 +74,10 @@ func NewMessageService(msgRepo repository.MessageRepository, userRepo repository
 
 func (s *messageService) GetUnreadCount(userID uint64) (int64, error) {
 	return s.msgRepo.GetTotalUnreadCount(userID)
+}
+
+func (s *messageService) ListContacts(userID uint64) ([]model.ContactUserItem, error) {
+	return s.msgRepo.ListContacts(userID)
 }
 
 func (s *messageService) ListConversations(userID uint64) ([]model.ConversationItem, error) {
@@ -140,12 +181,46 @@ func (s *messageService) ListMessages(userID, convID uint64, beforeID uint64, li
 }
 
 func (s *messageService) SendMessage(userID, convID uint64, content string) (*model.UserMessage, error) {
-	trimmed := strings.TrimSpace(content)
-	if trimmed == "" {
-		return nil, NewBadRequest("message content cannot be empty")
+	return s.SendMessageReq(userID, false, convID, model.SendMessageRequest{
+		MsgType: model.MessageTypeText,
+		Content: content,
+	})
+}
+
+func (s *messageService) SendMessageReq(userID uint64, isSuperAdmin bool, convID uint64, req model.SendMessageRequest) (*model.UserMessage, error) {
+	msgType := strings.TrimSpace(req.MsgType)
+	if msgType == "" {
+		msgType = model.MessageTypeText
 	}
-	if utf8.RuneCountInString(trimmed) > maxMessageRunes {
-		return nil, NewBadRequest("message content exceeds 4000 characters")
+
+	var content, payloadJSON, preview string
+	switch msgType {
+	case model.MessageTypeText:
+		trimmed := strings.TrimSpace(req.Content)
+		if trimmed == "" {
+			return nil, NewBadRequest("message content cannot be empty")
+		}
+		if utf8.RuneCountInString(trimmed) > maxMessageRunes {
+			return nil, NewBadRequest("message content exceeds 4000 characters")
+		}
+		content = trimmed
+		preview = truncateRunes(trimmed, 120)
+	case model.MessageTypeAssetCard:
+		var cardReq model.AssetCardPayload
+		if err := json.Unmarshal([]byte(req.Payload), &cardReq); err != nil || cardReq.AssetID == 0 {
+			return nil, NewBadRequest("invalid asset card payload")
+		}
+		note := strings.TrimSpace(cardReq.Note)
+		if note == "" {
+			note = strings.TrimSpace(req.Content)
+		}
+		var err error
+		payloadJSON, preview, content, err = s.buildSanitizedAssetCard(userID, isSuperAdmin, cardReq.AssetID, cardReq.DocID, cardReq.RefDomainID, note)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		return nil, NewBadRequest("unsupported message type")
 	}
 
 	conv, err := s.requireParticipant(userID, convID)
@@ -173,14 +248,132 @@ func (s *messageService) SendMessage(userID, convID uint64, content string) (*mo
 		ConversationID: conv.ID,
 		SenderID:       userID,
 		ReceiverID:     receiverID,
-		Content:        trimmed,
+		MsgType:        msgType,
+		Content:        content,
+		Payload:        payloadJSON,
 		CreatedAt:      time.Now(),
 	}
-	preview := truncateRunes(trimmed, 120)
 	if err := s.msgRepo.CreateMessage(conv, msg, preview); err != nil {
 		return nil, err
 	}
 	return msg, nil
+}
+
+func (s *messageService) ShareAssetCard(senderID uint64, isSuperAdmin bool, req model.ShareAssetCardRequest) (int, error) {
+	seen := make(map[uint64]struct{}, len(req.RecipientIDs))
+	recipients := make([]uint64, 0, len(req.RecipientIDs))
+	for _, rid := range req.RecipientIDs {
+		if rid == 0 || rid == senderID {
+			continue
+		}
+		if _, ok := seen[rid]; !ok {
+			seen[rid] = struct{}{}
+			recipients = append(recipients, rid)
+		}
+	}
+	if len(recipients) == 0 {
+		return 0, NewBadRequest("at least one valid recipient is required")
+	}
+
+	payloadJSON, preview, content, err := s.buildSanitizedAssetCard(senderID, isSuperAdmin, req.AssetID, req.DocID, req.RefDomainID, req.Note)
+	if err != nil {
+		return 0, err
+	}
+
+	for _, rid := range recipients {
+		target, err := s.userRepo.FindByID(rid)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return 0, NewNotFound("user not found")
+			}
+			return 0, err
+		}
+		if target.Status != model.UserStatusActive {
+			return 0, NewBadRequest("目标用户不可用")
+		}
+	}
+
+	sentCount := 0
+	for _, rid := range recipients {
+		u1, u2 := senderID, rid
+		if u1 > u2 {
+			u1, u2 = u2, u1
+		}
+		conv, err := s.msgRepo.FindOrCreateConversation(u1, u2)
+		if err != nil {
+			return sentCount, err
+		}
+		msg := &model.UserMessage{
+			ConversationID: conv.ID,
+			SenderID:       senderID,
+			ReceiverID:     rid,
+			MsgType:        model.MessageTypeAssetCard,
+			Content:        content,
+			Payload:        payloadJSON,
+			CreatedAt:      time.Now(),
+		}
+		if err := s.msgRepo.CreateMessage(conv, msg, preview); err != nil {
+			return sentCount, err
+		}
+		sentCount++
+	}
+	return sentCount, nil
+}
+
+func (s *messageService) buildSanitizedAssetCard(senderID uint64, isSuperAdmin bool, assetID, docID, refDomainID uint64, rawNote string) (string, string, string, error) {
+	if s.assetRepo == nil || s.domainRepo == nil {
+		return "", "", "", NewBadRequest("asset sharing is not configured")
+	}
+	res, err := checkAssetAndDocAccess(
+		s.assetRepo, s.kbRepo, s.domainRepo, s.orgRepo, s.govRepo, s.crossRefRepo,
+		senderID, isSuperAdmin, assetID, docID, refDomainID,
+	)
+	if err != nil {
+		return "", "", "", err
+	}
+	if !res.Result.Accessible {
+		if res.Asset == nil {
+			return "", "", "", NewNotFound(res.Result.Reason)
+		}
+		return "", "", "", NewForbidden(res.Result.Reason)
+	}
+
+	note := strings.TrimSpace(rawNote)
+	if utf8.RuneCountInString(note) > maxCardNoteRunes {
+		return "", "", "", NewBadRequest("note exceeds 500 characters")
+	}
+
+	card := model.AssetCardPayload{
+		AssetID:     res.Asset.ID,
+		AssetName:   res.Asset.Name,
+		AssetType:   res.Asset.AssetType,
+		DomainID:    res.Asset.DomainID,
+		DomainName:  res.Asset.DomainName,
+		RefDomainID: refDomainID,
+		Note:        note,
+	}
+	if docID > 0 && res.Doc != nil {
+		card.DocID = res.Doc.ID
+		card.DocName = res.Doc.FileName
+		card.IsFolder = res.Doc.IsFolder
+	}
+
+	rawJSON, err := json.Marshal(card)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	var preview string
+	if card.DocID > 0 && card.DocName != "" {
+		preview = truncateRunes("[知识库卡片] "+card.DocName, 120)
+	} else {
+		preview = truncateRunes("[资产卡片] "+card.AssetName, 120)
+	}
+	content := note
+	if content == "" {
+		content = preview
+	}
+	return string(rawJSON), preview, content, nil
 }
 
 func (s *messageService) MarkRead(userID, convID uint64) error {

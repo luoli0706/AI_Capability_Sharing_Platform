@@ -2,7 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
-import { CopyDocument, Key, Plus, Refresh, Upload } from '@element-plus/icons-vue'
+import { CopyDocument, Document, Folder, Key, Plus, Refresh, Upload } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import {
   createApiKey,
@@ -645,12 +645,21 @@ onMounted(async () => {
           </div>
 
           <el-table v-loading="loadingFavorites" :data="myFavorites" stripe style="width: 100%">
-            <el-table-column label="文档名称" min-width="220">
+            <el-table-column label="文档名称" min-width="240">
               <template #default="{ row }">
                 <div class="asset-cell">
-                  <span class="asset-link mono-text" @click="goToFavoriteDoc(row)">
-                    {{ row.file_name }}
-                  </span>
+                  <div style="display: flex; align-items: center; gap: 6px">
+                    <el-icon :size="15" :color="row.is_folder ? '#F59E0B' : '#4F46E5'">
+                      <Folder v-if="row.is_folder" />
+                      <Document v-else />
+                    </el-icon>
+                    <span class="asset-link mono-text" @click="goToFavoriteDoc(row)">
+                      {{ row.file_name }}
+                    </span>
+                    <el-tag v-if="row.is_folder" size="small" type="warning" effect="plain">
+                      文件夹
+                    </el-tag>
+                  </div>
                   <span class="asset-code mono-text">/{{ row.folder_path || '' }}</span>
                 </div>
               </template>

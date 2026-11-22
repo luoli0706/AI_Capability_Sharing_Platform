@@ -591,7 +591,39 @@ export interface UserFavoriteItem {
   file_name: string
   folder_path: string
   file_ext: string
+  is_folder?: boolean
   created_at: string
+}
+
+export interface MessageContactItem extends UserBrief {
+  sources?: string[]
+}
+
+export interface AssetCardPayload {
+  asset_id: number
+  asset_name: string
+  asset_type: AssetType | string
+  domain_id: number
+  domain_name?: string
+  doc_id?: number
+  doc_name?: string
+  is_folder?: boolean
+  ref_domain_id?: number
+  note?: string
+  url?: string
+}
+
+export interface ShareAssetCardPayload {
+  target_user_ids: number[]
+  asset_id: number
+  doc_id?: number
+  ref_domain_id?: number
+  note?: string
+}
+
+export interface AssetAccessCheckResult {
+  accessible: boolean
+  reason?: string
 }
 
 export interface ConversationItem {
@@ -609,8 +641,16 @@ export interface UserMessageItem {
   sender_id: number
   receiver_id: number
   content: string
+  msg_type?: 'text' | 'asset_card' | string
+  payload?: AssetCardPayload | Record<string, unknown> | null
   is_read: boolean
   created_at: string
+}
+
+export interface SendMessagePayload {
+  content?: string
+  msg_type?: 'text' | 'asset_card' | string
+  payload?: AssetCardPayload | Record<string, unknown>
 }
 
 export interface KbDocumentInteractions {

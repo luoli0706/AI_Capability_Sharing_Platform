@@ -1,6 +1,7 @@
 import request, { apiDelete, apiGet, apiPost, apiPut } from './request'
 import type {
   AgentImportResult,
+  AssetAccessCheckResult,
   AssetItem,
   AssetQueryParams,
   AssetVersion,
@@ -20,6 +21,13 @@ export function getAssets(
 
 export function getAssetDetail(id: number): Promise<AssetItem> {
   return apiGet<AssetItem>(`/assets/${id}`)
+}
+
+export function checkAssetAccess(
+  assetId: number,
+  params?: { doc_id?: number; ref_domain_id?: number }
+): Promise<AssetAccessCheckResult> {
+  return apiGet<AssetAccessCheckResult>(`/assets/${assetId}/access-check`, { params })
 }
 
 export function createAsset(data: CreateAssetPayload): Promise<AssetItem> {

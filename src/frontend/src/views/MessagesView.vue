@@ -3,10 +3,12 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { useMediaQuery } from '@vueuse/core'
-import { ArrowLeft, ChatDotRound, Plus, Promotion, Search, User } from '@element-plus/icons-vue'
+import { ArrowLeft, ChatDotRound, Plus, Promotion, Search, Share, User } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
+import { checkAssetAccess, getAssets } from '@/api/asset'
 import {
   createOrGetConversation,
+  getMessageContacts,
   listConversations,
   listMessages,
   markConversationRead,
@@ -14,8 +16,16 @@ import {
 } from '@/api/messages'
 import { searchUsers } from '@/api/user'
 import { useAuthStore } from '@/stores/auth'
-import type { ConversationItem, UserBrief, UserMessageItem } from '@/types/api'
-import { formatDateTime } from '@/utils/format'
+import type {
+  AssetCardPayload,
+  AssetItem,
+  AssetType,
+  ConversationItem,
+  MessageContactItem,
+  UserBrief,
+  UserMessageItem
+} from '@/types/api'
+import { formatDateTime, getAssetTypeMeta, normalizeList } from '@/utils/format'
 
 const route = useRoute()
 const router = useRouter()
@@ -46,6 +56,17 @@ const userKeyword = ref('')
 const searchingUsers = ref(false)
 const searchedUsers = ref<UserBrief[]>([])
 const creatingConv = ref(false)
+const loadingContacts = ref(false)
+const contacts = ref<MessageContactItem[]>([])
+
+// Asset card picker modal
+const assetPickerOpen = ref(false)
+const assetKeyword = ref('')
+const loadingAssets = ref(false)
+const pickerAssets = ref<AssetItem[]>([])
+const assetNote = ref('')
+const sendingCard = ref(false)
+const checkingCardMsgId = ref<number | null>(null)
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
@@ -210,6 +231,122 @@ function openNewChatModal() {
   userKeyword.value = ''
   searchedUsers.value = []
   newChatOpen.value = true
+  void fetchContacts()
+}
+
+async function fetchContacts() {
+  loadingContacts.value = true
+  try {
+    const res = await getMessageContacts()
+    contacts.value = Array.isArray(res) ? res : (res.list ?? [])
+  } catch {
+    contacts.value = []
+  } finally {
+    loadingContacts.value = false
+  }
+}
+
+async function fetchPickerAssets() {
+  loadingAssets.value = true
+  try {
+    const res = await getAssets({
+      keyword: assetKeyword.value.trim() || undefined,
+      page: 1,
+      page_size: 20
+    })
+    pickerAssets.value = normalizeList(res).items
+  } catch {
+    pickerAssets.value = []
+  } finally {
+    loadingAssets.value = false
+  }
+}
+
+function openAssetPicker() {
+  assetKeyword.value = ''
+  assetNote.value = ''
+  assetPickerOpen.value = true
+  void fetchPickerAssets()
+}
+
+async function handleSendAssetCard(asset: AssetItem) {
+  if (!activeConversationId.value || sendingCard.value) return
+  sendingCard.value = true
+  try {
+    const cardPayload: AssetCardPayload = {
+      asset_id: asset.id,
+      asset_name: asset.name,
+      asset_type: asset.asset_type,
+      domain_id: asset.domain_id,
+      domain_name: asset.domain_name,
+      note: assetNote.value.trim() || undefined
+    }
+    const msg = await sendMessage(activeConversationId.value, {
+      msg_type: 'asset_card',
+      content: `[资产卡片] ${asset.name}`,
+      payload: cardPayload
+    })
+    messages.value = [...messages.value, msg]
+    const conv = conversations.value.find((c) => c.id === activeConversationId.value)
+    if (conv) {
+      conv.last_message_preview = `[资产卡片] ${asset.name}`
+      conv.last_message_at = msg.created_at
+      conv.updated_at = msg.created_at
+    }
+    assetPickerOpen.value = false
+    scrollToBottom()
+  } catch {
+    // Handled by interceptor
+  } finally {
+    sendingCard.value = false
+  }
+}
+
+function parseAssetCardPayload(msg: UserMessageItem): AssetCardPayload | null {
+  if (msg.msg_type !== 'asset_card' || !msg.payload) return null
+  let raw: unknown = msg.payload
+  if (typeof raw === 'string') {
+    try {
+      raw = JSON.parse(raw)
+    } catch {
+      return null
+    }
+  }
+  if (typeof raw === 'object' && raw !== null && 'asset_id' in raw) {
+    return raw as AssetCardPayload
+  }
+  return null
+}
+
+async function handleClickAssetCard(msg: UserMessageItem) {
+  const card = parseAssetCardPayload(msg)
+  if (!card || checkingCardMsgId.value === msg.id) return
+  checkingCardMsgId.value = msg.id
+  try {
+    const res = await checkAssetAccess(card.asset_id, {
+      doc_id: card.doc_id,
+      ref_domain_id: card.ref_domain_id
+    })
+    if (!res.accessible) {
+      ElMessage.warning(res.reason || '您暂无该资产的访问权限，无法进入')
+      return
+    }
+    if (card.asset_type === 'kb') {
+      router.push({
+        path: `/domains/${card.domain_id}/knowledge-bases`,
+        query: {
+          kbId: String(card.asset_id),
+          ...(card.doc_id ? { docId: String(card.doc_id) } : {})
+        }
+      })
+    } else {
+      router.push(`/assets/${card.asset_id}`)
+    }
+  } catch {
+    // Handled by interceptor
+  } finally {
+    checkingCardMsgId.value = null
+  }
 }
 
 async function handleSearchUsers() {
@@ -410,7 +547,45 @@ onBeforeUnmount(() => {
               :class="{ 'is-mine': msg.sender_id === user?.id }"
             >
               <div class="msg-bubble-wrap">
-                <div class="msg-bubble">{{ msg.content }}</div>
+                <div
+                  v-if="parseAssetCardPayload(msg)"
+                  class="asset-card-msg"
+                  :class="{ 'is-checking': checkingCardMsgId === msg.id }"
+                  @click="handleClickAssetCard(msg)"
+                >
+                  <div class="asset-card-msg-top">
+                    <el-tag
+                      :type="getAssetTypeMeta(parseAssetCardPayload(msg)!.asset_type as AssetType).tagType"
+                      size="small"
+                      effect="light"
+                    >
+                      {{ getAssetTypeMeta(parseAssetCardPayload(msg)!.asset_type as AssetType).shortLabel }}
+                    </el-tag>
+                    <span v-if="parseAssetCardPayload(msg)!.domain_name" class="asset-card-domain">
+                      {{ parseAssetCardPayload(msg)!.domain_name }}
+                    </span>
+                  </div>
+                  <div class="asset-card-msg-title">
+                    {{ parseAssetCardPayload(msg)!.asset_name }}
+                  </div>
+                  <div v-if="parseAssetCardPayload(msg)!.doc_name" class="asset-card-msg-doc">
+                    <el-tag
+                      size="small"
+                      :type="parseAssetCardPayload(msg)!.is_folder ? 'warning' : 'success'"
+                      effect="plain"
+                    >
+                      {{ parseAssetCardPayload(msg)!.is_folder ? '文件夹' : '文档' }}
+                    </el-tag>
+                    <span class="mono-text">{{ parseAssetCardPayload(msg)!.doc_name }}</span>
+                  </div>
+                  <div v-if="parseAssetCardPayload(msg)!.note" class="asset-card-msg-note">
+                    “{{ parseAssetCardPayload(msg)!.note }}”
+                  </div>
+                  <div class="asset-card-msg-footer">
+                    <span>点击校验权限并查看详情 →</span>
+                  </div>
+                </div>
+                <div v-else class="msg-bubble">{{ msg.content }}</div>
                 <div class="msg-time tabular-nums">{{ formatDateTime(msg.created_at) }}</div>
               </div>
             </div>
@@ -426,7 +601,12 @@ onBeforeUnmount(() => {
               @keydown="handleInputKeydown"
             />
             <div class="composer-actions">
-              <span class="composer-tip">按 Enter 快速发送</span>
+              <div class="composer-left-tools">
+                <el-button size="small" plain :icon="Share" @click="openAssetPicker">
+                  分享资产卡片
+                </el-button>
+                <span class="composer-tip">按 Enter 快速发送</span>
+              </div>
               <el-button
                 type="primary"
                 :icon="Promotion"
@@ -446,8 +626,59 @@ onBeforeUnmount(() => {
       </section>
     </div>
 
-    <!-- Search User Dialog -->
-    <el-dialog v-model="newChatOpen" title="发起私信" width="440px" destroy-on-close>
+    <!-- Search User & Contacts Dialog -->
+    <el-dialog v-model="newChatOpen" title="发起新对话" width="500px" destroy-on-close>
+      <div class="contacts-section">
+        <div class="dialog-section-title">同域 / 同组织好友</div>
+        <div v-loading="loadingContacts" class="user-search-results contacts-list">
+          <div
+            v-for="peer in contacts"
+            :key="peer.id"
+            class="user-result-row"
+          >
+            <div class="user-result-left" @click="router.push(`/users/${peer.id}`)">
+              <el-avatar :size="36" :src="peer.avatar || undefined">
+                {{ getUserInitial(peer) }}
+              </el-avatar>
+              <div class="user-result-meta">
+                <div class="user-result-name-row">
+                  <span class="user-result-name">{{ getUserDisplay(peer) }}</span>
+                  <span class="user-result-uname mono-text">@{{ peer.username }}</span>
+                </div>
+                <div v-if="peer.sources?.length" class="contact-sources">
+                  <el-tag
+                    v-for="src in peer.sources"
+                    :key="src"
+                    size="small"
+                    type="info"
+                    effect="plain"
+                  >
+                    {{ src }}
+                  </el-tag>
+                </div>
+              </div>
+            </div>
+            <el-button
+              type="primary"
+              size="small"
+              plain
+              :loading="creatingConv"
+              @click="startChatWithUser(peer)"
+            >
+              发私信
+            </el-button>
+          </div>
+          <el-empty
+            v-if="!loadingContacts && contacts.length === 0"
+            description="暂无同域或同组织好友"
+            :image-size="44"
+          />
+        </div>
+      </div>
+
+      <el-divider style="margin: 14px 0" />
+
+      <div class="dialog-section-title" style="margin-bottom: 8px">全平台用户搜索</div>
       <div class="user-search-bar">
         <el-input
           v-model="userKeyword"
@@ -489,7 +720,64 @@ onBeforeUnmount(() => {
         <el-empty
           v-if="!searchingUsers && searchedUsers.length === 0"
           :description="userKeyword.trim() ? '未找到匹配的用户' : '输入关键词搜索平台用户'"
-          :image-size="56"
+          :image-size="48"
+        />
+      </div>
+    </el-dialog>
+
+    <!-- Asset Picker Dialog -->
+    <el-dialog v-model="assetPickerOpen" title="分享资产卡片" width="520px" destroy-on-close>
+      <div class="user-search-bar">
+        <el-input
+          v-model="assetKeyword"
+          placeholder="搜索可访问的 MCP / Skill / Agent / 知识库..."
+          clearable
+          :prefix-icon="Search"
+          @keyup.enter="fetchPickerAssets"
+        />
+        <el-button type="primary" :loading="loadingAssets" @click="fetchPickerAssets">
+          搜索
+        </el-button>
+      </div>
+
+      <el-input
+        v-model="assetNote"
+        placeholder="附言（可选）：例如推荐查看这个能力..."
+        clearable
+        style="margin-bottom: 12px"
+      />
+
+      <div v-loading="loadingAssets" class="user-search-results">
+        <div
+          v-for="asset in pickerAssets"
+          :key="asset.id"
+          class="user-result-row"
+        >
+          <div class="picker-asset-meta">
+            <div class="picker-asset-top">
+              <el-tag :type="getAssetTypeMeta(asset.asset_type).tagType" size="small" effect="light">
+                {{ getAssetTypeMeta(asset.asset_type).shortLabel }}
+              </el-tag>
+              <span class="user-result-name">{{ asset.name }}</span>
+            </div>
+            <div class="picker-asset-sub">
+              <span>{{ asset.domain_name || `域 #${asset.domain_id}` }}</span>
+              <span class="mono-text">{{ asset.asset_code }}</span>
+            </div>
+          </div>
+          <el-button
+            type="primary"
+            size="small"
+            :loading="sendingCard"
+            @click="handleSendAssetCard(asset)"
+          >
+            发送卡片
+          </el-button>
+        </div>
+        <el-empty
+          v-if="!loadingAssets && pickerAssets.length === 0"
+          description="未找到可分享的资产"
+          :image-size="48"
         />
       </div>
     </el-dialog>
@@ -767,6 +1055,133 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.composer-left-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.asset-card-msg {
+  width: 300px;
+  max-width: 100%;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.15s ease;
+}
+
+.asset-card-msg:hover {
+  border-color: #4f46e5;
+  box-shadow: 0 4px 14px rgba(79, 70, 229, 0.14);
+  transform: translateY(-1px);
+}
+
+.asset-card-msg.is-checking {
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+.asset-card-msg-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.asset-card-domain {
+  font-size: 11px;
+  color: #64748b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.asset-card-msg-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #0f172a;
+  line-height: 1.4;
+}
+
+.asset-card-msg-doc {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #334155;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.asset-card-msg-note {
+  font-size: 12px;
+  color: #475569;
+  font-style: italic;
+  line-height: 1.45;
+}
+
+.asset-card-msg-footer {
+  font-size: 11px;
+  font-weight: 500;
+  color: #4f46e5;
+  border-top: 1px solid #f1f5f9;
+  padding-top: 6px;
+}
+
+.dialog-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #0f172a;
+  margin-bottom: 8px;
+}
+
+.contacts-list {
+  max-height: 200px;
+}
+
+.user-result-name-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.contact-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.picker-asset-meta {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-right: 10px;
+}
+
+.picker-asset-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.picker-asset-sub {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #64748b;
 }
 
 .composer-tip {

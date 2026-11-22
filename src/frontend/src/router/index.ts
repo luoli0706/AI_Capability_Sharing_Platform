@@ -91,6 +91,12 @@ const routes: RouteRecordRaw[] = [
         name: 'user-profile',
         component: () => import('@/views/UserProfileView.vue'),
         meta: { title: '用户主页', requiresAuth: true }
+      },
+      {
+        path: 'assets/:id',
+        name: 'asset-detail',
+        component: () => import('@/views/AssetDetailView.vue'),
+        meta: { title: '资产详情', requiresAuth: true }
       }
     ]
   },

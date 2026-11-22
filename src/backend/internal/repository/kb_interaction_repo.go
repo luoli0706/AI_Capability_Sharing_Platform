@@ -118,7 +118,7 @@ func (r *kbInteractionRepository) ToggleFavorite(kbAssetID, docID, userID uint64
 func (r *kbInteractionRepository) ListUserFavorites(userID uint64) ([]model.UserFavoriteItem, error) {
 	var items []model.UserFavoriteItem
 	err := r.db.Table("kb_document_favorite AS f").
-		Select("f.id, f.kb_asset_id, f.doc_id, a.domain_id, dom.domain_name, a.name AS kb_name, d.file_name, d.folder_path, d.file_ext, f.created_at, dom.visibility AS domain_visibility, a.owner_id AS asset_owner_id, a.visibility AS asset_visibility, a.status AS asset_status").
+		Select("f.id, f.kb_asset_id, f.doc_id, a.domain_id, dom.domain_name, a.name AS kb_name, d.file_name, d.folder_path, d.file_ext, d.is_folder, f.created_at, dom.visibility AS domain_visibility, a.owner_id AS asset_owner_id, a.visibility AS asset_visibility, a.status AS asset_status").
 		Joins("INNER JOIN kb_document d ON d.id = f.doc_id AND d.deleted_at IS NULL").
 		Joins("INNER JOIN ai_asset a ON a.id = f.kb_asset_id AND a.deleted_at IS NULL").
 		Joins("INNER JOIN biz_domain dom ON dom.id = a.domain_id AND dom.deleted_at IS NULL").

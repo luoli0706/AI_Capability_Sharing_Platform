@@ -246,3 +246,11 @@ type AssetQuery struct {
 	Page       int
 	PageSize   int
 }
+
+// AssetAccessCheckResult represents GET /api/v1/assets/:id/access-check response.
+type AssetAccessCheckResult struct {
+	Accessible bool   `json:"accessible"`
+	Reason     string `json:"reason"`
+	AssetType  string `json:"asset_type"`
+	DomainID   uint64 `json:"domain_id"`
+}

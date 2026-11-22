@@ -48,10 +48,13 @@ type AssetService interface {
 	DownloadAgentPackage(userID uint64, isSuperAdmin bool, id uint64, format string) (filename, contentType string, data []byte, err error)
 	SetAuditRepos(auditRepo repository.AuditLogRepository, userRepo repository.UserRepository)
 	SetCrossRefRepo(crossRefRepo repository.CrossRefRepository)
+	SetKBRepo(kbRepo repository.KBRepository)
+	CheckAssetAccess(userID uint64, isSuperAdmin bool, assetID, docID, refDomainID uint64) (*model.AssetAccessCheckResult, error)
 }
 
 type assetService struct {
 	assetRepo    repository.AssetRepository
+	kbRepo       repository.KBRepository
 	domainRepo   repository.DomainRepository
 	govRepo      repository.GovernanceRepository
 	orgRepo      repository.OrgRepository
@@ -69,6 +72,21 @@ func (s *assetService) SetAuditRepos(auditRepo repository.AuditLogRepository, us
 
 func (s *assetService) SetCrossRefRepo(crossRefRepo repository.CrossRefRepository) {
 	s.crossRefRepo = crossRefRepo
+}
+
+func (s *assetService) SetKBRepo(kbRepo repository.KBRepository) {
+	s.kbRepo = kbRepo
+}
+
+func (s *assetService) CheckAssetAccess(userID uint64, isSuperAdmin bool, assetID, docID, refDomainID uint64) (*model.AssetAccessCheckResult, error) {
+	res, err := checkAssetAndDocAccess(
+		s.assetRepo, s.kbRepo, s.domainRepo, s.orgRepo, s.govRepo, s.crossRefRepo,
+		userID, isSuperAdmin, assetID, docID, refDomainID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return res.Result, nil
 }
 
 func NewAssetService(assetRepo repository.AssetRepository, domainRepo repository.DomainRepository, govRepo repository.GovernanceRepository, orgRepo repository.OrgRepository, uploadDir string) AssetService {

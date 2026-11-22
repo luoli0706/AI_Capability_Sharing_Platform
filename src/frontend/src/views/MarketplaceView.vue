@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { Connection, Cpu, Document, Histogram, MagicStick, Search } from '@element-plus/icons-vue'
 import { getAssets } from '@/api/asset'
 import AssetDetailDrawer from '@/components/AssetDetailDrawer.vue'
@@ -9,6 +9,7 @@ import type { AssetItem, AssetType } from '@/types/api'
 import { getAssetStatusMeta, getAssetTypeMeta, normalizeList } from '@/utils/format'
 
 const route = useRoute()
+const router = useRouter()
 const domainStore = useDomainStore()
 
 const domainId = computed(() => Number(route.params.domainId))
@@ -133,6 +134,18 @@ function openDetail(asset: AssetItem) {
   detailDrawerOpen.value = true
 }
 
+function handleCardDblClick(asset: AssetItem) {
+  detailDrawerOpen.value = false
+  if (asset.asset_type === 'kb') {
+    router.push({
+      path: `/domains/${asset.domain_id}/knowledge-bases`,
+      query: { kbId: String(asset.id) }
+    })
+    return
+  }
+  router.push(`/assets/${asset.id}`)
+}
+
 watch(domainId, () => {
   filters.page = 1
   fetchAssets()
@@ -213,6 +226,7 @@ onBeforeUnmount(() => {
         class="surface-card asset-card"
         tabindex="0"
         @click="openDetail(asset)"
+        @dblclick="handleCardDblClick(asset)"
         @keyup.enter="openDetail(asset)"
       >
         <div class="card-top">

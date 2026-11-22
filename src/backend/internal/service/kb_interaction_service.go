@@ -62,7 +62,7 @@ func NewKBInteractionService(
 }
 
 func (s *kbInteractionService) GetInteractions(userID uint64, isSuperAdmin bool, kbID, docID, refDomainID uint64) (*model.KBDocumentInteractionsResponse, error) {
-	if _, _, err := s.ensureKBDocViewAccess(userID, isSuperAdmin, kbID, docID, refDomainID); err != nil {
+	if _, _, err := s.ensureKBDocViewAccess(userID, isSuperAdmin, kbID, docID, refDomainID, true); err != nil {
 		return nil, err
 	}
 
@@ -95,7 +95,7 @@ func (s *kbInteractionService) GetInteractions(userID uint64, isSuperAdmin bool,
 }
 
 func (s *kbInteractionService) ToggleLike(userID uint64, isSuperAdmin bool, kbID, docID, refDomainID uint64) (*model.KBDocumentLikeToggleResponse, error) {
-	if _, _, err := s.ensureKBDocViewAccess(userID, isSuperAdmin, kbID, docID, refDomainID); err != nil {
+	if _, _, err := s.ensureKBDocViewAccess(userID, isSuperAdmin, kbID, docID, refDomainID, false); err != nil {
 		return nil, err
 	}
 
@@ -120,14 +120,14 @@ func (s *kbInteractionService) ToggleLike(userID uint64, isSuperAdmin bool, kbID
 }
 
 func (s *kbInteractionService) ToggleFavorite(userID uint64, isSuperAdmin bool, kbID, docID, refDomainID uint64) (bool, error) {
-	if _, _, err := s.ensureKBDocViewAccess(userID, isSuperAdmin, kbID, docID, refDomainID); err != nil {
+	if _, _, err := s.ensureKBDocViewAccess(userID, isSuperAdmin, kbID, docID, refDomainID, true); err != nil {
 		return false, err
 	}
 	return s.interactionRepo.ToggleFavorite(kbID, docID, userID)
 }
 
 func (s *kbInteractionService) ListComments(userID uint64, isSuperAdmin bool, kbID, docID, refDomainID uint64) ([]model.KBCommentItem, error) {
-	detail, _, err := s.ensureKBDocViewAccess(userID, isSuperAdmin, kbID, docID, refDomainID)
+	detail, _, err := s.ensureKBDocViewAccess(userID, isSuperAdmin, kbID, docID, refDomainID, false)
 	if err != nil {
 		return nil, err
 	}
@@ -183,7 +183,7 @@ func (s *kbInteractionService) ListComments(userID uint64, isSuperAdmin bool, kb
 }
 
 func (s *kbInteractionService) CreateComment(userID uint64, isSuperAdmin bool, kbID, docID uint64, req model.CreateKBCommentRequest, refDomainID uint64) (*model.KBCommentItem, error) {
-	if _, _, err := s.ensureKBDocViewAccess(userID, isSuperAdmin, kbID, docID, refDomainID); err != nil {
+	if _, _, err := s.ensureKBDocViewAccess(userID, isSuperAdmin, kbID, docID, refDomainID, false); err != nil {
 		return nil, err
 	}
 
@@ -244,7 +244,7 @@ func (s *kbInteractionService) CreateComment(userID uint64, isSuperAdmin bool, k
 }
 
 func (s *kbInteractionService) DeleteComment(userID uint64, isSuperAdmin bool, kbID, docID, commentID, refDomainID uint64) error {
-	detail, _, err := s.ensureKBDocViewAccess(userID, isSuperAdmin, kbID, docID, refDomainID)
+	detail, _, err := s.ensureKBDocViewAccess(userID, isSuperAdmin, kbID, docID, refDomainID, false)
 	if err != nil {
 		return err
 	}
@@ -270,7 +270,7 @@ func (s *kbInteractionService) DeleteComment(userID uint64, isSuperAdmin bool, k
 	return s.interactionRepo.DeleteComment(comment.ID)
 }
 
-func (s *kbInteractionService) ensureKBDocViewAccess(userID uint64, isSuperAdmin bool, kbID, docID, refDomainID uint64) (*model.AssetDetail, *model.KBDocument, error) {
+func (s *kbInteractionService) ensureKBDocViewAccess(userID uint64, isSuperAdmin bool, kbID, docID, refDomainID uint64, allowFolder bool) (*model.AssetDetail, *model.KBDocument, error) {
 	detail, err := ensureKBViewAccessWithCrossRef(
 		s.assetRepo, s.domainRepo, s.orgRepo, s.govRepo, s.crossRefRepo,
 		userID, isSuperAdmin, kbID, refDomainID, docID,
@@ -286,7 +286,7 @@ func (s *kbInteractionService) ensureKBDocViewAccess(userID uint64, isSuperAdmin
 		}
 		return nil, nil, err
 	}
-	if doc.IsFolder {
+	if doc.IsFolder && !allowFolder {
 		return nil, nil, NewBadRequest("interactions are only supported on documents")
 	}
 	return detail, doc, nil

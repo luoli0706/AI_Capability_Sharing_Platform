@@ -99,6 +99,7 @@ type mockMessageRepo struct {
 	nextMsgID  uint64
 	convs      map[uint64]*model.UserConversation
 	msgs       []*model.UserMessage
+	contacts   map[uint64][]model.ContactUserItem
 }
 
 func newMockMessageRepo() *mockMessageRepo {
@@ -226,6 +227,15 @@ func (m *mockMessageRepo) MarkConversationRead(convID, readerID uint64, readAt t
 	return nil
 }
 
+func (m *mockMessageRepo) ListContacts(userID uint64) ([]model.ContactUserItem, error) {
+	if m.contacts != nil {
+		if items, ok := m.contacts[userID]; ok {
+			return items, nil
+		}
+	}
+	return []model.ContactUserItem{}, nil
+}
+
 type mockKBInteractionRepo struct {
 	nextID    uint64
 	likes     []model.KBDocumentLike
@@ -326,6 +336,7 @@ func (m *mockKBInteractionRepo) ListUserFavorites(userID uint64) ([]model.UserFa
 			FileName:         doc.FileName,
 			FolderPath:       doc.FolderPath,
 			FileExt:          doc.FileExt,
+			IsFolder:         doc.IsFolder,
 			CreatedAt:        f.CreatedAt,
 			DomainVisibility: dom.Visibility,
 			AssetOwnerID:     asset.OwnerID,
@@ -824,5 +835,260 @@ func TestKBInteractionsAndUploaderEnrichment(t *testing.T) {
 	isFav, err := interRepo.IsFavorited(100, 2)
 	if err != nil || isFav {
 		t.Fatalf("expected favorites cleaned up after DeleteDocument, got %v err=%v", isFav, err)
+	}
+}
+
+func TestFolderFavoriteAndUserFavoriteIsFolder(t *testing.T) {
+	userRepo := &mockSocialUserRepo{
+		users: map[uint64]*model.SysUser{
+			1: {ID: 1, Username: "owner", Nickname: "Owner", Status: model.UserStatusActive},
+			2: {ID: 2, Username: "alice", Nickname: "Alice", Status: model.UserStatusActive},
+		},
+	}
+	domainRepo := &mockP1DomainRepo{
+		domains: map[uint64]*model.BizDomain{
+			10: {ID: 10, DomainName: "Team Domain", Visibility: model.DomainVisibilityPublic, OwnerID: 1},
+		},
+		members: map[uint64]map[uint64]string{
+			10: {
+				1: model.DomainRoleOwner,
+				2: model.DomainRoleMember,
+			},
+		},
+	}
+	assetRepo := &mockP1AssetRepo{
+		assets: map[uint64]*model.AIAsset{
+			20: {
+				ID:         20,
+				DomainID:   10,
+				OwnerID:    1,
+				Name:       "Team KB",
+				AssetType:  model.AssetTypeKB,
+				Visibility: model.VisibilityPublic,
+				Status:     model.AssetStatusPublished,
+			},
+		},
+	}
+	kbRepo := newMockFileKBRepo()
+	kbRepo.docs[200] = &model.KBDocument{
+		ID:         200,
+		KBAssetID:  20,
+		FileName:   "Guides",
+		FolderPath: "/Guides",
+		IsFolder:   true,
+	}
+
+	interRepo := newMockKBInteractionRepo()
+	interRepo.assets[20] = *assetRepo.assets[20]
+	interRepo.domains[10] = *domainRepo.domains[10]
+	interRepo.docs[200] = *kbRepo.docs[200]
+
+	interSvc := NewKBInteractionService(interRepo, kbRepo, assetRepo, domainRepo, nil, nil, userRepo)
+	userSvc := NewUserService(userRepo, interRepo, domainRepo, nil, nil)
+
+	// Folder favorite toggle should succeed
+	fav, err := interSvc.ToggleFavorite(2, false, 20, 200, 0)
+	if err != nil || !fav {
+		t.Fatalf("expected folder ToggleFavorite=true, got %v err=%v", fav, err)
+	}
+
+	// GetInteractions should work on folder and reflect favorited_by_me=true
+	interRes, err := interSvc.GetInteractions(2, false, 20, 200, 0)
+	if err != nil || !interRes.FavoritedByMe {
+		t.Fatalf("expected GetInteractions FavoritedByMe=true on folder, got %+v err=%v", interRes, err)
+	}
+
+	// Like and comment should still be rejected on folder
+	if _, err := interSvc.ToggleLike(2, false, 20, 200, 0); err == nil {
+		t.Fatalf("expected ToggleLike on folder to fail")
+	} else {
+		assertAppErrStatus(t, err, http.StatusBadRequest)
+	}
+	if _, err := interSvc.CreateComment(2, false, 20, 200, model.CreateKBCommentRequest{Content: "hi"}, 0); err == nil {
+		t.Fatalf("expected CreateComment on folder to fail")
+	} else {
+		assertAppErrStatus(t, err, http.StatusBadRequest)
+	}
+
+	// UserService.GetMyFavorites should include IsFolder=true
+	favList, err := userSvc.GetMyFavorites(2)
+	if err != nil {
+		t.Fatalf("GetMyFavorites failed: %v", err)
+	}
+	if len(favList) != 1 || favList[0].DocID != 200 || !favList[0].IsFolder {
+		t.Fatalf("expected IsFolder=true in UserFavoriteItem, got %+v", favList)
+	}
+}
+
+func TestMessageService_ContactsAndShareAssetCard(t *testing.T) {
+	userRepo := &mockSocialUserRepo{
+		users: map[uint64]*model.SysUser{
+			1: {ID: 1, Username: "alice", Nickname: "Alice", Status: model.UserStatusActive},
+			2: {ID: 2, Username: "bob", Nickname: "Bob", Status: model.UserStatusActive},
+			3: {ID: 3, Username: "charlie", Nickname: "Charlie", Status: model.UserStatusActive},
+			4: {ID: 4, Username: "disabled", Nickname: "Disabled", Status: model.UserStatusDisabled},
+		},
+	}
+	domainRepo := &mockP1DomainRepo{
+		domains: map[uint64]*model.BizDomain{
+			10: {ID: 10, DomainName: "AI Domain", Visibility: model.DomainVisibilityPrivate, OwnerID: 1},
+		},
+		members: map[uint64]map[uint64]string{
+			10: {
+				1: model.DomainRoleOwner,
+				2: model.DomainRoleMember,
+				// User 3 is not a member of domain 10
+			},
+		},
+	}
+	assetRepo := &mockP1AssetRepo{
+		assets: map[uint64]*model.AIAsset{
+			50: {
+				ID:         50,
+				DomainID:   10,
+				OwnerID:    1,
+				Name:       "Private KB",
+				AssetType:  model.AssetTypeKB,
+				Visibility: model.VisibilityDomain,
+				Status:     model.AssetStatusPublished,
+			},
+		},
+	}
+	kbRepo := newMockFileKBRepo()
+	kbRepo.docs[501] = &model.KBDocument{
+		ID:        501,
+		KBAssetID: 50,
+		FileName:  "Architecture.md",
+		IsFolder:  false,
+	}
+
+	msgRepo := newMockMessageRepo()
+	msgRepo.contacts = map[uint64][]model.ContactUserItem{
+		1: {
+			{
+				ID:       2,
+				Username: "bob",
+				Nickname: "Bob",
+				Sources:  []model.ContactSource{{Type: "domain", ID: 10, Name: "AI Domain"}},
+			},
+		},
+	}
+
+	msgSvc := NewMessageService(msgRepo, userRepo)
+	msgSvc.SetAssetAccessRepos(assetRepo, kbRepo, domainRepo, nil, nil, nil)
+
+	// ListContacts returns domain/org peers
+	contacts, err := msgSvc.ListContacts(1)
+	if err != nil || len(contacts) != 1 || contacts[0].ID != 2 {
+		t.Fatalf("unexpected ListContacts result: %+v err=%v", contacts, err)
+	}
+
+	// Unauthorized sender (user 3) cannot share domain-private asset 50
+	_, err = msgSvc.ShareAssetCard(3, false, model.ShareAssetCardRequest{
+		RecipientIDs: []uint64{2},
+		AssetID:      50,
+		DocID:        501,
+	})
+	assertAppErrStatus(t, err, http.StatusForbidden)
+
+	// Authorized sender (user 1) shares KB doc card to [2, 2, 1, 3] -> deduplicates 2 and excludes self (1) => sent_count=2
+	sent, err := msgSvc.ShareAssetCard(1, false, model.ShareAssetCardRequest{
+		RecipientIDs: []uint64{2, 2, 1, 3},
+		AssetID:      50,
+		DocID:        501,
+		Note:         "Check this doc",
+	})
+	if err != nil || sent != 2 {
+		t.Fatalf("expected sent=2, got %d err=%v", sent, err)
+	}
+	if len(msgRepo.msgs) != 2 {
+		t.Fatalf("expected 2 persisted messages, got %d", len(msgRepo.msgs))
+	}
+	for _, m := range msgRepo.msgs {
+		if m.MsgType != model.MessageTypeAssetCard {
+			t.Fatalf("expected MsgType=asset_card, got %s", m.MsgType)
+		}
+		var payload model.AssetCardPayload
+		if err := json.Unmarshal([]byte(m.Payload), &payload); err != nil {
+			t.Fatalf("invalid payload JSON: %v", err)
+		}
+		if payload.AssetID != 50 || payload.DocID != 501 || payload.DocName != "Architecture.md" || payload.Note != "Check this doc" {
+			t.Fatalf("unexpected sanitized payload: %+v", payload)
+		}
+	}
+	for _, conv := range msgRepo.convs {
+		if conv.LastMessagePreview != "[知识库卡片] Architecture.md" {
+			t.Fatalf("unexpected LastMessagePreview: %q", conv.LastMessagePreview)
+		}
+	}
+}
+
+func TestAssetService_CheckAssetAccess(t *testing.T) {
+	domainRepo := &mockP1DomainRepo{
+		domains: map[uint64]*model.BizDomain{
+			10: {ID: 10, DomainName: "Source Domain", Visibility: model.DomainVisibilityPrivate, OwnerID: 1},
+			11: {ID: 11, DomainName: "Target Domain", Visibility: model.DomainVisibilityPrivate, OwnerID: 3},
+		},
+		members: map[uint64]map[uint64]string{
+			10: {1: model.DomainRoleOwner},
+			11: {3: model.DomainRoleOwner},
+		},
+	}
+	assetRepo := &mockP1AssetRepo{
+		assets: map[uint64]*model.AIAsset{
+			60: {
+				ID:         60,
+				DomainID:   10,
+				OwnerID:    1,
+				Name:       "Domain KB",
+				AssetType:  model.AssetTypeKB,
+				Visibility: model.VisibilityDomain,
+				Status:     model.AssetStatusPublished,
+			},
+		},
+	}
+	kbRepo := newMockFileKBRepo()
+	kbRepo.docs[601] = &model.KBDocument{
+		ID:        601,
+		KBAssetID: 60,
+		FileName:  "Spec.md",
+	}
+	crossRefRepo := newMockCrossRefRepo(nil)
+	crossRefRepo.refs[1] = &model.DomainCrossRef{
+		ID:             1,
+		TargetDomainID: 11,
+		SourceDomainID: 10,
+		RefType:        model.CrossRefTypeKBFile,
+		SourceAssetID:  60,
+		SourceDocID:    601,
+		Status:         model.CrossRefStatusActive,
+	}
+
+	assetSvc := NewAssetService(assetRepo, domainRepo, nil, nil, "")
+	assetSvc.SetKBRepo(kbRepo)
+	assetSvc.SetCrossRefRepo(crossRefRepo)
+
+	// Authorized owner (user 1)
+	res, err := assetSvc.CheckAssetAccess(1, false, 60, 601, 0)
+	if err != nil || !res.Accessible || res.AssetType != model.AssetTypeKB || res.DomainID != 10 {
+		t.Fatalf("expected accessible=true for owner, got %+v err=%v", res, err)
+	}
+
+	// Outsider (user 2) -> accessible=false without error
+	res, err = assetSvc.CheckAssetAccess(2, false, 60, 601, 0)
+	if err != nil || res.Accessible || res.Reason == "" {
+		t.Fatalf("expected accessible=false for outsider, got %+v err=%v", res, err)
+	}
+
+	// Cross-referenced domain member (user 3) with ref_domain_id=11 -> accessible=true
+	res, err = assetSvc.CheckAssetAccess(3, false, 60, 601, 11)
+	if err != nil || !res.Accessible {
+		t.Fatalf("expected accessible=true via cross-ref for user 3, got %+v err=%v", res, err)
+	}
+
+	// Missing doc -> accessible=false
+	res, err = assetSvc.CheckAssetAccess(1, false, 60, 9999, 0)
+	if err != nil || res.Accessible || res.Reason != "文档不存在或已被删除" {
+		t.Fatalf("expected accessible=false for missing doc, got %+v err=%v", res, err)
 	}
 }

@@ -90,6 +90,8 @@ func main() {
 	crossRefSvc.SetAuditRepos(auditRepo, userRepo)
 
 	assetSvc.SetCrossRefRepo(crossRefRepo)
+	assetSvc.SetKBRepo(kbRepo)
+	msgSvc.SetAssetAccessRepos(assetRepo, kbRepo, domainRepo, orgRepo, govRepo, crossRefRepo)
 	kbSvc.SetCrossRefRepo(crossRefRepo)
 	kbSvc.SetInteractionRepo(kbInteractionRepo)
 	domainSvc.SetCrossRefRepo(crossRefRepo)
@@ -162,11 +164,13 @@ func main() {
 	protected.GET("/users/:id/favorites", userHandler.GetUserFavorites)
 
 	protected.GET("/messages/unread-count", msgHandler.GetUnreadCount)
+	protected.GET("/messages/contacts", msgHandler.ListContacts)
 	protected.GET("/messages/conversations", msgHandler.ListConversations)
 	protected.POST("/messages/conversations", msgHandler.CreateConversation)
 	protected.GET("/messages/conversations/:id/messages", msgHandler.ListMessages)
 	protected.POST("/messages/conversations/:id/messages", msgHandler.SendMessage)
 	protected.POST("/messages/conversations/:id/read", msgHandler.MarkRead)
+	protected.POST("/messages/share-card", msgHandler.ShareAssetCard)
 
 	protected.GET("/orgs", orgHandler.ListOrgs)
 	protected.POST("/orgs", orgHandler.CreateOrg)
@@ -194,6 +198,7 @@ func main() {
 
 	protected.GET("/assets", assetHandler.ListAssets)
 	protected.GET("/assets/:id", assetHandler.GetAsset)
+	protected.GET("/assets/:id/access-check", assetHandler.CheckAssetAccess)
 	protected.POST("/assets", assetHandler.CreateAsset)
 	protected.PUT("/assets/:id", assetHandler.UpdateAsset)
 	protected.DELETE("/assets/:id", assetHandler.DeleteAsset)

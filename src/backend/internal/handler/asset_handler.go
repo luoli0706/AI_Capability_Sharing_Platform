@@ -91,6 +91,23 @@ func (h *AssetHandler) GetAsset(c echo.Context) error {
 	return response.Success(c, detail)
 }
 
+func (h *AssetHandler) CheckAssetAccess(c echo.Context) error {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return nil
+	}
+	docID, _ := strconv.ParseUint(c.QueryParam("doc_id"), 10, 64)
+	refDomainID, _ := strconv.ParseUint(c.QueryParam("ref_domain_id"), 10, 64)
+
+	userID := middleware.GetUserID(c)
+	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
+	result, err := h.assetSvc.CheckAssetAccess(userID, isSuperAdmin, id, docID, refDomainID)
+	if err != nil {
+		return service.HandleError(c, err)
+	}
+	return response.Success(c, result)
+}
+
 func (h *AssetHandler) CreateAsset(c echo.Context) error {
 	var req model.CreateAssetRequest
 	if !bindAndValidate(c, &req) {

@@ -7,6 +7,7 @@ import {
   ChatDotRound,
   Collection,
   Document,
+  Folder,
   Lock,
   Setting
 } from '@element-plus/icons-vue'
@@ -193,8 +194,14 @@ onMounted(() => {
               @click="goToFavoriteDoc(item)"
             >
               <div class="fav-item-top">
-                <el-icon :size="18" color="#4F46E5"><Document /></el-icon>
+                <el-icon :size="18" :color="item.is_folder ? '#F59E0B' : '#4F46E5'">
+                  <Folder v-if="item.is_folder" />
+                  <Document v-else />
+                </el-icon>
                 <span class="fav-filename mono-text">{{ item.file_name }}</span>
+                <el-tag v-if="item.is_folder" size="small" type="warning" effect="plain">
+                  文件夹
+                </el-tag>
               </div>
               <div class="fav-item-meta">
                 <el-tag size="small" type="info" effect="plain">{{ item.domain_name }}</el-tag>

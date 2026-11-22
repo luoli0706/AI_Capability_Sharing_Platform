@@ -1,8 +1,18 @@
 import { apiGet, apiPost } from './request'
-import type { ConversationItem, UserMessageItem } from '@/types/api'
+import type {
+  ConversationItem,
+  MessageContactItem,
+  SendMessagePayload,
+  ShareAssetCardPayload,
+  UserMessageItem
+} from '@/types/api'
 
 export function getUnreadMessageCount(): Promise<{ unread_count: number }> {
   return apiGet<{ unread_count: number }>('/messages/unread-count')
+}
+
+export function getMessageContacts(): Promise<{ list: MessageContactItem[] } | MessageContactItem[]> {
+  return apiGet<{ list: MessageContactItem[] } | MessageContactItem[]>('/messages/contacts')
 }
 
 export function listConversations(): Promise<{ list: ConversationItem[] } | ConversationItem[]> {
@@ -25,10 +35,23 @@ export function listMessages(
   )
 }
 
-export function sendMessage(conversationId: number, content: string): Promise<UserMessageItem> {
-  return apiPost<UserMessageItem, { content: string }>(
+export function sendMessage(
+  conversationId: number,
+  payload: string | SendMessagePayload
+): Promise<UserMessageItem> {
+  const body: SendMessagePayload = typeof payload === 'string' ? { content: payload } : payload
+  return apiPost<UserMessageItem, SendMessagePayload>(
     `/messages/conversations/${conversationId}/messages`,
-    { content }
+    body
+  )
+}
+
+export function shareAssetCard(
+  payload: ShareAssetCardPayload
+): Promise<{ sent_count?: number; results?: unknown[] } | null> {
+  return apiPost<{ sent_count?: number; results?: unknown[] } | null, ShareAssetCardPayload>(
+    '/messages/share-card',
+    payload
   )
 }
 

@@ -115,6 +115,7 @@ type UserFavoriteItem struct {
 	FileName   string    `json:"file_name"`
 	FolderPath string    `json:"folder_path"`
 	FileExt    string    `json:"file_ext"`
+	IsFolder   bool      `json:"is_folder"`
 	CreatedAt  time.Time `json:"created_at"`
 
 	DomainVisibility string `json:"-"`

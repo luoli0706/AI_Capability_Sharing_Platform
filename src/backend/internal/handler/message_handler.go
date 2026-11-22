@@ -37,6 +37,15 @@ func (h *MessageHandler) ListConversations(c echo.Context) error {
 	return response.Success(c, map[string]interface{}{"list": list})
 }
 
+func (h *MessageHandler) ListContacts(c echo.Context) error {
+	userID := middleware.GetUserID(c)
+	list, err := h.msgSvc.ListContacts(userID)
+	if err != nil {
+		return service.HandleError(c, err)
+	}
+	return response.Success(c, map[string]interface{}{"list": list})
+}
+
 func (h *MessageHandler) CreateConversation(c echo.Context) error {
 	var req model.CreateConversationRequest
 	if !bindAndValidate(c, &req) {
@@ -82,11 +91,26 @@ func (h *MessageHandler) SendMessage(c echo.Context) error {
 		return nil
 	}
 	userID := middleware.GetUserID(c)
-	msg, err := h.msgSvc.SendMessage(userID, convID, req.Content)
+	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
+	msg, err := h.msgSvc.SendMessageReq(userID, isSuperAdmin, convID, req)
 	if err != nil {
 		return service.HandleError(c, err)
 	}
 	return response.Success(c, msg)
+}
+
+func (h *MessageHandler) ShareAssetCard(c echo.Context) error {
+	var req model.ShareAssetCardRequest
+	if !bindAndValidate(c, &req) {
+		return nil
+	}
+	userID := middleware.GetUserID(c)
+	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
+	sentCount, err := h.msgSvc.ShareAssetCard(userID, isSuperAdmin, req)
+	if err != nil {
+		return service.HandleError(c, err)
+	}
+	return response.Success(c, map[string]interface{}{"sent_count": sentCount})
 }
 
 func (h *MessageHandler) MarkRead(c echo.Context) error {

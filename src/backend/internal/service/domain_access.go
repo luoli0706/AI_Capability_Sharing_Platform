@@ -1,8 +1,12 @@
 package service
 
 import (
+	"errors"
+
 	"ascp-backend/internal/model"
 	"ascp-backend/internal/repository"
+
+	"gorm.io/gorm"
 )
 
 // hasDomainAccess checks if userID is an explicit member of domainID OR
@@ -92,4 +96,143 @@ func canAccessKBAsset(
 	default:
 		return false
 	}
+}
+
+type assetDocAccessDetail struct {
+	Result *model.AssetAccessCheckResult
+	Asset  *model.AssetDetail
+	Doc    *model.KBDocument
+}
+
+// checkAssetAndDocAccess verifies whether userID has read access to assetID (and docID if > 0),
+// including cross-reference fallback when refDomainID > 0.
+func checkAssetAndDocAccess(
+	assetRepo repository.AssetRepository,
+	kbRepo repository.KBRepository,
+	domainRepo repository.DomainRepository,
+	orgRepo repository.OrgRepository,
+	govRepo repository.GovernanceRepository,
+	crossRefRepo repository.CrossRefRepository,
+	userID uint64,
+	isSuperAdmin bool,
+	assetID, docID, refDomainID uint64,
+) (*assetDocAccessDetail, error) {
+	detail, err := assetRepo.GetDetailByID(assetID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return &assetDocAccessDetail{
+				Result: &model.AssetAccessCheckResult{
+					Accessible: false,
+					Reason:     "资产不存在或已被删除",
+				},
+			}, nil
+		}
+		return nil, err
+	}
+
+	allowed := false
+	if isSuperAdmin || detail.OwnerID == userID {
+		allowed = true
+	} else {
+		role, err := domainRepo.GetMemberRole(detail.DomainID, userID)
+		if err != nil {
+			return nil, err
+		}
+		if role == model.DomainRoleOwner || role == model.DomainRoleAdmin {
+			allowed = true
+		} else if detail.Status == model.AssetStatusPublished {
+			switch detail.Visibility {
+			case model.VisibilityPublic:
+				allowed = true
+			case model.VisibilityDomain:
+				ok, err := hasDomainAccess(domainRepo, orgRepo, detail.DomainID, userID)
+				if err != nil {
+					return nil, err
+				}
+				allowed = ok
+			}
+			if !allowed && govRepo != nil {
+				if perm, _ := govRepo.GetActiveUserPermission(assetID, userID); perm != nil {
+					allowed = true
+				}
+			}
+		}
+	}
+
+	if !allowed && refDomainID > 0 && crossRefRepo != nil {
+		hasTargetAccess, err := hasDomainAccess(domainRepo, orgRepo, refDomainID, userID)
+		if err != nil {
+			return nil, err
+		}
+		if hasTargetAccess {
+			var hasRef bool
+			if docID == 0 {
+				hasRef, err = crossRefRepo.HasActiveAssetRef(refDomainID, assetID)
+			} else {
+				hasRef, err = crossRefRepo.HasActiveDocOrAssetRef(refDomainID, assetID, docID)
+			}
+			if err != nil {
+				return nil, err
+			}
+			if hasRef {
+				allowed = true
+			}
+		}
+	}
+
+	if !allowed {
+		return &assetDocAccessDetail{
+			Result: &model.AssetAccessCheckResult{
+				Accessible: false,
+				Reason:     "无权访问该资产",
+				AssetType:  detail.AssetType,
+				DomainID:   detail.DomainID,
+			},
+			Asset: detail,
+		}, nil
+	}
+
+	var doc *model.KBDocument
+	if docID > 0 {
+		if detail.AssetType != model.AssetTypeKB {
+			return &assetDocAccessDetail{
+				Result: &model.AssetAccessCheckResult{
+					Accessible: false,
+					Reason:     "该资产不是知识库",
+					AssetType:  detail.AssetType,
+					DomainID:   detail.DomainID,
+				},
+				Asset: detail,
+			}, nil
+		}
+		if kbRepo != nil {
+			foundDoc, err := kbRepo.FindDocumentByID(assetID, docID)
+			if err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return &assetDocAccessDetail{
+						Result: &model.AssetAccessCheckResult{
+							Accessible: false,
+							Reason:     "文档不存在或已被删除",
+							AssetType:  detail.AssetType,
+							DomainID:   detail.DomainID,
+						},
+						Asset: detail,
+					}, nil
+				}
+				return nil, err
+			}
+			doc = foundDoc
+		}
+	}
+
+	return &assetDocAccessDetail{
+		Result: &model.AssetAccessCheckResult{
+			Accessible: true,
+			Reason:     "",
+			AssetType:  detail.AssetType,
+			DomainID:   detail.DomainID,
+		},
+		Asset: detail,
+		Doc:   doc,
+	}, nil
 }

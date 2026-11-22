@@ -11,8 +11,10 @@ import {
   Key,
   Picture,
   Promotion,
+  Share,
   VideoPlay
 } from '@element-plus/icons-vue'
+import ShareAssetDialog from '@/components/ShareAssetDialog.vue'
 import { downloadAgentConfig, downloadSkillPackage, getAssetDetail, subscribeAsset } from '@/api/asset'
 import { createApproval } from '@/api/approval'
 import { invokeAgent, invokeKBQuery, invokeMCP, invokeSkill } from '@/api/invoke'
@@ -52,6 +54,7 @@ const detail = ref<AssetItem | null>(null)
 const activeTab = ref('overview')
 
 const subscribing = ref(false)
+const shareDialogOpen = ref(false)
 const approvalModalOpen = ref(false)
 const approvalFormRef = ref<FormInstance>()
 const submittingApproval = ref(false)
@@ -541,22 +544,31 @@ async function handleRunInvoke() {
           </el-tag>
         </div>
 
-        <div v-if="showActions && detail.status === 'published'" class="detail-action-bar">
+        <div class="detail-action-bar">
+          <template v-if="showActions && detail.status === 'published'">
+            <el-button
+              type="primary"
+              size="small"
+              :icon="Promotion"
+              :loading="subscribing"
+              @click="handleSubscribe"
+            >
+              一键订阅
+            </el-button>
+            <el-button
+              size="small"
+              :icon="Key"
+              @click="openApprovalModal"
+            >
+              发起权限申请
+            </el-button>
+          </template>
           <el-button
-            type="primary"
             size="small"
-            :icon="Promotion"
-            :loading="subscribing"
-            @click="handleSubscribe"
+            :icon="Share"
+            @click="shareDialogOpen = true"
           >
-            一键订阅
-          </el-button>
-          <el-button
-            size="small"
-            :icon="Key"
-            @click="openApprovalModal"
-          >
-            发起权限申请
+            分享
           </el-button>
         </div>
       </div>
@@ -1049,6 +1061,16 @@ async function handleRunInvoke() {
         </el-button>
       </template>
     </el-dialog>
+
+    <ShareAssetDialog
+      v-if="detail"
+      v-model="shareDialogOpen"
+      :asset-id="detail.id"
+      :asset-name="detail.name"
+      :asset-type="detail.asset_type"
+      :domain-id="detail.domain_id"
+      :domain-name="detail.domain_name"
+    />
   </el-drawer>
 </template>
 
