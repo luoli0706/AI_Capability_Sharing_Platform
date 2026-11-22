@@ -1,8 +1,14 @@
 import request, { apiGet, apiPost } from './request'
 import type { SevenOInspectResult, SevenOReleaseItem } from '@/types/api'
 
-export function getSevenOReleases(): Promise<SevenOReleaseItem[]> {
-  return apiGet<SevenOReleaseItem[]>('/tools/7o/releases')
+export async function getSevenOReleases(): Promise<SevenOReleaseItem[]> {
+  const data = await apiGet<{ list?: SevenOReleaseItem[] } | SevenOReleaseItem[]>(
+    '/tools/7o/releases'
+  )
+  if (Array.isArray(data)) {
+    return data
+  }
+  return Array.isArray(data?.list) ? data.list : []
 }
 
 export async function downloadSevenORelease(filename: string): Promise<Blob> {
