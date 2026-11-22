@@ -5,6 +5,7 @@ import {
   ArrowLeft,
   ArrowRight,
   Check,
+  Close,
   Collection,
   CopyDocument,
   Delete,
@@ -17,11 +18,16 @@ import {
   FolderOpened,
   Picture,
   Refresh,
+  RefreshRight,
   Search,
-  Upload
+  Upload,
+  ZoomIn,
+  ZoomOut
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getAssets } from '@/api/asset'
+import CrossRefSection from '@/components/CrossRefSection.vue'
+import { extractFilesFromDrop, getFileRelativePath, isFileDragEvent } from '@/utils/dropFiles'
 import {
   copyDocument,
   createKbFile,
@@ -86,6 +92,7 @@ const selectedFileNode = ref<KbTreeNode | null>(null)
 const clipboardFile = ref<{ kbId: number; docId: number; fileName: string } | null>(null)
 const pasting = ref(false)
 const uploading = ref(false)
+const kbDragDepth = ref(0)
 const fileInputRef = ref<HTMLInputElement | null>(null)
 const folderInputRef = ref<HTMLInputElement | null>(null)
 
@@ -124,18 +131,42 @@ const currentImageIndex = computed(() => {
   const idx = sameFolderImages.value.findIndex((d) => d.id === imageDoc.value?.id)
   return idx >= 0 ? idx : 0
 })
-const folderImageUrls = computed(() =>
-  sameFolderImages.value.map((d) => imageUrlMap.value[d.id] || '')
-)
+
+// Background image preloading & controlled lightbox state
+const preloadingImageIds = new Set<number>()
+const decodedImageElements = new Map<number, HTMLImageElement>()
+const lightboxOpen = ref(false)
+const lightboxScale = ref(1)
+const lightboxTranslateX = ref(0)
+const lightboxTranslateY = ref(0)
+const lightboxRotate = ref(0)
+const lightboxDragging = ref(false)
+let dragStartX = 0
+let dragStartY = 0
+let dragOriginX = 0
+let dragOriginY = 0
+
+function decodeImageIntoMemory(docId: number, url: string) {
+  if (!url || decodedImageElements.has(docId)) return
+  const img = new Image()
+  img.src = url
+  if (typeof img.decode === 'function') {
+    img.decode().catch(() => {})
+  }
+  decodedImageElements.set(docId, img)
+}
 
 function revokeAllImageUrls() {
   for (const url of Object.values(imageUrlMap.value)) {
     if (url) URL.revokeObjectURL(url)
   }
   imageUrlMap.value = {}
+  preloadingImageIds.clear()
+  decodedImageElements.clear()
 }
 
 function resetPreviewState() {
+  lightboxOpen.value = false
   revokeAllImageUrls()
   sameFolderImages.value = []
   previewDoc.value = null
@@ -380,23 +411,24 @@ function triggerFolderUpload() {
   folderInputRef.value?.click()
 }
 
-async function handleFilesSelected(event: Event) {
-  const input = event.target as HTMLInputElement
-  const files = input.files
-  if (!files || files.length === 0 || !selectedKbId.value) return
+async function uploadFileList(files: File[], preserveRelativePath = false) {
+  if (!selectedKbId.value || files.length === 0) return
 
   uploading.value = true
   let uploadedCount = 0
   try {
-    for (const file of Array.from(files)) {
+    for (const file of files) {
       if (file.size > MAX_KB_FILE_SIZE) {
         ElMessage.warning(`文件「${file.name}」超过 10MB 限制，已跳过`)
         continue
       }
+      const relPath = getFileRelativePath(file)
+      const useRelPath = preserveRelativePath || relPath.includes('/')
       await uploadDocument(
         selectedKbId.value,
         file,
-        selectedFolderPath.value || undefined
+        selectedFolderPath.value || undefined,
+        useRelPath ? relPath : undefined
       )
       uploadedCount++
     }
@@ -408,43 +440,48 @@ async function handleFilesSelected(event: Event) {
     // Handled by interceptor
   } finally {
     uploading.value = false
-    input.value = ''
   }
+}
+
+async function handleFilesSelected(event: Event) {
+  const input = event.target as HTMLInputElement
+  const files = input.files ? Array.from(input.files) : []
+  input.value = ''
+  await uploadFileList(files, false)
 }
 
 async function handleFolderSelected(event: Event) {
   const input = event.target as HTMLInputElement
-  const files = input.files
-  if (!files || files.length === 0 || !selectedKbId.value) return
+  const files = input.files ? Array.from(input.files) : []
+  input.value = ''
+  await uploadFileList(files, true)
+}
 
-  const allFiles = Array.from(files)
-  uploading.value = true
-  let uploadedCount = 0
-  try {
-    for (const file of allFiles) {
-      if (file.size > MAX_KB_FILE_SIZE) {
-        ElMessage.warning(`文件「${file.name}」超过 10MB 限制，已跳过`)
-        continue
-      }
-      const relPath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name
-      await uploadDocument(
-        selectedKbId.value,
-        file,
-        selectedFolderPath.value || undefined,
-        relPath
-      )
-      uploadedCount++
-    }
-    if (uploadedCount > 0) {
-      ElMessage.success(`成功上传文件夹内 ${uploadedCount} 个文件`)
-      refreshTree()
-    }
-  } catch {
-    // Handled by interceptor
-  } finally {
-    uploading.value = false
-    input.value = ''
-  }
+function handleKbDragEnter(e: DragEvent) {
+  if (!isFileDragEvent(e) || !selectedKbId.value) return
+  e.preventDefault()
+  kbDragDepth.value++
+}
+
+function handleKbDragOver(e: DragEvent) {
+  if (!isFileDragEvent(e) || !selectedKbId.value) return
+  e.preventDefault()
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
+}
+
+function handleKbDragLeave(e: DragEvent) {
+  if (!isFileDragEvent(e)) return
+  kbDragDepth.value = Math.max(0, kbDragDepth.value - 1)
+}
+
+async function handleKbDrop(e: DragEvent) {
+  if (!isFileDragEvent(e)) return
+  e.preventDefault()
+  kbDragDepth.value = 0
+  if (!selectedKbId.value) return
+  const files = await extractFilesFromDrop(e)
+  if (files.length === 0) return
+  await uploadFileList(files, false)
 }
 
 async function loadPreviewDoc(
@@ -494,15 +531,48 @@ async function handleSaveEdit() {
 
 async function ensureImageUrl(doc: KbDocument) {
   if (!selectedKbId.value) return
-  if (imageUrlMap.value[doc.id]) return
+  const existing = imageUrlMap.value[doc.id]
+  if (existing) {
+    decodeImageIntoMemory(doc.id, existing)
+    return
+  }
   loadingImageBlob.value = true
   try {
     const blob = await getDocumentRawBlob(selectedKbId.value, doc.id, doc.file_name)
     const url = URL.createObjectURL(blob)
     imageUrlMap.value = { ...imageUrlMap.value, [doc.id]: url }
+    decodeImageIntoMemory(doc.id, url)
   } finally {
     loadingImageBlob.value = false
   }
+}
+
+async function preloadImageDoc(doc: KbDocument | undefined) {
+  if (!doc || !selectedKbId.value) return
+  const existing = imageUrlMap.value[doc.id]
+  if (existing) {
+    decodeImageIntoMemory(doc.id, existing)
+    return
+  }
+  if (preloadingImageIds.has(doc.id)) return
+  preloadingImageIds.add(doc.id)
+  try {
+    const blob = await getDocumentRawBlob(selectedKbId.value, doc.id, doc.file_name)
+    const url = URL.createObjectURL(blob)
+    imageUrlMap.value = { ...imageUrlMap.value, [doc.id]: url }
+    decodeImageIntoMemory(doc.id, url)
+  } catch {
+    // 后台预加载静默失败，切换时会按需重试
+  } finally {
+    preloadingImageIds.delete(doc.id)
+  }
+}
+
+function preloadAdjacentImages(centerIndex: number) {
+  const nextDoc = sameFolderImages.value[centerIndex + 1]
+  const prevDoc = sameFolderImages.value[centerIndex - 1]
+  if (nextDoc) void preloadImageDoc(nextDoc)
+  if (prevDoc) void preloadImageDoc(prevDoc)
 }
 
 async function selectImageAtIndex(idx: number) {
@@ -510,10 +580,74 @@ async function selectImageAtIndex(idx: number) {
   if (!target) return
   imageDoc.value = target
   await ensureImageUrl(target)
+  preloadAdjacentImages(idx)
 }
 
-function handleLightboxSwitch(index: number) {
-  selectImageAtIndex(index)
+function openLightbox() {
+  if (!imagePreviewUrl.value) return
+  lightboxScale.value = 1
+  lightboxTranslateX.value = 0
+  lightboxTranslateY.value = 0
+  lightboxRotate.value = 0
+  lightboxOpen.value = true
+  preloadAdjacentImages(currentImageIndex.value)
+}
+
+function closeLightbox() {
+  lightboxOpen.value = false
+  lightboxDragging.value = false
+}
+
+function stepLightbox(delta: number) {
+  const nextIdx = currentImageIndex.value + delta
+  if (nextIdx < 0 || nextIdx >= sameFolderImages.value.length) return
+  // 保持当前缩放、平移与旋转状态，不关闭重建灯箱
+  void selectImageAtIndex(nextIdx)
+}
+
+function zoomLightbox(delta: number) {
+  const next = Math.min(5, Math.max(0.25, Number((lightboxScale.value + delta).toFixed(2))))
+  lightboxScale.value = next
+}
+
+function resetLightboxTransform() {
+  lightboxScale.value = 1
+  lightboxTranslateX.value = 0
+  lightboxTranslateY.value = 0
+  lightboxRotate.value = 0
+}
+
+function rotateLightbox() {
+  lightboxRotate.value = (lightboxRotate.value + 90) % 360
+}
+
+function handleLightboxWheel(e: WheelEvent) {
+  const step = e.deltaY < 0 ? 0.2 : -0.2
+  zoomLightbox(step)
+}
+
+function handleLightboxMouseDown(e: MouseEvent) {
+  if (e.button !== 0) return
+  e.preventDefault()
+  lightboxDragging.value = true
+  dragStartX = e.clientX
+  dragStartY = e.clientY
+  dragOriginX = lightboxTranslateX.value
+  dragOriginY = lightboxTranslateY.value
+  window.addEventListener('mousemove', handleLightboxMouseMove)
+  window.addEventListener('mouseup', handleLightboxMouseUp)
+}
+
+function handleLightboxMouseMove(e: MouseEvent) {
+  if (!lightboxDragging.value) return
+  lightboxTranslateX.value = dragOriginX + (e.clientX - dragStartX)
+  lightboxTranslateY.value = dragOriginY + (e.clientY - dragStartY)
+}
+
+function handleLightboxMouseUp() {
+  lightboxDragging.value = false
+  window.removeEventListener('mousemove', handleLightboxMouseMove)
+  window.removeEventListener('mouseup', handleLightboxMouseUp)
 }
 
 async function handleNodeClick(node: KbTreeNode) {
@@ -546,6 +680,7 @@ async function handleNodeClick(node: KbTreeNode) {
     imageDoc.value = doc
     try {
       await ensureImageUrl(doc)
+      preloadAdjacentImages(currentImageIndex.value)
     } catch {
       resetPreviewState()
     }
@@ -640,6 +775,34 @@ async function handlePaste(targetFolder?: string) {
 }
 
 function handleKeydown(e: KeyboardEvent) {
+  if (lightboxOpen.value) {
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      closeLightbox()
+      return
+    }
+    if (e.key === 'ArrowLeft') {
+      e.preventDefault()
+      stepLightbox(-1)
+      return
+    }
+    if (e.key === 'ArrowRight') {
+      e.preventDefault()
+      stepLightbox(1)
+      return
+    }
+    if (e.key === '+' || e.key === '=') {
+      e.preventDefault()
+      zoomLightbox(0.25)
+      return
+    }
+    if (e.key === '-') {
+      e.preventDefault()
+      zoomLightbox(-0.25)
+      return
+    }
+  }
+
   if (!(e.ctrlKey || e.metaKey)) return
   const key = e.key.toLowerCase()
   if (
@@ -755,6 +918,8 @@ onBeforeUnmount(() => {
   stopPolling()
   revokeAllImageUrls()
   window.removeEventListener('keydown', handleKeydown)
+  window.removeEventListener('mousemove', handleLightboxMouseMove)
+  window.removeEventListener('mouseup', handleLightboxMouseUp)
 })
 </script>
 
@@ -898,11 +1063,26 @@ onBeforeUnmount(() => {
 
       <!-- Split Tree + Preview/Search Workspace -->
       <div class="kb-columns">
-        <!-- Left: Folder & File Tree -->
-        <div class="surface-card kb-panel tree-panel">
+        <!-- Left: Folder & File Tree (supports desktop file/folder drag & drop) -->
+        <div
+          class="surface-card kb-panel tree-panel"
+          :class="{ 'is-file-dragover': kbDragDepth > 0 }"
+          @dragenter="handleKbDragEnter"
+          @dragover="handleKbDragOver"
+          @dragleave="handleKbDragLeave"
+          @drop="handleKbDrop"
+        >
+          <div v-if="kbDragDepth > 0" class="kb-drop-overlay">
+            <el-icon :size="32"><Upload /></el-icon>
+            <div class="kb-drop-title">释放鼠标即可上传文件或文件夹</div>
+            <div class="kb-drop-sub mono-text">
+              目标目录：{{ selectedFolderPath ? `/${selectedFolderPath}` : '/ (根目录)' }}
+            </div>
+          </div>
+
           <div class="panel-header">
             <h3 class="panel-title">目录与文件</h3>
-            <span class="doc-count tabular-nums">{{ loadedDocCount }} 项</span>
+            <span class="doc-count tabular-nums">{{ loadedDocCount }} 项 · 支持桌面拖拽上传</span>
           </div>
 
           <div v-loading="loadingDocs" class="tree-scroll">
@@ -1051,15 +1231,15 @@ onBeforeUnmount(() => {
                   </div>
                 </div>
                 <div v-loading="loadingImageBlob" class="image-preview-box">
-                  <el-image
+                  <div
                     v-if="imagePreviewUrl"
-                    :src="imagePreviewUrl"
-                    :preview-src-list="folderImageUrls"
-                    :initial-index="currentImageIndex"
-                    fit="contain"
-                    style="max-height: 480px; width: 100%"
-                    @switch="handleLightboxSwitch"
-                  />
+                    class="image-preview-trigger"
+                    title="点击放大并支持缩放状态下连续浏览"
+                    @click="openLightbox"
+                  >
+                    <img :src="imagePreviewUrl" :alt="imageDoc.file_name" class="inline-preview-img" />
+                    <span class="image-zoom-hint">点击放大连续浏览</span>
+                  </div>
                 </div>
               </div>
 
@@ -1292,6 +1472,105 @@ onBeforeUnmount(() => {
         </el-button>
       </template>
     </el-dialog>
+
+    <!-- Cross-Domain References Section -->
+    <CrossRefSection :domain-id="domainId" default-ref-type="kb_file" />
+
+    <!-- Controlled Persistent-Zoom Image Lightbox -->
+    <Teleport to="body">
+      <div
+        v-if="lightboxOpen && imageDoc"
+        class="kb-lightbox-backdrop"
+        @click.self="closeLightbox"
+        @wheel.prevent="handleLightboxWheel"
+      >
+        <div class="kb-lightbox-topbar">
+          <div class="kb-lightbox-title">
+            <span class="mono-text">{{ imageDoc.file_name }}</span>
+            <span class="kb-lightbox-meta tabular-nums">
+              {{ currentImageIndex + 1 }} / {{ sameFolderImages.length }} ·
+              {{ formatFileSize(imageDoc.file_size) }} ·
+              缩放 {{ Math.round(lightboxScale * 100) }}%
+            </span>
+          </div>
+          <button type="button" class="kb-lightbox-close" title="关闭 (Esc)" @click="closeLightbox">
+            <el-icon :size="20"><Close /></el-icon>
+          </button>
+        </div>
+
+        <button
+          v-if="sameFolderImages.length > 1"
+          type="button"
+          class="kb-lightbox-nav is-prev"
+          :disabled="currentImageIndex <= 0"
+          title="上一张 (←)"
+          @click="stepLightbox(-1)"
+        >
+          <el-icon :size="24"><ArrowLeft /></el-icon>
+        </button>
+
+        <div class="kb-lightbox-stage" @click.self="closeLightbox">
+          <img
+            v-if="imagePreviewUrl"
+            :src="imagePreviewUrl"
+            :alt="imageDoc.file_name"
+            class="kb-lightbox-img"
+            :class="{ 'is-dragging': lightboxDragging }"
+            :style="{
+              transform: `translate3d(${lightboxTranslateX}px, ${lightboxTranslateY}px, 0) scale(${lightboxScale}) rotate(${lightboxRotate}deg)`
+            }"
+            draggable="false"
+            @mousedown="handleLightboxMouseDown"
+          />
+          <div v-else class="kb-lightbox-loading">正在加载图片...</div>
+        </div>
+
+        <button
+          v-if="sameFolderImages.length > 1"
+          type="button"
+          class="kb-lightbox-nav is-next"
+          :disabled="currentImageIndex >= sameFolderImages.length - 1"
+          title="下一张 (→)"
+          @click="stepLightbox(1)"
+        >
+          <el-icon :size="24"><ArrowRight /></el-icon>
+        </button>
+
+        <div class="kb-lightbox-toolbar">
+          <button
+            type="button"
+            class="kb-tb-btn"
+            :disabled="currentImageIndex <= 0"
+            title="上一张 (←)"
+            @click="stepLightbox(-1)"
+          >
+            <el-icon :size="16"><ArrowLeft /></el-icon>
+          </button>
+          <button type="button" class="kb-tb-btn" title="缩小 (-)" @click="zoomLightbox(-0.25)">
+            <el-icon :size="16"><ZoomOut /></el-icon>
+          </button>
+          <span class="kb-tb-scale tabular-nums">{{ Math.round(lightboxScale * 100) }}%</span>
+          <button type="button" class="kb-tb-btn" title="放大 (+)" @click="zoomLightbox(0.25)">
+            <el-icon :size="16"><ZoomIn /></el-icon>
+          </button>
+          <button type="button" class="kb-tb-btn kb-tb-text" title="重置缩放与位置" @click="resetLightboxTransform">
+            1:1
+          </button>
+          <button type="button" class="kb-tb-btn" title="旋转 90°" @click="rotateLightbox">
+            <el-icon :size="16"><RefreshRight /></el-icon>
+          </button>
+          <button
+            type="button"
+            class="kb-tb-btn"
+            :disabled="currentImageIndex >= sameFolderImages.length - 1"
+            title="下一张 (→)"
+            @click="stepLightbox(1)"
+          >
+            <el-icon :size="16"><ArrowRight /></el-icon>
+          </button>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -1387,6 +1666,44 @@ onBeforeUnmount(() => {
 
 .kb-panel {
   padding: 18px 20px;
+}
+
+.tree-panel {
+  position: relative;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.tree-panel.is-file-dragover {
+  border-color: var(--ascp-primary);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.14);
+}
+
+.kb-drop-overlay {
+  position: absolute;
+  inset: 8px;
+  z-index: 20;
+  border-radius: 10px;
+  border: 2px dashed var(--ascp-primary);
+  background: rgba(238, 242, 255, 0.92);
+  color: var(--ascp-primary);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  text-align: center;
+  padding: 16px;
+  pointer-events: none;
+}
+
+.kb-drop-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.kb-drop-sub {
+  font-size: 12px;
+  color: var(--ascp-text-secondary);
 }
 
 .panel-header {
@@ -1642,6 +1959,207 @@ onBeforeUnmount(() => {
   padding: 16px;
   display: flex;
   justify-content: center;
+}
+
+.image-preview-trigger {
+  position: relative;
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  cursor: zoom-in;
+  max-width: 100%;
+}
+
+.inline-preview-img {
+  max-height: 480px;
+  max-width: 100%;
+  object-fit: contain;
+  border-radius: 6px;
+}
+
+.image-zoom-hint {
+  position: absolute;
+  bottom: 10px;
+  right: 10px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.72);
+  color: #f8fafc;
+  font-size: 12px;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  pointer-events: none;
+}
+
+.image-preview-trigger:hover .image-zoom-hint {
+  opacity: 1;
+}
+
+.kb-lightbox-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  background: rgba(15, 23, 42, 0.9);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+}
+
+.kb-lightbox-topbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 3002;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  background: linear-gradient(to bottom, rgba(15, 23, 42, 0.75), transparent);
+  color: #f8fafc;
+}
+
+.kb-lightbox-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.kb-lightbox-meta {
+  font-size: 12.5px;
+  color: #cbd5e1;
+}
+
+.kb-lightbox-close {
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(30, 41, 59, 0.75);
+  color: #f8fafc;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.kb-lightbox-close:hover {
+  background: rgba(51, 65, 85, 0.9);
+}
+
+.kb-lightbox-stage {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.kb-lightbox-img {
+  max-width: 88vw;
+  max-height: 82vh;
+  object-fit: contain;
+  cursor: grab;
+  transition: transform 0.08s ease-out;
+}
+
+.kb-lightbox-img.is-dragging {
+  cursor: grabbing;
+  transition: none;
+}
+
+.kb-lightbox-loading {
+  color: #e2e8f0;
+  font-size: 14px;
+}
+
+.kb-lightbox-nav {
+  position: fixed;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 3002;
+  width: 44px;
+  height: 44px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(30, 41, 59, 0.75);
+  color: #f8fafc;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.kb-lightbox-nav.is-prev {
+  left: 20px;
+}
+
+.kb-lightbox-nav.is-next {
+  right: 20px;
+}
+
+.kb-lightbox-nav:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.kb-lightbox-nav:not(:disabled):hover {
+  background: rgba(79, 70, 229, 0.85);
+}
+
+.kb-lightbox-toolbar {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3002;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(30, 41, 59, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: #f8fafc;
+}
+
+.kb-tb-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  border: none;
+  background: transparent;
+  color: #f8fafc;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.kb-tb-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.kb-tb-btn:not(:disabled):hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.kb-tb-text {
+  width: auto;
+  padding: 0 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.kb-tb-scale {
+  min-width: 46px;
+  text-align: center;
+  font-size: 12.5px;
+  color: #e2e8f0;
 }
 
 .binary-file-card {

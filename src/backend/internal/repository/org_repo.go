@@ -45,6 +45,16 @@ func (r *orgRepository) ListOrgs(userID uint64, q model.OrgQuery) ([]model.OrgLi
 			return []model.OrgListItem{}, 0, nil
 		}
 		tx = tx.Where("id IN ?", userOrgIDs)
+	} else if !q.IsSuperAdmin {
+		userOrgIDs, err := r.GetUserOrgIDs(userID)
+		if err != nil {
+			return nil, 0, err
+		}
+		if len(userOrgIDs) > 0 {
+			tx = tx.Where("(visibility = ? OR id IN ?)", model.OrgVisibilityPublic, userOrgIDs)
+		} else {
+			tx = tx.Where("visibility = ?", model.OrgVisibilityPublic)
+		}
 	}
 	if kw := strings.TrimSpace(q.Keyword); kw != "" {
 		like := "%" + kw + "%"
@@ -117,11 +127,16 @@ func (r *orgRepository) ListOrgs(userID uint64, q model.OrgQuery) ([]model.OrgLi
 
 	items := make([]model.OrgListItem, 0, len(orgs))
 	for _, o := range orgs {
+		vis := o.Visibility
+		if vis == "" {
+			vis = model.OrgVisibilityPublic
+		}
 		items = append(items, model.OrgListItem{
 			ID:          o.ID,
 			OrgCode:     o.OrgCode,
 			OrgName:     o.OrgName,
 			Description: o.Description,
+			Visibility:  vis,
 			OwnerID:     o.OwnerID,
 			Status:      o.Status,
 			MyRole:      roleMap[o.ID],
@@ -165,11 +180,16 @@ func (r *orgRepository) CreateWithOwner(org *model.BizOrganization) error {
 
 func (r *orgRepository) UpdateOrg(org *model.BizOrganization) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
+		vis := org.Visibility
+		if vis == "" {
+			vis = model.OrgVisibilityPublic
+		}
 		if err := tx.Model(&model.BizOrganization{}).
 			Where("id = ?", org.ID).
 			Updates(map[string]interface{}{
 				"org_name":    org.OrgName,
 				"description": org.Description,
+				"visibility":  vis,
 			}).Error; err != nil {
 			return err
 		}

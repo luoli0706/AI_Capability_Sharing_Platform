@@ -22,6 +22,7 @@ import {
   triggerBlobDownload
 } from '@/api/tools'
 import type { SevenOInspectResult, SevenOReleaseItem } from '@/types/api'
+import { extractFilesFromDrop, getFileRelativePath, isFileDragEvent } from '@/utils/dropFiles'
 import { formatDateTime, formatFileSize } from '@/utils/format'
 
 const releasesLoading = ref(false)
@@ -36,6 +37,7 @@ const encryptKey = ref('7thcv')
 const encryptLevel = ref<1 | 3 | 9>(3)
 const encrypting = ref(false)
 const encryptError = ref('')
+const encryptDragDepth = ref(0)
 
 // Decrypt state
 const decryptInputRef = ref<HTMLInputElement | null>(null)
@@ -46,6 +48,7 @@ const inspectResult = ref<SevenOInspectResult | null>(null)
 const inspectError = ref('')
 const decrypting = ref(false)
 const decryptError = ref('')
+const decryptDragDepth = ref(0)
 
 const LEVEL_OPTIONS: Array<{ value: 1 | 3 | 9; label: string; desc: string }> = [
   { value: 1, label: '极速 (Level 1)', desc: '压缩速度最快，适合大体积临时归档' },
@@ -58,10 +61,7 @@ const totalSelectedSize = computed(() =>
 )
 
 const previewFileNames = computed(() =>
-  selectedFiles.value.slice(0, 5).map((f) => {
-    const rel = (f as File & { webkitRelativePath?: string }).webkitRelativePath
-    return rel || f.name
-  })
+  selectedFiles.value.slice(0, 5).map((f) => getFileRelativePath(f))
 )
 
 const isWindowsExe = (item: SevenOReleaseItem): boolean =>
@@ -135,6 +135,34 @@ function clearEncryptFiles() {
   encryptError.value = ''
 }
 
+function handleEncryptDragEnter(e: DragEvent) {
+  if (!isFileDragEvent(e)) return
+  e.preventDefault()
+  encryptDragDepth.value++
+}
+
+function handleEncryptDragOver(e: DragEvent) {
+  if (!isFileDragEvent(e)) return
+  e.preventDefault()
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
+}
+
+function handleEncryptDragLeave(e: DragEvent) {
+  if (!isFileDragEvent(e)) return
+  encryptDragDepth.value = Math.max(0, encryptDragDepth.value - 1)
+}
+
+async function handleEncryptDrop(e: DragEvent) {
+  if (!isFileDragEvent(e)) return
+  e.preventDefault()
+  encryptDragDepth.value = 0
+  const files = await extractFilesFromDrop(e)
+  if (files.length > 0) {
+    selectedFiles.value = files
+    encryptError.value = ''
+  }
+}
+
 async function handleEncryptSubmit() {
   encryptError.value = ''
   if (selectedFiles.value.length === 0) {
@@ -151,8 +179,8 @@ async function handleEncryptSubmit() {
   try {
     const formData = new FormData()
     for (const file of selectedFiles.value) {
-      const rel = (file as File & { webkitRelativePath?: string }).webkitRelativePath
-      formData.append('files', file, rel || file.name)
+      const rel = getFileRelativePath(file)
+      formData.append('files', file, rel)
     }
     formData.append('key', key)
     formData.append('level', String(encryptLevel.value))
@@ -172,12 +200,7 @@ function triggerDecryptPicker() {
   decryptInputRef.value?.click()
 }
 
-async function handleDecryptFileChange(event: Event) {
-  const input = event.target as HTMLInputElement
-  const file = input.files?.[0] ?? null
-  input.value = ''
-  if (!file) return
-
+async function processDecryptFile(file: File) {
   decryptFile.value = file
   inspectResult.value = null
   inspectError.value = ''
@@ -192,6 +215,45 @@ async function handleDecryptFileChange(event: Event) {
   } finally {
     inspecting.value = false
   }
+}
+
+async function handleDecryptFileChange(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0] ?? null
+  input.value = ''
+  if (!file) return
+  await processDecryptFile(file)
+}
+
+function handleDecryptDragEnter(e: DragEvent) {
+  if (!isFileDragEvent(e)) return
+  e.preventDefault()
+  decryptDragDepth.value++
+}
+
+function handleDecryptDragOver(e: DragEvent) {
+  if (!isFileDragEvent(e)) return
+  e.preventDefault()
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
+}
+
+function handleDecryptDragLeave(e: DragEvent) {
+  if (!isFileDragEvent(e)) return
+  decryptDragDepth.value = Math.max(0, decryptDragDepth.value - 1)
+}
+
+async function handleDecryptDrop(e: DragEvent) {
+  if (!isFileDragEvent(e)) return
+  e.preventDefault()
+  decryptDragDepth.value = 0
+  const files = await extractFilesFromDrop(e)
+  const file = files[0]
+  if (!file) return
+  if (!file.name.toLowerCase().endsWith('.zip')) {
+    ElMessage.warning('请拖入 .zip 格式的压缩包文件')
+    return
+  }
+  await processDecryptFile(file)
 }
 
 function clearDecryptFile() {
@@ -343,7 +405,14 @@ onMounted(() => {
         </div>
 
         <div class="tool-form">
-          <div class="form-block">
+          <div
+            class="form-block drop-zone"
+            :class="{ 'is-dragover': encryptDragDepth > 0 }"
+            @dragenter="handleEncryptDragEnter"
+            @dragover="handleEncryptDragOver"
+            @dragleave="handleEncryptDragLeave"
+            @drop="handleEncryptDrop"
+          >
             <label class="block-label">1. 选择文件或文件夹</label>
             <input
               ref="fileInputRef"
@@ -397,7 +466,7 @@ onMounted(() => {
               </ul>
             </div>
             <div v-else class="empty-picker-hint">
-              支持单个/多个文件或完整文件夹目录结构上传打包
+              支持点击选择或直接从桌面拖入单个/多个文件或完整文件夹
             </div>
           </div>
 
@@ -468,7 +537,14 @@ onMounted(() => {
         </div>
 
         <div class="tool-form">
-          <div class="form-block">
+          <div
+            class="form-block drop-zone"
+            :class="{ 'is-dragover': decryptDragDepth > 0 }"
+            @dragenter="handleDecryptDragEnter"
+            @dragover="handleDecryptDragOver"
+            @dragleave="handleDecryptDragLeave"
+            @drop="handleDecryptDrop"
+          >
             <label class="block-label">1. 选择 .zip 压缩包</label>
             <input
               ref="decryptInputRef"
@@ -522,7 +598,7 @@ onMounted(() => {
               </div>
             </div>
             <div v-else class="empty-picker-hint">
-              选择 .zip 后将自动识别是否为 7thCV 加密包
+              支持点击选择或直接从桌面拖入 .zip 压缩包（自动识别是否为 7thCV 加密包）
             </div>
           </div>
 
@@ -826,6 +902,25 @@ onMounted(() => {
   font-size: 12.5px;
   color: var(--ascp-text-muted);
   text-align: center;
+}
+
+.drop-zone {
+  padding: 10px;
+  margin: -10px;
+  border-radius: 10px;
+  border: 1.5px dashed transparent;
+  transition: border-color 0.2s ease, background-color 0.2s ease;
+}
+
+.drop-zone.is-dragover {
+  border-color: var(--ascp-primary);
+  background: rgba(79, 70, 229, 0.05);
+}
+
+.drop-zone.is-dragover .empty-picker-hint,
+.drop-zone.is-dragover .selected-summary {
+  border-color: var(--ascp-primary);
+  background: rgba(79, 70, 229, 0.04);
 }
 
 .field-hint {

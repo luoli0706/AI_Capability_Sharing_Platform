@@ -93,6 +93,7 @@ type KBService interface {
 	CopyDocument(userID uint64, isSuperAdmin bool, kbID, docID uint64, targetFolderPath, newName string) (*model.KBDocument, error)
 	EncryptExistingPlainFiles(ctx context.Context) (int, error)
 	SetAuditRepos(auditRepo repository.AuditLogRepository, userRepo repository.UserRepository)
+	SetCrossRefRepo(crossRefRepo repository.CrossRefRepository)
 }
 
 type kbService struct {
@@ -101,6 +102,7 @@ type kbService struct {
 	domainRepo    repository.DomainRepository
 	govRepo       repository.GovernanceRepository
 	orgRepo       repository.OrgRepository
+	crossRefRepo  repository.CrossRefRepository
 	auditRepo     repository.AuditLogRepository
 	userRepo      repository.UserRepository
 	uploadDir     string
@@ -110,6 +112,10 @@ type kbService struct {
 func (s *kbService) SetAuditRepos(auditRepo repository.AuditLogRepository, userRepo repository.UserRepository) {
 	s.auditRepo = auditRepo
 	s.userRepo = userRepo
+}
+
+func (s *kbService) SetCrossRefRepo(crossRefRepo repository.CrossRefRepository) {
+	s.crossRefRepo = crossRefRepo
 }
 
 func NewKBService(
@@ -723,9 +729,22 @@ func (s *kbService) DeleteDocument(userID uint64, isSuperAdmin bool, kbID, docID
 	}
 
 	if doc.IsFolder {
+		var folderDocIDs []uint64
+		if s.crossRefRepo != nil {
+			if allDocs, listErr := s.kbRepo.ListDocuments(kbID); listErr == nil {
+				for _, d := range allDocs {
+					if d.FolderPath == doc.FolderPath || strings.HasPrefix(d.FolderPath, doc.FolderPath+"/") {
+						folderDocIDs = append(folderDocIDs, d.ID)
+					}
+				}
+			}
+		}
 		paths, err := s.kbRepo.DeleteFolderRecursive(kbID, doc.FolderPath)
 		if err != nil {
 			return err
+		}
+		if s.crossRefRepo != nil && len(folderDocIDs) > 0 {
+			_ = s.crossRefRepo.DeleteByKBDocIDs(folderDocIDs)
 		}
 		for _, p := range paths {
 			_ = os.Remove(p)
@@ -736,6 +755,9 @@ func (s *kbService) DeleteDocument(userID uint64, isSuperAdmin bool, kbID, docID
 
 	if err := s.kbRepo.DeleteDocument(kbID, docID); err != nil {
 		return err
+	}
+	if s.crossRefRepo != nil {
+		_ = s.crossRefRepo.DeleteByKBDocIDs([]uint64{docID})
 	}
 	if doc.FilePath != "" {
 		_ = os.Remove(doc.FilePath)

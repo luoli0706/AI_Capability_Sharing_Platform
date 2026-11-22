@@ -26,9 +26,10 @@ const (
 	ParseStatusCompleted  = "completed"
 	ParseStatusFailed     = "failed"
 
-	ApprovalTargetAccess  = "asset_access"
-	ApprovalTargetPublish = "asset_publish"
-	ApprovalTargetOrgJoin = "org_join"
+	ApprovalTargetAccess   = "asset_access"
+	ApprovalTargetPublish  = "asset_publish"
+	ApprovalTargetOrgJoin  = "org_join"
+	ApprovalTargetCrossRef = "cross_domain_ref"
 
 	ApprovalStatusPending   = "pending"
 	ApprovalStatusApproved  = "approved"

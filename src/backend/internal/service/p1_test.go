@@ -383,6 +383,23 @@ func (m *mockP1GovRepo) HandleOrgJoinApproval(req *model.ApprovalRequest, record
 	return nil
 }
 
+func (m *mockP1GovRepo) HandleCrossRefApproval(req *model.ApprovalRequest, recordID, approverID uint64, action, comment string) error {
+	stored := m.reqs[req.ID]
+	for i := range m.recs[req.ID] {
+		if m.recs[req.ID][i].ID == recordID {
+			m.recs[req.ID][i].ApproverID = approverID
+			m.recs[req.ID][i].Action = action
+			m.recs[req.ID][i].Comment = comment
+		}
+	}
+	if action == model.ApprovalActionReject {
+		stored.Status = model.ApprovalStatusRejected
+	} else {
+		stored.Status = model.ApprovalStatusApproved
+	}
+	return nil
+}
+
 type mockP1KeyRepo struct {
 	nextID uint64
 	keys   map[uint64]*model.UserAPIKey

@@ -16,7 +16,7 @@ import {
   updateOrg
 } from '@/api/org'
 import { useDomainStore } from '@/stores/domain'
-import type { DomainItem, OrgDetail, OrgItem, OrgMember } from '@/types/api'
+import type { DomainItem, OrgDetail, OrgItem, OrgMember, OrgVisibility } from '@/types/api'
 import { formatDateTime, getRoleLabel, normalizeList } from '@/utils/format'
 
 const router = useRouter()
@@ -42,7 +42,8 @@ const creating = ref(false)
 const createForm = reactive({
   org_name: '',
   org_code: '',
-  description: ''
+  description: '',
+  visibility: 'public' as OrgVisibility
 })
 
 const createRules: FormRules = {
@@ -60,7 +61,8 @@ const editing = ref(false)
 const editOrgId = ref<number | null>(null)
 const editForm = reactive({
   org_name: '',
-  description: ''
+  description: '',
+  visibility: 'public' as OrgVisibility
 })
 
 const editRules: FormRules = {
@@ -168,6 +170,7 @@ function openCreateModal() {
   createForm.org_name = ''
   createForm.org_code = ''
   createForm.description = ''
+  createForm.visibility = 'public'
   createFormRef.value?.clearValidate()
   createModalOpen.value = true
 }
@@ -182,7 +185,8 @@ async function handleCreateOrg() {
     await createOrg({
       org_name: createForm.org_name.trim(),
       org_code: createForm.org_code.trim(),
-      description: createForm.description.trim()
+      description: createForm.description.trim(),
+      visibility: createForm.visibility
     })
     ElMessage.success('组织创建成功')
     createModalOpen.value = false
@@ -198,6 +202,7 @@ function openEditModal(org: OrgItem) {
   editOrgId.value = org.id
   editForm.org_name = org.org_name
   editForm.description = org.description || ''
+  editForm.visibility = org.visibility || 'public'
   editFormRef.value?.clearValidate()
   editModalOpen.value = true
 }
@@ -211,7 +216,8 @@ async function handleUpdateOrg() {
   try {
     await updateOrg(editOrgId.value, {
       org_name: editForm.org_name.trim(),
-      description: editForm.description.trim()
+      description: editForm.description.trim(),
+      visibility: editForm.visibility
     })
     ElMessage.success('组织信息已更新')
     editModalOpen.value = false
@@ -398,7 +404,14 @@ onMounted(() => {
           <div class="org-icon">
             <el-icon :size="18"><Grid /></el-icon>
           </div>
-          <div style="display: flex; gap: 6px; align-items: center">
+          <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap">
+            <el-tag
+              :type="org.visibility === 'private' ? 'warning' : 'success'"
+              size="small"
+              effect="plain"
+            >
+              {{ org.visibility === 'private' ? '私密组织' : '公开组织' }}
+            </el-tag>
             <el-tag v-if="org.my_role && activeTab === 'square'" size="small" type="success" effect="plain">
               已加入
             </el-tag>
@@ -496,6 +509,12 @@ onMounted(() => {
             class="mono-text"
           />
         </el-form-item>
+        <el-form-item label="组织类型" prop="visibility">
+          <el-radio-group v-model="createForm.visibility">
+            <el-radio value="public">公开组织</el-radio>
+            <el-radio value="private">私密组织</el-radio>
+          </el-radio-group>
+        </el-form-item>
         <el-form-item label="组织描述" prop="description">
           <el-input
             v-model="createForm.description"
@@ -523,6 +542,12 @@ onMounted(() => {
       >
         <el-form-item label="组织名称" prop="org_name">
           <el-input v-model="editForm.org_name" maxlength="128" />
+        </el-form-item>
+        <el-form-item label="组织类型" prop="visibility">
+          <el-radio-group v-model="editForm.visibility">
+            <el-radio value="public">公开组织</el-radio>
+            <el-radio value="private">私密组织</el-radio>
+          </el-radio-group>
         </el-form-item>
         <el-form-item label="组织简介" prop="description">
           <el-input
@@ -582,7 +607,16 @@ onMounted(() => {
       <div v-else-if="activeOrg" class="drawer-body">
         <div class="org-summary-box">
           <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px;">
-            <div class="summary-code mono-text">编码：{{ activeOrg.org_code }}</div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <div class="summary-code mono-text">编码：{{ activeOrg.org_code }}</div>
+              <el-tag
+                :type="activeOrg.visibility === 'private' ? 'warning' : 'success'"
+                size="small"
+                effect="plain"
+              >
+                {{ activeOrg.visibility === 'private' ? '私密组织' : '公开组织' }}
+              </el-tag>
+            </div>
             <el-button
               v-if="canManageActiveOrg"
               link

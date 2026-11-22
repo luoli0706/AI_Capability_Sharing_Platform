@@ -3,9 +3,14 @@ package service
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
+	"mime/multipart"
+	"net/http"
+	"net/textproto"
 	"os"
 	"path/filepath"
 	"testing"
@@ -177,5 +182,81 @@ func TestSanitizeSevenORelPath(t *testing.T) {
 		if _, err := sanitizeSevenORelPath(bad); err == nil {
 			t.Fatalf("expected error for relPath %q", bad)
 		}
+	}
+}
+
+func makeSevenOTestFileHeader(t *testing.T, fieldName, filename string, content []byte) *multipart.FileHeader {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	h := make(textproto.MIMEHeader)
+	h.Set("Content-Disposition", `form-data; name="`+fieldName+`"; filename="`+filename+`"`)
+	h.Set("Content-Type", "application/octet-stream")
+	part, err := mw.CreatePart(h)
+	if err != nil {
+		t.Fatalf("CreatePart: %v", err)
+	}
+	if _, err := part.Write(content); err != nil {
+		t.Fatalf("part.Write: %v", err)
+	}
+	_ = mw.Close()
+
+	mr := multipart.NewReader(&buf, mw.Boundary())
+	form, err := mr.ReadForm(10 << 20)
+	if err != nil {
+		t.Fatalf("ReadForm: %v", err)
+	}
+	t.Cleanup(func() { _ = form.RemoveAll() })
+	return form.File[fieldName][0]
+}
+
+func TestSevenOService_ConcurrencyAndSizeLimits(t *testing.T) {
+	svc := NewSevenOService("", t.TempDir())
+	svc.SetLimits(2, 1024)
+
+	// 1. Concurrency limit: occupy 2 slots, 3rd call must return 429 TooManyRequests.
+	if err := svc.acquireSlot(); err != nil {
+		t.Fatalf("slot 1 failed: %v", err)
+	}
+	if err := svc.acquireSlot(); err != nil {
+		t.Fatalf("slot 2 failed: %v", err)
+	}
+
+	fhSmall := makeSevenOTestFileHeader(t, "file", "small.txt", []byte("hello"))
+	_, _, err := svc.EncryptFiles(context.Background(), []*multipart.FileHeader{fhSmall}, nil, "7thcv", 3)
+	var appErr *AppError
+	if !errors.As(err, &appErr) || appErr.HTTPStatus != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 TooManyRequests when semaphore full, got %v", err)
+	}
+
+	_, err = svc.DecryptZip(context.Background(), bytes.NewReader([]byte("zipdata")), "7thcv")
+	if !errors.As(err, &appErr) || appErr.HTTPStatus != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 TooManyRequests on DecryptZip when semaphore full, got %v", err)
+	}
+
+	_, err = svc.InspectZip(context.Background(), bytes.NewReader([]byte("zipdata")))
+	if !errors.As(err, &appErr) || appErr.HTTPStatus != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 TooManyRequests on InspectZip when semaphore full, got %v", err)
+	}
+
+	svc.releaseSlot()
+	svc.releaseSlot()
+
+	// 2. Size limit: exceed 1024 bytes on EncryptFiles, DecryptZip, InspectZip -> 413 PayloadTooLarge.
+	oversized := bytes.Repeat([]byte("A"), 2048)
+	fhBig := makeSevenOTestFileHeader(t, "file", "big.bin", oversized)
+	_, _, err = svc.EncryptFiles(context.Background(), []*multipart.FileHeader{fhBig}, nil, "7thcv", 3)
+	if !errors.As(err, &appErr) || appErr.HTTPStatus != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 PayloadTooLarge on EncryptFiles, got %v", err)
+	}
+
+	_, err = svc.DecryptZip(context.Background(), bytes.NewReader(oversized), "7thcv")
+	if !errors.As(err, &appErr) || appErr.HTTPStatus != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 PayloadTooLarge on DecryptZip, got %v", err)
+	}
+
+	_, err = svc.InspectZip(context.Background(), bytes.NewReader(oversized))
+	if !errors.As(err, &appErr) || appErr.HTTPStatus != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 PayloadTooLarge on InspectZip, got %v", err)
 	}
 }

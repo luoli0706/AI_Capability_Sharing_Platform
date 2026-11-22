@@ -38,8 +38,10 @@ type StorageConfig struct {
 }
 
 type SevenOConfig struct {
-	BinPath    string `mapstructure:"bin_path"`
-	ReleaseDir string `mapstructure:"release_dir"`
+	BinPath         string `mapstructure:"bin_path"`
+	ReleaseDir      string `mapstructure:"release_dir"`
+	MaxConcurrent   int    `mapstructure:"max_concurrent"`
+	MaxRequestBytes int64  `mapstructure:"max_request_bytes"`
 }
 
 // Load reads configuration from yaml file, optional .env file, and environment variables.

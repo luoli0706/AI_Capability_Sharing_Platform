@@ -32,16 +32,29 @@ func (m *mockOrgRepo) ListOrgs(userID uint64, q model.OrgQuery) ([]model.OrgList
 	kw := strings.ToLower(strings.TrimSpace(q.Keyword))
 	var out []model.OrgListItem
 	for _, o := range m.orgs {
+		myRole := m.members[o.ID][userID]
+		vis := o.Visibility
+		if vis == "" {
+			vis = model.OrgVisibilityPublic
+		}
+		if q.Tab != "square" {
+			if myRole == "" {
+				continue
+			}
+		} else if !q.IsSuperAdmin && vis == model.OrgVisibilityPrivate && myRole == "" {
+			continue
+		}
 		if kw != "" && !strings.Contains(strings.ToLower(o.OrgName), kw) && !strings.Contains(strings.ToLower(o.OrgCode), kw) {
 			continue
 		}
 		out = append(out, model.OrgListItem{
-			ID:        o.ID,
-			OrgCode:   o.OrgCode,
-			OrgName:   o.OrgName,
-			OwnerID:   o.OwnerID,
-			MyRole:    m.members[o.ID][userID],
-			CreatedAt: o.CreatedAt,
+			ID:         o.ID,
+			OrgCode:    o.OrgCode,
+			OrgName:    o.OrgName,
+			Visibility: vis,
+			OwnerID:    o.OwnerID,
+			MyRole:     myRole,
+			CreatedAt:  o.CreatedAt,
 		})
 	}
 	total := int64(len(out))

@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"ascp-backend/internal/model"
 	"ascp-backend/internal/repository"
@@ -15,8 +16,8 @@ type OrgService interface {
 	CreateOrg(userID uint64, req model.CreateOrgRequest) (*model.OrgListItem, error)
 	UpdateOrg(operatorID uint64, orgID uint64, req model.UpdateOrgRequest) (*model.OrgListItem, error)
 	DeleteOrg(operatorID uint64, orgID uint64) error
-	GetOrgDetail(userID uint64, orgID uint64) (*model.OrgDetail, error)
-	ListMembers(orgID uint64) ([]model.OrgMemberItem, error)
+	GetOrgDetail(userID uint64, isSuperAdmin bool, orgID uint64) (*model.OrgDetail, error)
+	ListMembers(userID uint64, isSuperAdmin bool, orgID uint64) ([]model.OrgMemberItem, error)
 	AddMember(operatorID uint64, orgID uint64, req model.AddOrgMemberRequest) error
 	RemoveMember(operatorID uint64, orgID, targetUserID uint64) error
 	SetAuditRepos(auditRepo repository.AuditLogRepository, userRepo repository.UserRepository)
@@ -53,10 +54,19 @@ func (s *orgService) CreateOrg(userID uint64, req model.CreateOrgRequest) (*mode
 		return nil, err
 	}
 
+	visibility := strings.TrimSpace(req.Visibility)
+	if visibility == "" {
+		visibility = model.OrgVisibilityPublic
+	}
+	if visibility != model.OrgVisibilityPublic && visibility != model.OrgVisibilityPrivate {
+		return nil, NewBadRequest("visibility must be public or private")
+	}
+
 	org := &model.BizOrganization{
 		OrgCode:     req.OrgCode,
 		OrgName:     req.OrgName,
 		Description: req.Description,
+		Visibility:  visibility,
 		OwnerID:     userID,
 		Status:      1,
 	}
@@ -71,6 +81,7 @@ func (s *orgService) CreateOrg(userID uint64, req model.CreateOrgRequest) (*mode
 		OrgCode:     org.OrgCode,
 		OrgName:     org.OrgName,
 		Description: org.Description,
+		Visibility:  org.Visibility,
 		OwnerID:     org.OwnerID,
 		Status:      org.Status,
 		MyRole:      model.OrgRoleOwner,
@@ -103,6 +114,14 @@ func (s *orgService) UpdateOrg(operatorID uint64, orgID uint64, req model.Update
 	if req.Description != nil {
 		org.Description = *req.Description
 	}
+	if vis := strings.TrimSpace(req.Visibility); vis != "" {
+		if vis != model.OrgVisibilityPublic && vis != model.OrgVisibilityPrivate {
+			return nil, NewBadRequest("visibility must be public or private")
+		}
+		org.Visibility = vis
+	} else if org.Visibility == "" {
+		org.Visibility = model.OrgVisibilityPublic
+	}
 
 	if err := s.orgRepo.UpdateOrg(org); err != nil {
 		return nil, err
@@ -117,6 +136,7 @@ func (s *orgService) UpdateOrg(operatorID uint64, orgID uint64, req model.Update
 		OrgCode:     org.OrgCode,
 		OrgName:     org.OrgName,
 		Description: org.Description,
+		Visibility:  org.Visibility,
 		OwnerID:     org.OwnerID,
 		Status:      org.Status,
 		MyRole:      opRole,
@@ -145,7 +165,7 @@ func (s *orgService) DeleteOrg(operatorID uint64, orgID uint64) error {
 	return nil
 }
 
-func (s *orgService) GetOrgDetail(userID uint64, orgID uint64) (*model.OrgDetail, error) {
+func (s *orgService) GetOrgDetail(userID uint64, isSuperAdmin bool, orgID uint64) (*model.OrgDetail, error) {
 	org, err := s.orgRepo.FindByID(orgID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -158,6 +178,9 @@ func (s *orgService) GetOrgDetail(userID uint64, orgID uint64) (*model.OrgDetail
 	if err != nil {
 		return nil, err
 	}
+	if org.Visibility == model.OrgVisibilityPrivate && !isSuperAdmin && myRole == "" && org.OwnerID != userID {
+		return nil, NewForbidden("无权查看该私密组织")
+	}
 	members, err := s.orgRepo.ListMembers(orgID)
 	if err != nil {
 		return nil, err
@@ -167,12 +190,17 @@ func (s *orgService) GetOrgDetail(userID uint64, orgID uint64) (*model.OrgDetail
 		return nil, err
 	}
 
+	vis := org.Visibility
+	if vis == "" {
+		vis = model.OrgVisibilityPublic
+	}
 	return &model.OrgDetail{
 		OrgListItem: model.OrgListItem{
 			ID:          org.ID,
 			OrgCode:     org.OrgCode,
 			OrgName:     org.OrgName,
 			Description: org.Description,
+			Visibility:  vis,
 			OwnerID:     org.OwnerID,
 			Status:      org.Status,
 			MyRole:      myRole,
@@ -184,12 +212,22 @@ func (s *orgService) GetOrgDetail(userID uint64, orgID uint64) (*model.OrgDetail
 	}, nil
 }
 
-func (s *orgService) ListMembers(orgID uint64) ([]model.OrgMemberItem, error) {
-	if _, err := s.orgRepo.FindByID(orgID); err != nil {
+func (s *orgService) ListMembers(userID uint64, isSuperAdmin bool, orgID uint64) ([]model.OrgMemberItem, error) {
+	org, err := s.orgRepo.FindByID(orgID)
+	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, NewNotFound("organization not found")
 		}
 		return nil, err
+	}
+	if org.Visibility == model.OrgVisibilityPrivate && !isSuperAdmin && org.OwnerID != userID {
+		role, err := s.orgRepo.GetMemberRole(orgID, userID)
+		if err != nil {
+			return nil, err
+		}
+		if role == "" {
+			return nil, NewForbidden("无权查看该私密组织成员")
+		}
 	}
 	return s.orgRepo.ListMembers(orgID)
 }

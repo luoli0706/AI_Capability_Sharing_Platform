@@ -10,6 +10,9 @@ const (
 	OrgRoleOwner  = "owner"
 	OrgRoleAdmin  = "admin"
 	OrgRoleMember = "member"
+
+	OrgVisibilityPublic  = "public"
+	OrgVisibilityPrivate = "private"
 )
 
 type BizOrganization struct {
@@ -17,6 +20,7 @@ type BizOrganization struct {
 	OrgCode     string         `gorm:"type:varchar(64);uniqueIndex:uk_org_code;not null" json:"org_code"`
 	OrgName     string         `gorm:"type:varchar(128);not null" json:"org_name"`
 	Description string         `gorm:"type:varchar(512);not null;default:''" json:"description"`
+	Visibility  string         `gorm:"size:20;not null;default:'public';index" json:"visibility"`
 	OwnerID     uint64         `gorm:"not null" json:"owner_id"`
 	Status      int8           `gorm:"type:tinyint;not null;default:1" json:"status"`
 	CreatedAt   time.Time      `gorm:"autoCreateTime" json:"created_at"`
@@ -47,6 +51,7 @@ type OrgListItem struct {
 	OrgCode     string    `json:"org_code"`
 	OrgName     string    `json:"org_name"`
 	Description string    `json:"description"`
+	Visibility  string    `json:"visibility"`
 	OwnerID     uint64    `json:"owner_id"`
 	Status      int8      `json:"status"`
 	MyRole      string    `json:"my_role"`
@@ -70,10 +75,11 @@ type OrgMemberItem struct {
 }
 
 type OrgQuery struct {
-	Tab      string
-	Keyword  string
-	Page     int
-	PageSize int
+	Tab          string
+	Keyword      string
+	IsSuperAdmin bool
+	Page         int
+	PageSize     int
 }
 
 type JoinOrgRequest struct {
@@ -84,11 +90,13 @@ type CreateOrgRequest struct {
 	OrgCode     string `json:"org_code" validate:"required,min=2,max=64"`
 	OrgName     string `json:"org_name" validate:"required,min=2,max=128"`
 	Description string `json:"description" validate:"max=512"`
+	Visibility  string `json:"visibility" validate:"omitempty,oneof=public private"`
 }
 
 type UpdateOrgRequest struct {
 	OrgName     string  `json:"org_name" validate:"omitempty,min=2,max=128"`
 	Description *string `json:"description" validate:"omitempty,max=512"`
+	Visibility  string  `json:"visibility" validate:"omitempty,oneof=public private"`
 }
 
 type AddOrgMemberRequest struct {

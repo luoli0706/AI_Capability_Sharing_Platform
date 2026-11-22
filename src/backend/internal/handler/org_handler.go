@@ -21,10 +21,11 @@ func NewOrgHandler(orgSvc service.OrgService, govSvc service.GovernanceService) 
 func (h *OrgHandler) ListOrgs(c echo.Context) error {
 	page, pageSize := parsePageParamsWithDefault(c, 12)
 	q := model.OrgQuery{
-		Tab:      c.QueryParam("tab"),
-		Keyword:  c.QueryParam("keyword"),
-		Page:     page,
-		PageSize: pageSize,
+		Tab:          c.QueryParam("tab"),
+		Keyword:      c.QueryParam("keyword"),
+		IsSuperAdmin: middleware.HasRole(c, model.RoleSuperAdmin),
+		Page:         page,
+		PageSize:     pageSize,
 	}
 
 	userID := middleware.GetUserID(c)
@@ -93,7 +94,8 @@ func (h *OrgHandler) GetOrgDetail(c echo.Context) error {
 	}
 
 	userID := middleware.GetUserID(c)
-	detail, err := h.orgSvc.GetOrgDetail(userID, orgID)
+	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
+	detail, err := h.orgSvc.GetOrgDetail(userID, isSuperAdmin, orgID)
 	if err != nil {
 		return service.HandleError(c, err)
 	}
@@ -107,7 +109,9 @@ func (h *OrgHandler) ListMembers(c echo.Context) error {
 	}
 	page, pageSize := parsePageParams(c)
 
-	list, err := h.orgSvc.ListMembers(orgID)
+	userID := middleware.GetUserID(c)
+	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
+	list, err := h.orgSvc.ListMembers(userID, isSuperAdmin, orgID)
 	if err != nil {
 		return service.HandleError(c, err)
 	}

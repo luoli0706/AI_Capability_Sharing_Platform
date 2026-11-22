@@ -15,6 +15,7 @@ import {
 import AssetDetailDrawer from '@/components/AssetDetailDrawer.vue'
 import AssetFormDrawer from '@/components/AssetFormDrawer.vue'
 import AssetVersionsDrawer from '@/components/AssetVersionsDrawer.vue'
+import CrossRefSection from '@/components/CrossRefSection.vue'
 import { useDomainStore } from '@/stores/domain'
 import type { AssetItem, AssetType } from '@/types/api'
 import {
@@ -390,6 +391,8 @@ onMounted(() => {
         />
       </div>
     </div>
+
+    <CrossRefSection :domain-id="domainId" default-ref-type="asset" />
 
     <AssetFormDrawer
       v-model="formDrawerOpen"

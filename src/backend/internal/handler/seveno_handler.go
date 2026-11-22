@@ -95,6 +95,9 @@ func (h *SevenOHandler) Decrypt(c echo.Context) error {
 	if err != nil || fh == nil {
 		return response.BadRequest(c, "file is required")
 	}
+	if maxBytes := h.svc.MaxRequestBytes(); maxBytes > 0 && fh.Size > maxBytes {
+		return response.Error(c, http.StatusRequestEntityTooLarge, 41301, fmt.Sprintf("在线处理文件大小超过 %dMB 限制，请下载桌面客户端处理", maxBytes/(1024*1024)))
+	}
 	src, err := fh.Open()
 	if err != nil {
 		return response.BadRequest(c, "failed to read uploaded file")
@@ -119,6 +122,9 @@ func (h *SevenOHandler) Inspect(c echo.Context) error {
 	fh, err := c.FormFile("file")
 	if err != nil || fh == nil {
 		return response.BadRequest(c, "file is required")
+	}
+	if maxBytes := h.svc.MaxRequestBytes(); maxBytes > 0 && fh.Size > maxBytes {
+		return response.Error(c, http.StatusRequestEntityTooLarge, 41301, fmt.Sprintf("在线处理文件大小超过 %dMB 限制，请下载桌面客户端处理", maxBytes/(1024*1024)))
 	}
 	src, err := fh.Open()
 	if err != nil {

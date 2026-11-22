@@ -91,9 +91,12 @@ export interface UpdateDomainPayload {
   visibility: DomainVisibility
 }
 
+export type OrgVisibility = 'public' | 'private'
+
 export interface UpdateOrgPayload {
   org_name: string
   description: string
+  visibility?: OrgVisibility
 }
 
 export type OrgRole = 'owner' | 'admin' | 'member'
@@ -103,6 +106,7 @@ export interface OrgItem {
   org_code: string
   org_name: string
   description: string
+  visibility?: OrgVisibility
   owner_id: number
   status?: number
   member_count?: number
@@ -133,6 +137,7 @@ export interface CreateOrgPayload {
   org_code: string
   org_name: string
   description: string
+  visibility?: OrgVisibility
 }
 
 export interface AddOrgMemberPayload {
@@ -384,7 +389,11 @@ export interface ApprovalRecord {
   created_at?: string
 }
 
-export type ApprovalTargetType = 'asset_access' | 'asset_publish' | 'org_join'
+export type ApprovalTargetType =
+  | 'asset_access'
+  | 'asset_publish'
+  | 'org_join'
+  | 'cross_domain_ref'
 
 export interface ApprovalRequest {
   id: number
@@ -502,5 +511,51 @@ export interface SevenOReleaseItem {
 export interface SevenOInspectResult {
   kind: string
   detail: string
+}
+
+export type CrossRefType = 'asset' | 'kb_file'
+export type CrossRefStatus = 'pending' | 'active' | 'rejected'
+
+export interface DomainCrossRefItem {
+  id: number
+  target_domain_id: number
+  source_domain_id: number
+  source_domain_name: string
+  ref_type: CrossRefType
+  source_asset_id: number
+  source_doc_id: number
+  title: string
+  description: string
+  created_by: number
+  creator_name: string
+  status: CrossRefStatus
+  approval_request_id: number | null
+  created_at: string
+  file_ext?: string
+  file_size?: number
+  asset_type?: string
+}
+
+export interface CreateCrossRefPayload {
+  source_domain_id: number
+  ref_type: CrossRefType
+  source_asset_id: number
+  source_doc_id: number
+  description: string
+}
+
+export interface CrossRefSourceKbFile {
+  id: number
+  kb_asset_id: number
+  kb_name: string
+  file_name: string
+  file_ext: string
+  file_size: number
+  folder_path: string
+}
+
+export interface CrossRefSourceItemsResult {
+  assets: AssetItem[]
+  kb_files: CrossRefSourceKbFile[]
 }
 

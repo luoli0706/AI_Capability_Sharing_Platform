@@ -31,6 +31,11 @@ const (
 	AuditActionOrgDelete       = "org.delete"
 	AuditActionOrgMemberAdd    = "org.member_add"
 	AuditActionOrgMemberRemove = "org.member_remove"
+
+	AuditActionCrossRefCreate  = "cross_ref.create"
+	AuditActionCrossRefApprove = "cross_ref.approve"
+	AuditActionCrossRefReject  = "cross_ref.reject"
+	AuditActionCrossRefDelete  = "cross_ref.delete"
 )
 
 type AssetAuditLog struct {

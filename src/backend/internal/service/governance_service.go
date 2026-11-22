@@ -20,20 +20,26 @@ type GovernanceService interface {
 	ListHandledRequests(userID uint64) ([]model.ApprovalRequestView, error)
 	HandleApproval(userID uint64, isSuperAdmin bool, requestID uint64, req model.HandleApprovalRequest) (*model.ApprovalRequest, error)
 	SetAuditRepos(auditRepo repository.AuditLogRepository, userRepo repository.UserRepository)
+	SetCrossRefRepo(crossRefRepo repository.CrossRefRepository)
 }
 
 type governanceService struct {
-	govRepo    repository.GovernanceRepository
-	assetRepo  repository.AssetRepository
-	domainRepo repository.DomainRepository
-	orgRepo    repository.OrgRepository
-	auditRepo  repository.AuditLogRepository
-	userRepo   repository.UserRepository
+	govRepo      repository.GovernanceRepository
+	assetRepo    repository.AssetRepository
+	domainRepo   repository.DomainRepository
+	orgRepo      repository.OrgRepository
+	crossRefRepo repository.CrossRefRepository
+	auditRepo    repository.AuditLogRepository
+	userRepo     repository.UserRepository
 }
 
 func (s *governanceService) SetAuditRepos(auditRepo repository.AuditLogRepository, userRepo repository.UserRepository) {
 	s.auditRepo = auditRepo
 	s.userRepo = userRepo
+}
+
+func (s *governanceService) SetCrossRefRepo(crossRefRepo repository.CrossRefRepository) {
+	s.crossRefRepo = crossRefRepo
 }
 
 func NewGovernanceService(
@@ -168,6 +174,9 @@ func (s *governanceService) RequestJoinOrg(userID, orgID uint64, reason string) 
 			return nil, NewNotFound("organization not found")
 		}
 		return nil, err
+	}
+	if org.Visibility == model.OrgVisibilityPrivate {
+		return nil, NewForbidden("私密组织仅支持管理员邀请加入")
 	}
 
 	orgRole, err := s.orgRepo.GetMemberRole(orgID, userID)
@@ -327,6 +336,44 @@ func (s *governanceService) HandleApproval(userID uint64, isSuperAdmin bool, req
 			}
 			recordAudit(s.auditRepo, s.userRepo, userID, 0, "", org.ID, org.OrgCode, org.OrgName, "org", model.AuditActionOrgMemberAdd, applicantName, "审批通过加入组织 "+applicantName)
 		}
+		return s.govRepo.FindApprovalByID(requestID)
+	}
+
+	if approvalReq.TargetType == model.ApprovalTargetCrossRef {
+		if s.crossRefRepo == nil {
+			return nil, NewBadRequest("cross reference module not configured")
+		}
+		crossRef, err := s.crossRefRepo.FindByID(approvalReq.AssetID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, NewNotFound("cross-domain reference not found")
+			}
+			return nil, err
+		}
+		targetDomain, err := s.domainRepo.FindByID(crossRef.TargetDomainID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, NewNotFound("target domain not found")
+			}
+			return nil, err
+		}
+		if !isSuperAdmin {
+			role, err := s.domainRepo.GetMemberRole(crossRef.TargetDomainID, userID)
+			if err != nil {
+				return nil, err
+			}
+			if targetDomain.OwnerID != userID && role != model.DomainRoleOwner && role != model.DomainRoleAdmin {
+				return nil, NewForbidden("only target domain owner, admin, or super_admin can handle cross-domain reference approval")
+			}
+		}
+		if err := s.govRepo.HandleCrossRefApproval(approvalReq, currentRecord.ID, userID, req.Action, req.Comment); err != nil {
+			return nil, err
+		}
+		actionName := model.AuditActionCrossRefApprove
+		if req.Action == model.ApprovalActionReject {
+			actionName = model.AuditActionCrossRefReject
+		}
+		recordAudit(s.auditRepo, s.userRepo, userID, targetDomain.ID, targetDomain.DomainName, crossRef.SourceAssetID, "", crossRef.Title, crossRef.RefType, actionName, crossRef.Title, req.Comment)
 		return s.govRepo.FindApprovalByID(requestID)
 	}
 

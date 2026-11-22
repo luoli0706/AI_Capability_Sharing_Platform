@@ -23,13 +23,15 @@ type DomainService interface {
 	RemoveMember(operatorID uint64, domainID, targetUserID uint64) error
 	CanManageDomain(domainID, userID uint64) (bool, *model.BizDomain, string, error)
 	SetAuditRepos(auditRepo repository.AuditLogRepository, userRepo repository.UserRepository)
+	SetCrossRefRepo(crossRefRepo repository.CrossRefRepository)
 }
 
 type domainService struct {
-	domainRepo repository.DomainRepository
-	userRepo   repository.UserRepository
-	orgRepo    repository.OrgRepository
-	auditRepo  repository.AuditLogRepository
+	domainRepo   repository.DomainRepository
+	userRepo     repository.UserRepository
+	orgRepo      repository.OrgRepository
+	crossRefRepo repository.CrossRefRepository
+	auditRepo    repository.AuditLogRepository
 }
 
 func NewDomainService(domainRepo repository.DomainRepository, userRepo repository.UserRepository, orgRepo repository.OrgRepository) DomainService {
@@ -45,6 +47,10 @@ func (s *domainService) SetAuditRepos(auditRepo repository.AuditLogRepository, u
 	if userRepo != nil {
 		s.userRepo = userRepo
 	}
+}
+
+func (s *domainService) SetCrossRefRepo(crossRefRepo repository.CrossRefRepository) {
+	s.crossRefRepo = crossRefRepo
 }
 
 func (s *domainService) ListDomains(userID uint64, q model.DomainQuery) ([]model.DomainListItem, int64, error) {
@@ -209,6 +215,9 @@ func (s *domainService) DeleteDomain(operatorID uint64, domainID uint64) error {
 
 	if err := s.domainRepo.DeleteDomain(domainID); err != nil {
 		return err
+	}
+	if s.crossRefRepo != nil {
+		_ = s.crossRefRepo.DeleteByDomainID(domainID)
 	}
 	recordAudit(s.auditRepo, s.userRepo, operatorID, domain.ID, domain.DomainName, domain.ID, domain.DomainCode, domain.DomainName, "domain", model.AuditActionDomainDelete, domain.DomainName, "删除域 "+domain.DomainName)
 	return nil

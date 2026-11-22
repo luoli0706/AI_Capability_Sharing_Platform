@@ -53,6 +53,7 @@ func main() {
 	keyRepo := repository.NewAPIKeyRepository(db)
 	logRepo := repository.NewInvokeLogRepository(db)
 	auditRepo := repository.NewAuditLogRepository(db)
+	crossRefRepo := repository.NewCrossRefRepository(db)
 
 	// Services
 	authSvc := service.NewAuthService(userRepo, cfg.JWT)
@@ -73,13 +74,21 @@ func main() {
 	keySvc := service.NewAPIKeyService(keyRepo)
 	invokeSvc := service.NewInvokeService(assetRepo, domainRepo, govRepo, kbRepo, logRepo, orgRepo)
 	auditSvc := service.NewAuditService(auditRepo, domainRepo, orgRepo)
+	crossRefSvc := service.NewCrossRefService(crossRefRepo, domainRepo, orgRepo, assetRepo, kbRepo, govRepo)
 	sevenOSvc := service.NewSevenOService(cfg.SevenO.BinPath, cfg.SevenO.ReleaseDir)
+	sevenOSvc.SetLimits(cfg.SevenO.MaxConcurrent, cfg.SevenO.MaxRequestBytes)
 
 	assetSvc.SetAuditRepos(auditRepo, userRepo)
 	kbSvc.SetAuditRepos(auditRepo, userRepo)
 	govSvc.SetAuditRepos(auditRepo, userRepo)
 	domainSvc.SetAuditRepos(auditRepo, userRepo)
 	orgSvc.SetAuditRepos(auditRepo, userRepo)
+	crossRefSvc.SetAuditRepos(auditRepo, userRepo)
+
+	assetSvc.SetCrossRefRepo(crossRefRepo)
+	kbSvc.SetCrossRefRepo(crossRefRepo)
+	domainSvc.SetCrossRefRepo(crossRefRepo)
+	govSvc.SetCrossRefRepo(crossRefRepo)
 
 	// Handlers
 	authHandler := handler.NewAuthHandler(authSvc)
@@ -91,6 +100,7 @@ func main() {
 	apiKeyHandler := handler.NewAPIKeyHandler(keySvc)
 	invokeHandler := handler.NewInvokeHandler(invokeSvc)
 	auditHandler := handler.NewAuditHandler(auditSvc)
+	crossRefHandler := handler.NewCrossRefHandler(crossRefSvc)
 	sevenOHandler := handler.NewSevenOHandler(sevenOSvc)
 
 	e := echo.New()
@@ -154,6 +164,11 @@ func main() {
 	protected.POST("/domains/:id/members", domainHandler.AddMember)
 	protected.PUT("/domains/:id/members/:userId", domainHandler.UpdateMemberRole)
 	protected.DELETE("/domains/:id/members/:userId", domainHandler.RemoveMember)
+	protected.POST("/domains/:id/cross-refs", crossRefHandler.CreateCrossRef)
+	protected.GET("/domains/:id/cross-refs", crossRefHandler.ListCrossRefs)
+	protected.DELETE("/domains/:id/cross-refs/:refId", crossRefHandler.DeleteCrossRef)
+	protected.GET("/cross-refs/source-domains", crossRefHandler.ListSourceDomains)
+	protected.GET("/cross-refs/source-items", crossRefHandler.ListSourceItems)
 
 	protected.GET("/assets", assetHandler.ListAssets)
 	protected.GET("/assets/:id", assetHandler.GetAsset)

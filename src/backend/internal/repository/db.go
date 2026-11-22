@@ -89,7 +89,11 @@ func AutoMigrate(db *gorm.DB) error {
 		&model.ApprovalRecord{},
 		&model.AssetInvokeLog{},
 		&model.AssetAuditLog{},
+		&model.DomainCrossRef{},
 	); err != nil {
+		return err
+	}
+	if err := db.Exec("UPDATE biz_organization SET visibility = ? WHERE visibility IS NULL OR visibility = ''", model.OrgVisibilityPublic).Error; err != nil {
 		return err
 	}
 	return BackfillDomains(db)

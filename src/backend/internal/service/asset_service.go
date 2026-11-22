@@ -47,22 +47,28 @@ type AssetService interface {
 	ImportAgentFromURL(ctx context.Context, rawURL string) (*agentpkg.AgentImportResult, error)
 	DownloadAgentPackage(userID uint64, isSuperAdmin bool, id uint64, format string) (filename, contentType string, data []byte, err error)
 	SetAuditRepos(auditRepo repository.AuditLogRepository, userRepo repository.UserRepository)
+	SetCrossRefRepo(crossRefRepo repository.CrossRefRepository)
 }
 
 type assetService struct {
-	assetRepo  repository.AssetRepository
-	domainRepo repository.DomainRepository
-	govRepo    repository.GovernanceRepository
-	orgRepo    repository.OrgRepository
-	auditRepo  repository.AuditLogRepository
-	userRepo   repository.UserRepository
-	uploadDir  string
-	httpClient *http.Client
+	assetRepo    repository.AssetRepository
+	domainRepo   repository.DomainRepository
+	govRepo      repository.GovernanceRepository
+	orgRepo      repository.OrgRepository
+	crossRefRepo repository.CrossRefRepository
+	auditRepo    repository.AuditLogRepository
+	userRepo     repository.UserRepository
+	uploadDir    string
+	httpClient   *http.Client
 }
 
 func (s *assetService) SetAuditRepos(auditRepo repository.AuditLogRepository, userRepo repository.UserRepository) {
 	s.auditRepo = auditRepo
 	s.userRepo = userRepo
+}
+
+func (s *assetService) SetCrossRefRepo(crossRefRepo repository.CrossRefRepository) {
+	s.crossRefRepo = crossRefRepo
 }
 
 func NewAssetService(assetRepo repository.AssetRepository, domainRepo repository.DomainRepository, govRepo repository.GovernanceRepository, orgRepo repository.OrgRepository, uploadDir string) AssetService {
@@ -294,6 +300,9 @@ func (s *assetService) DeleteAsset(userID uint64, isSuperAdmin bool, id uint64) 
 	}
 	if err := s.assetRepo.DeleteAsset(id); err != nil {
 		return err
+	}
+	if s.crossRefRepo != nil {
+		_ = s.crossRefRepo.DeleteByAssetID(id)
 	}
 	recordAudit(s.auditRepo, s.userRepo, userID, asset.DomainID, "", asset.ID, asset.AssetCode, asset.Name, asset.AssetType, model.AuditActionAssetDelete, asset.Name, "删除资产 "+asset.AssetCode)
 	return nil

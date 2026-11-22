@@ -23,6 +23,7 @@ type GovernanceRepository interface {
 	HandleApprovalStep(req *model.ApprovalRequest, recordID uint64, action, comment string, grantPerm *model.AssetPermission) error
 	HandlePublishApproval(req *model.ApprovalRequest, recordID, approverID uint64, action, comment string) error
 	HandleOrgJoinApproval(req *model.ApprovalRequest, recordID, approverID uint64, action, comment string) error
+	HandleCrossRefApproval(req *model.ApprovalRequest, recordID, approverID uint64, action, comment string) error
 }
 
 type governanceRepository struct {
@@ -146,7 +147,8 @@ func (r *governanceRepository) ListPendingRequests(approverID uint64, isSuperAdm
 	tx := r.db.Table("approval_request").
 		Select("approval_request.*").
 		Joins("INNER JOIN approval_record ON approval_record.request_id = approval_request.id AND approval_record.step_no = approval_request.current_step").
-		Joins("LEFT JOIN ai_asset ON ai_asset.id = approval_request.asset_id AND approval_request.target_type <> ?", model.ApprovalTargetOrgJoin).
+		Joins("LEFT JOIN ai_asset ON ai_asset.id = approval_request.asset_id AND approval_request.target_type NOT IN ?", []string{model.ApprovalTargetOrgJoin, model.ApprovalTargetCrossRef}).
+		Joins("LEFT JOIN domain_cross_ref ON domain_cross_ref.id = approval_request.asset_id AND approval_request.target_type = ?", model.ApprovalTargetCrossRef).
 		Where("approval_request.status = ? AND approval_record.action = ?", model.ApprovalStatusPending, model.ApprovalActionPending)
 
 	var orConds []string
@@ -156,12 +158,14 @@ func (r *governanceRepository) ListPendingRequests(approverID uint64, isSuperAdm
 		args = append(args, []string{model.ApprovalTargetPublish, model.ApprovalTargetOrgJoin})
 	} else {
 		orConds = append(orConds, "(approval_request.target_type NOT IN ? AND approval_record.approver_id = ?)")
-		args = append(args, []string{model.ApprovalTargetPublish, model.ApprovalTargetOrgJoin}, approverID)
+		args = append(args, []string{model.ApprovalTargetPublish, model.ApprovalTargetOrgJoin, model.ApprovalTargetCrossRef}, approverID)
 	}
 
 	if len(adminDomainIDs) > 0 {
 		orConds = append(orConds, "(approval_request.target_type = ? AND ai_asset.domain_id IN ?)")
 		args = append(args, model.ApprovalTargetPublish, adminDomainIDs)
+		orConds = append(orConds, "(approval_request.target_type = ? AND domain_cross_ref.target_domain_id IN ?)")
+		args = append(args, model.ApprovalTargetCrossRef, adminDomainIDs)
 	}
 	if len(adminOrgIDs) > 0 {
 		orConds = append(orConds, "(approval_request.target_type = ? AND approval_request.asset_id IN ?)")
@@ -206,12 +210,16 @@ func (r *governanceRepository) hydrateApprovalViews(reqs []model.ApprovalRequest
 	reqIDs := make([]uint64, 0, len(reqs))
 	assetIDs := make([]uint64, 0, len(reqs))
 	orgIDs := make([]uint64, 0, len(reqs))
+	crossRefIDs := make([]uint64, 0, len(reqs))
 	userIDSet := make(map[uint64]struct{})
 	for _, req := range reqs {
 		reqIDs = append(reqIDs, req.ID)
-		if req.TargetType == model.ApprovalTargetOrgJoin {
+		switch req.TargetType {
+		case model.ApprovalTargetOrgJoin:
 			orgIDs = append(orgIDs, req.AssetID)
-		} else {
+		case model.ApprovalTargetCrossRef:
+			crossRefIDs = append(crossRefIDs, req.AssetID)
+		default:
 			assetIDs = append(assetIDs, req.AssetID)
 		}
 		userIDSet[req.ApplicantID] = struct{}{}
@@ -253,6 +261,27 @@ func (r *governanceRepository) hydrateApprovalViews(reqs []model.ApprovalRequest
 		}
 		for _, o := range orgs {
 			orgMap[o.ID] = o.OrgName
+		}
+	}
+
+	type crossRefInfo struct {
+		ID               uint64
+		Title            string
+		RefType          string
+		TargetDomainName string
+	}
+	crossRefMap := make(map[uint64]crossRefInfo, len(crossRefIDs))
+	if len(crossRefIDs) > 0 {
+		var crs []crossRefInfo
+		if err := r.db.Table("domain_cross_ref").
+			Select("domain_cross_ref.id, domain_cross_ref.title, domain_cross_ref.ref_type, COALESCE(biz_domain.domain_name, '') AS target_domain_name").
+			Joins("LEFT JOIN biz_domain ON biz_domain.id = domain_cross_ref.target_domain_id AND biz_domain.deleted_at IS NULL").
+			Where("domain_cross_ref.id IN ?", crossRefIDs).
+			Scan(&crs).Error; err != nil {
+			return nil, err
+		}
+		for _, cr := range crs {
+			crossRefMap[cr.ID] = cr
 		}
 	}
 
@@ -303,12 +332,25 @@ func (r *governanceRepository) hydrateApprovalViews(reqs []model.ApprovalRequest
 			recs = []model.ApprovalRecordView{}
 		}
 		var assetName, assetType, domainName string
-		if req.TargetType == model.ApprovalTargetOrgJoin {
+		switch req.TargetType {
+		case model.ApprovalTargetOrgJoin:
 			orgName := orgMap[req.AssetID]
 			assetName = orgName
 			assetType = "org"
 			domainName = orgName
-		} else {
+		case model.ApprovalTargetCrossRef:
+			cr := crossRefMap[req.AssetID]
+			if cr.Title != "" {
+				assetName = "[跨域引用] " + cr.Title
+			} else {
+				assetName = "[跨域引用]"
+			}
+			assetType = cr.RefType
+			if assetType == "" {
+				assetType = "cross_domain_ref"
+			}
+			domainName = cr.TargetDomainName
+		default:
 			a := assetMap[req.AssetID]
 			assetName = a.Name
 			assetType = a.AssetType
@@ -433,5 +475,33 @@ func (r *governanceRepository) HandleOrgJoinApproval(req *model.ApprovalRequest,
 			UserID:  req.ApplicantID,
 			OrgRole: model.OrgRoleMember,
 		}).Error
+	})
+}
+
+func (r *governanceRepository) HandleCrossRefApproval(req *model.ApprovalRequest, recordID, approverID uint64, action, comment string) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		now := time.Now()
+		if err := tx.Model(&model.ApprovalRecord{}).Where("id = ?", recordID).Updates(map[string]interface{}{
+			"approver_id": approverID,
+			"action":      action,
+			"comment":     comment,
+			"handled_at":  now,
+		}).Error; err != nil {
+			return err
+		}
+
+		reqStatus := model.ApprovalStatusApproved
+		refStatus := model.CrossRefStatusActive
+		if action == model.ApprovalActionReject {
+			reqStatus = model.ApprovalStatusRejected
+			refStatus = model.CrossRefStatusRejected
+		}
+
+		if err := tx.Model(&model.ApprovalRequest{}).Where("id = ?", req.ID).
+			Update("status", reqStatus).Error; err != nil {
+			return err
+		}
+		return tx.Model(&model.DomainCrossRef{}).Where("id = ?", req.AssetID).
+			Update("status", refStatus).Error
 	})
 }

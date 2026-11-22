@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,9 +23,12 @@ import (
 )
 
 const (
-	sevenODefaultPassword = "7thcv"
-	sevenODefaultLevel    = 3
-	sevenOExecTimeout     = 60 * time.Second
+	sevenODefaultPassword      = "7thcv"
+	sevenODefaultLevel         = 3
+	sevenOExecTimeout          = 60 * time.Second
+	sevenODefaultMaxConcurrent = 2
+	sevenODefaultMaxBytes      = int64(64 << 20) // 64MB
+	sevenOLinuxVirtMemKB       = 262144          // 256MB
 )
 
 // SevenORelease describes a downloadable 7o client/engine binary in the release directory.
@@ -39,8 +43,10 @@ type SevenORelease struct {
 
 // SevenOService provides release listing/downloading and online 7o encryption, decryption, and inspection.
 type SevenOService struct {
-	binPath    string
-	releaseDir string
+	binPath         string
+	releaseDir      string
+	maxRequestBytes int64
+	sem             chan struct{}
 }
 
 // NewSevenOService creates a SevenOService with configured binary path and release directory.
@@ -52,9 +58,56 @@ func NewSevenOService(binPath, releaseDir string) *SevenOService {
 		releaseDir = "./releases"
 	}
 	return &SevenOService{
-		binPath:    binPath,
-		releaseDir: releaseDir,
+		binPath:         binPath,
+		releaseDir:      releaseDir,
+		maxRequestBytes: sevenODefaultMaxBytes,
+		sem:             make(chan struct{}, sevenODefaultMaxConcurrent),
 	}
+}
+
+// SetLimits overrides the default concurrency semaphore size and max request bytes.
+func (s *SevenOService) SetLimits(maxConcurrent int, maxRequestBytes int64) {
+	if maxConcurrent > 0 {
+		s.sem = make(chan struct{}, maxConcurrent)
+	}
+	if maxRequestBytes > 0 {
+		s.maxRequestBytes = maxRequestBytes
+	}
+}
+
+// MaxRequestBytes returns the configured maximum request payload size in bytes.
+func (s *SevenOService) MaxRequestBytes() int64 {
+	if s.maxRequestBytes <= 0 {
+		return sevenODefaultMaxBytes
+	}
+	return s.maxRequestBytes
+}
+
+func (s *SevenOService) acquireSlot() error {
+	if s.sem == nil {
+		return nil
+	}
+	select {
+	case s.sem <- struct{}{}:
+		return nil
+	default:
+		return NewTooManyRequests("在线加解密任务繁忙，请稍后重试或下载桌面客户端处理")
+	}
+}
+
+func (s *SevenOService) releaseSlot() {
+	if s.sem == nil {
+		return
+	}
+	<-s.sem
+}
+
+func (s *SevenOService) payloadTooLargeError() error {
+	mb := s.MaxRequestBytes() / (1024 * 1024)
+	if mb <= 0 {
+		return NewPayloadTooLarge("在线处理文件大小超过限制，请下载桌面客户端处理")
+	}
+	return NewPayloadTooLarge(fmt.Sprintf("在线处理文件总大小超过 %dMB 限制，请下载桌面客户端处理", mb))
 }
 
 // ListReleases scans ReleaseDir and returns metadata for each release binary.
@@ -141,6 +194,22 @@ func (s *SevenOService) EncryptFiles(ctx context.Context, files []*multipart.Fil
 		return nil, "", NewBadRequest("level must be 1, 3, or 9")
 	}
 
+	maxBytes := s.MaxRequestBytes()
+	var declaredTotal int64
+	for _, fh := range files {
+		if fh.Size > 0 {
+			declaredTotal += fh.Size
+			if declaredTotal > maxBytes {
+				return nil, "", s.payloadTooLargeError()
+			}
+		}
+	}
+
+	if err := s.acquireSlot(); err != nil {
+		return nil, "", err
+	}
+	defer s.releaseSlot()
+
 	tmpDir, err := os.MkdirTemp("", "ascp-7o-enc-*")
 	if err != nil {
 		return nil, "", err
@@ -153,6 +222,7 @@ func (s *SevenOService) EncryptFiles(ctx context.Context, files []*multipart.Fil
 	}
 
 	var firstCleanRel string
+	var writtenTotal int64
 	for i, fh := range files {
 		rawRel := fh.Filename
 		if i < len(relPaths) && strings.TrimSpace(relPaths[i]) != "" {
@@ -170,9 +240,14 @@ func (s *SevenOService) EncryptFiles(ctx context.Context, files []*multipart.Fil
 		if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
 			return nil, "", err
 		}
-		if err := saveMultipartFile(fh, dstPath); err != nil {
+		written, err := saveMultipartFileLimited(fh, dstPath, maxBytes-writtenTotal)
+		if err != nil {
+			if errors.Is(err, errPayloadTooLarge) {
+				return nil, "", s.payloadTooLargeError()
+			}
 			return nil, "", err
 		}
+		writtenTotal += written
 	}
 
 	inputPath := inputRoot
@@ -207,6 +282,11 @@ func (s *SevenOService) DecryptZip(ctx context.Context, zipReader io.Reader, pas
 		password = sevenODefaultPassword
 	}
 
+	if err := s.acquireSlot(); err != nil {
+		return nil, err
+	}
+	defer s.releaseSlot()
+
 	tmpDir, err := os.MkdirTemp("", "ascp-7o-dec-*")
 	if err != nil {
 		return nil, err
@@ -214,7 +294,10 @@ func (s *SevenOService) DecryptZip(ctx context.Context, zipReader io.Reader, pas
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	inZip := filepath.Join(tmpDir, "input.zip")
-	if err := saveReaderToFile(zipReader, inZip); err != nil {
+	if _, err := saveReaderToFileLimited(zipReader, inZip, s.MaxRequestBytes()); err != nil {
+		if errors.Is(err, errPayloadTooLarge) {
+			return nil, s.payloadTooLargeError()
+		}
 		return nil, err
 	}
 
@@ -243,6 +326,11 @@ func (s *SevenOService) InspectZip(ctx context.Context, zipReader io.Reader) (ma
 		return nil, NewBadRequest("file is required")
 	}
 
+	if err := s.acquireSlot(); err != nil {
+		return nil, err
+	}
+	defer s.releaseSlot()
+
 	tmpDir, err := os.MkdirTemp("", "ascp-7o-insp-*")
 	if err != nil {
 		return nil, err
@@ -250,7 +338,10 @@ func (s *SevenOService) InspectZip(ctx context.Context, zipReader io.Reader) (ma
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	inZip := filepath.Join(tmpDir, "input.zip")
-	if err := saveReaderToFile(zipReader, inZip); err != nil {
+	if _, err := saveReaderToFileLimited(zipReader, inZip, s.MaxRequestBytes()); err != nil {
+		if errors.Is(err, errPayloadTooLarge) {
+			return nil, s.payloadTooLargeError()
+		}
 		return nil, err
 	}
 
@@ -276,7 +367,14 @@ func (s *SevenOService) run7oCommand(ctx context.Context, args ...string) ([]byt
 	execCtx, cancel := context.WithTimeout(ctx, sevenOExecTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(execCtx, s.binPath, args...)
+	var cmd *exec.Cmd
+	if runtime.GOOS == "linux" {
+		shellArgs := append([]string{"-c", fmt.Sprintf(`ulimit -v %d && exec "$@"`, sevenOLinuxVirtMemKB), "_", s.binPath}, args...)
+		cmd = exec.CommandContext(execCtx, "sh", shellArgs...)
+	} else {
+		cmd = exec.CommandContext(execCtx, s.binPath, args...)
+	}
+	cmd.Env = append(os.Environ(), "RAYON_NUM_THREADS=1", "OMP_NUM_THREADS=1")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -333,27 +431,36 @@ func sanitizeSevenORelPath(raw string) (string, error) {
 	return cleaned, nil
 }
 
-func saveMultipartFile(fh *multipart.FileHeader, dstPath string) error {
+var errPayloadTooLarge = errors.New("payload too large")
+
+func saveMultipartFileLimited(fh *multipart.FileHeader, dstPath string, remainingBytes int64) (int64, error) {
 	src, err := fh.Open()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer func() { _ = src.Close() }()
 
-	return saveReaderToFile(src, dstPath)
+	return saveReaderToFileLimited(src, dstPath, remainingBytes)
 }
 
-func saveReaderToFile(r io.Reader, dstPath string) error {
+func saveReaderToFileLimited(r io.Reader, dstPath string, maxBytes int64) (int64, error) {
+	if maxBytes < 0 {
+		return 0, errPayloadTooLarge
+	}
 	out, err := os.Create(dstPath)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer func() { _ = out.Close() }()
 
-	if _, err := io.Copy(out, r); err != nil {
-		return err
+	n, err := io.Copy(out, io.LimitReader(r, maxBytes+1))
+	if err != nil {
+		return n, err
 	}
-	return nil
+	if n > maxBytes {
+		return n, errPayloadTooLarge
+	}
+	return n, nil
 }
 
 func isWrongKeyError(stderr string) bool {

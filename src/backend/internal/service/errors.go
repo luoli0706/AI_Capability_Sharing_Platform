@@ -41,6 +41,14 @@ func NewConflict(msg string) *AppError {
 	return &AppError{HTTPStatus: http.StatusConflict, Code: response.CodeConflict, Message: msg}
 }
 
+func NewTooManyRequests(msg string) *AppError {
+	return &AppError{HTTPStatus: http.StatusTooManyRequests, Code: 42901, Message: msg}
+}
+
+func NewPayloadTooLarge(msg string) *AppError {
+	return &AppError{HTTPStatus: http.StatusRequestEntityTooLarge, Code: 41301, Message: msg}
+}
+
 // HandleError maps service errors to unified JSON responses.
 func HandleError(c echo.Context, err error) error {
 	var appErr *AppError
