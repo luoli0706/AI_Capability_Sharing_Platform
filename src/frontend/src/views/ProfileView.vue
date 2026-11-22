@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { CopyDocument, Key, Plus, Refresh, Upload } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
@@ -12,9 +13,11 @@ import {
   updateProfile
 } from '@/api/auth'
 import { getInvokeLogs } from '@/api/invoke'
+import { toggleDocumentFavorite } from '@/api/kb'
+import { getMyFavorites } from '@/api/user'
 import AssetDetailDrawer from '@/components/AssetDetailDrawer.vue'
 import { useAuthStore } from '@/stores/auth'
-import type { AssetItem, InvokeLogItem, UserApiKey } from '@/types/api'
+import type { AssetItem, InvokeLogItem, UserApiKey, UserFavoriteItem } from '@/types/api'
 import {
   formatDateTime,
   getAssetStatusMeta,
@@ -22,6 +25,7 @@ import {
   normalizeList
 } from '@/utils/format'
 
+const router = useRouter()
 const authStore = useAuthStore()
 const { user } = storeToRefs(authStore)
 
@@ -35,7 +39,8 @@ const profileForm = reactive({
   nickname: '',
   email: '',
   bio: '',
-  avatar: ''
+  avatar: '',
+  favorites_public: false
 })
 
 const profileRules: FormRules = {
@@ -127,6 +132,10 @@ const logsTotal = ref(0)
 const logsPage = ref(1)
 const logsPageSize = ref(10)
 
+// My Favorites
+const loadingFavorites = ref(false)
+const myFavorites = ref<UserFavoriteItem[]>([])
+
 const displayName = computed(
   () => user.value?.nickname || user.value?.username || '用户'
 )
@@ -138,6 +147,7 @@ function syncProfileForm() {
   profileForm.email = user.value?.email || ''
   profileForm.bio = user.value?.bio || ''
   profileForm.avatar = user.value?.avatar || ''
+  profileForm.favorites_public = Boolean(user.value?.favorites_public)
 }
 
 function triggerAvatarUpload() {
@@ -210,7 +220,8 @@ async function handleSaveProfile() {
       nickname: profileForm.nickname.trim(),
       email: profileForm.email.trim() || undefined,
       bio: profileForm.bio.trim(),
-      avatar: profileForm.avatar.trim()
+      avatar: profileForm.avatar.trim(),
+      favorites_public: profileForm.favorites_public
     })
     authStore.setUser(updated)
     syncProfileForm()
@@ -357,6 +368,38 @@ function openAssetDetail(asset: AssetItem) {
   detailDrawerOpen.value = true
 }
 
+async function fetchMyFavorites() {
+  loadingFavorites.value = true
+  try {
+    const res = await getMyFavorites()
+    myFavorites.value = Array.isArray(res) ? res : (res.list ?? [])
+  } catch {
+    myFavorites.value = []
+  } finally {
+    loadingFavorites.value = false
+  }
+}
+
+async function handleUnfavorite(item: UserFavoriteItem) {
+  try {
+    await toggleDocumentFavorite(item.kb_asset_id, item.doc_id)
+    myFavorites.value = myFavorites.value.filter((f) => f.id !== item.id)
+    ElMessage.success('已取消收藏')
+  } catch {
+    // Handled by interceptor
+  }
+}
+
+function goToFavoriteDoc(item: UserFavoriteItem) {
+  router.push({
+    path: `/domains/${item.domain_id}/knowledge-bases`,
+    query: {
+      kbId: String(item.kb_asset_id),
+      docId: String(item.doc_id)
+    }
+  })
+}
+
 onMounted(async () => {
   syncProfileForm()
   try {
@@ -366,6 +409,7 @@ onMounted(async () => {
     // Handled by interceptor
   }
   fetchMyAssets()
+  fetchMyFavorites()
   fetchApiKeys()
   fetchInvokeLogs()
 })
@@ -469,6 +513,14 @@ onMounted(async () => {
                   show-word-limit
                   placeholder="介绍一下自己或常用的 AI 能力方向..."
                 />
+              </el-form-item>
+              <el-form-item label="公开我的收藏">
+                <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap">
+                  <el-switch v-model="profileForm.favorites_public" />
+                  <span style="font-size: 12px; color: #64748b">
+                    开启后，其他用户可在您的公开主页查看您收藏的知识库文档
+                  </span>
+                </div>
               </el-form-item>
               <el-button type="primary" :loading="savingProfile" @click="handleSaveProfile">
                 保存基本信息
@@ -582,6 +634,61 @@ onMounted(async () => {
               @current-change="fetchMyAssets"
             />
           </div>
+        </el-tab-pane>
+
+        <el-tab-pane label="我的收藏" name="favorites">
+          <div class="tab-toolbar">
+            <span class="tab-hint">
+              仅您自己可见的个人收藏列表（当前状态：{{ user?.favorites_public ? '已公开至个人主页' : '仅自己可见' }}）
+            </span>
+            <el-button :icon="Refresh" size="small" @click="fetchMyFavorites">刷新</el-button>
+          </div>
+
+          <el-table v-loading="loadingFavorites" :data="myFavorites" stripe style="width: 100%">
+            <el-table-column label="文档名称" min-width="220">
+              <template #default="{ row }">
+                <div class="asset-cell">
+                  <span class="asset-link mono-text" @click="goToFavoriteDoc(row)">
+                    {{ row.file_name }}
+                  </span>
+                  <span class="asset-code mono-text">/{{ row.folder_path || '' }}</span>
+                </div>
+              </template>
+            </el-table-column>
+
+            <el-table-column label="所属域" min-width="140">
+              <template #default="{ row }">
+                <el-tag size="small" type="info" effect="plain">{{ row.domain_name }}</el-tag>
+              </template>
+            </el-table-column>
+
+            <el-table-column label="所属知识库" min-width="160">
+              <template #default="{ row }">
+                <span>{{ row.kb_name }}</span>
+              </template>
+            </el-table-column>
+
+            <el-table-column label="收藏时间" width="165">
+              <template #default="{ row }">
+                {{ formatDateTime(row.created_at) }}
+              </template>
+            </el-table-column>
+
+            <el-table-column label="操作" width="150" fixed="right">
+              <template #default="{ row }">
+                <el-button link type="primary" size="small" @click="goToFavoriteDoc(row)">
+                  前往查看
+                </el-button>
+                <el-button link type="danger" size="small" @click="handleUnfavorite(row)">
+                  取消收藏
+                </el-button>
+              </template>
+            </el-table-column>
+
+            <template #empty>
+              <el-empty description="您还没有收藏任何知识库文档" />
+            </template>
+          </el-table>
         </el-tab-pane>
 
         <el-tab-pane label="API Key 管理" name="apikeys">

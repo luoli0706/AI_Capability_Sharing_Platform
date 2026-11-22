@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowLeft,
   ArrowRight,
+  ChatLineSquare,
   Check,
   Close,
   Collection,
@@ -17,9 +18,12 @@ import {
   FolderAdd,
   FolderOpened,
   Picture,
+  Pointer,
   Refresh,
   RefreshRight,
   Search,
+  Star,
+  StarFilled,
   Upload,
   ZoomIn,
   ZoomOut
@@ -30,20 +34,39 @@ import CrossRefSection from '@/components/CrossRefSection.vue'
 import { extractFilesFromDrop, getFileRelativePath, isFileDragEvent } from '@/utils/dropFiles'
 import {
   copyDocument,
+  createDocumentComment,
   createKbFile,
   createKbFolder,
   deleteDocument,
+  deleteDocumentComment,
   getDocumentContent,
+  getDocumentInteractions,
   getDocumentRawBlob,
   getDocuments,
+  listDocumentComments,
   moveDocument,
   searchKB,
+  toggleDocumentFavorite,
+  toggleDocumentLike,
   updateKbFileContent,
   uploadDocument
 } from '@/api/kb'
 import { useDomainStore } from '@/stores/domain'
-import type { AssetItem, KbChunk, KbContentResult, KbDocument } from '@/types/api'
-import { formatFileSize, getKbParseStatusMeta, normalizeList } from '@/utils/format'
+import type {
+  AssetItem,
+  KbChunk,
+  KbCommentItem,
+  KbContentResult,
+  KbDocument,
+  KbDocumentInteractions,
+  UserBrief
+} from '@/types/api'
+import {
+  formatDateTime,
+  formatFileSize,
+  getKbParseStatusMeta,
+  normalizeList
+} from '@/utils/format'
 import {
   buildImmediateKbTreeNodes,
   confirmAndDownloadKb,
@@ -266,10 +289,14 @@ async function fetchKbs() {
     kbList.value = normalized.items
     kbTotal.value = normalized.total
     if (kbList.value.length > 0) {
-      if (!kbList.value.some((k) => k.id === selectedKbId.value)) {
+      const queryKbId = Number(route.query.kbId)
+      if (Number.isFinite(queryKbId) && kbList.value.some((k) => k.id === queryKbId)) {
+        selectedKbId.value = queryKbId
+      } else if (!kbList.value.some((k) => k.id === selectedKbId.value)) {
         selectedKbId.value = kbList.value[0].id
       }
       refreshTree()
+      await tryOpenQueryDocument()
     } else {
       selectedKbId.value = null
       folderFilesCache.value = {}
@@ -650,17 +677,165 @@ function handleLightboxMouseUp() {
   window.removeEventListener('mouseup', handleLightboxMouseUp)
 }
 
-async function handleNodeClick(node: KbTreeNode) {
-  if (node.isFolder) {
-    selectedFolderPath.value = node.folderPath
-    selectedFileNode.value = null
+// Document Interactions (Likes, Own Favorite, Annotations/Comments)
+const currentSelectedDoc = computed(() => selectedFileNode.value?.doc ?? null)
+const interactions = ref<KbDocumentInteractions>({
+  like_count: 0,
+  liked_by_me: false,
+  like_users: [],
+  favorited_by_me: false,
+  comment_count: 0
+})
+const loadingInteractions = ref(false)
+const togglingLike = ref(false)
+const togglingFavorite = ref(false)
+const comments = ref<KbCommentItem[]>([])
+const loadingComments = ref(false)
+const commentQuote = ref('')
+const commentContent = ref('')
+const submittingComment = ref(false)
+
+function getUserDisplay(u?: UserBrief | null, fallbackId?: number): string {
+  if (u) return u.nickname || u.username || `用户 #${u.id}`
+  return fallbackId ? `用户 #${fallbackId}` : '未知用户'
+}
+
+function getUserInitial(u?: UserBrief | null, fallbackId?: number): string {
+  return getUserDisplay(u, fallbackId).slice(0, 1).toUpperCase()
+}
+
+function goToUserProfile(targetUserId?: number | null) {
+  if (!targetUserId) return
+  router.push(`/users/${targetUserId}`)
+}
+
+function resetSocialState() {
+  interactions.value = {
+    like_count: 0,
+    liked_by_me: false,
+    like_users: [],
+    favorited_by_me: false,
+    comment_count: 0
+  }
+  comments.value = []
+  commentQuote.value = ''
+  commentContent.value = ''
+}
+
+async function loadDocSocialData(kbId: number, docId: number) {
+  loadingInteractions.value = true
+  loadingComments.value = true
+  try {
+    interactions.value = await getDocumentInteractions(kbId, docId)
+  } catch {
+    // Keep defaults
+  } finally {
+    loadingInteractions.value = false
+  }
+  try {
+    const res = await listDocumentComments(kbId, docId)
+    comments.value = Array.isArray(res) ? res : (res.list ?? [])
+  } catch {
+    comments.value = []
+  } finally {
+    loadingComments.value = false
+  }
+}
+
+async function handleToggleLike() {
+  if (!selectedKbId.value || !currentSelectedDoc.value || togglingLike.value) return
+  togglingLike.value = true
+  try {
+    const res = await toggleDocumentLike(selectedKbId.value, currentSelectedDoc.value.id)
+    interactions.value.like_count = res.like_count
+    interactions.value.liked_by_me = Boolean(res.liked_by_me ?? res.liked)
+    if (res.like_users) {
+      interactions.value.like_users = res.like_users
+    } else {
+      const fresh = await getDocumentInteractions(selectedKbId.value, currentSelectedDoc.value.id)
+      interactions.value = fresh
+    }
+  } catch {
+    // Handled by interceptor
+  } finally {
+    togglingLike.value = false
+  }
+}
+
+async function handleToggleFavorite() {
+  if (!selectedKbId.value || !currentSelectedDoc.value || togglingFavorite.value) return
+  togglingFavorite.value = true
+  try {
+    const res = await toggleDocumentFavorite(selectedKbId.value, currentSelectedDoc.value.id)
+    const nextFav = Boolean(res.favorited_by_me ?? res.favorited)
+    interactions.value.favorited_by_me = nextFav
+    ElMessage.success(nextFav ? '已添加到我的收藏' : '已取消收藏')
+  } catch {
+    // Handled by interceptor
+  } finally {
+    togglingFavorite.value = false
+  }
+}
+
+async function handleSubmitComment() {
+  if (!selectedKbId.value || !currentSelectedDoc.value || submittingComment.value) return
+  const content = commentContent.value.trim()
+  if (!content) {
+    ElMessage.warning('请输入评论内容')
     return
   }
-  if (!node.doc || !selectedKbId.value) return
-  const doc = node.doc
-  selectedFileNode.value = node
+  submittingComment.value = true
+  try {
+    const created = await createDocumentComment(selectedKbId.value, currentSelectedDoc.value.id, {
+      content,
+      quote_text: commentQuote.value.trim() || undefined
+    })
+    comments.value = [created, ...comments.value]
+    interactions.value.comment_count = comments.value.length
+    commentQuote.value = ''
+    commentContent.value = ''
+    ElMessage.success('批注与评论已发布')
+  } catch {
+    // Handled by interceptor
+  } finally {
+    submittingComment.value = false
+  }
+}
+
+async function handleDeleteComment(comment: KbCommentItem) {
+  if (!selectedKbId.value || !currentSelectedDoc.value) return
+  try {
+    await ElMessageBox.confirm('确认删除这条批注/评论吗？', '删除确认', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+    await deleteDocumentComment(selectedKbId.value, currentSelectedDoc.value.id, comment.id)
+    comments.value = comments.value.filter((c) => c.id !== comment.id)
+    interactions.value.comment_count = comments.value.length
+    ElMessage.success('已删除')
+  } catch {
+    // Cancelled or failed
+  }
+}
+
+async function openFileDoc(doc: KbDocument) {
+  if (!selectedKbId.value) return
+  selectedFileNode.value = {
+    key: `file-${doc.id}`,
+    label: doc.file_name,
+    isFolder: false,
+    isLeaf: true,
+    folderPath: doc.folder_path || '',
+    fileSize: doc.file_size,
+    doc,
+    children: []
+  }
   rightTab.value = 'preview'
   resetPreviewState()
+  resetSocialState()
+  void loadDocSocialData(selectedKbId.value, doc.id)
+
   if (isImageFile(doc.file_name)) {
     const cleanFolder = (doc.folder_path || '').replace(/^\/+|\/+$/g, '')
     let folderDocs = folderFilesCache.value[cleanFolder]
@@ -707,6 +882,31 @@ async function handleNodeClick(node: KbTreeNode) {
   } finally {
     loadingPreview.value = false
   }
+}
+
+async function tryOpenQueryDocument() {
+  const queryDocId = Number(route.query.docId)
+  if (!Number.isFinite(queryDocId) || queryDocId <= 0 || !selectedKbId.value) return
+  try {
+    const res = await getDocuments(selectedKbId.value)
+    const docs = normalizeList(res).items
+    const match = docs.find((d) => !d.is_folder && d.id === queryDocId)
+    if (match) {
+      await openFileDoc(match)
+    }
+  } catch {
+    // Ignore
+  }
+}
+
+async function handleNodeClick(node: KbTreeNode) {
+  if (node.isFolder) {
+    selectedFolderPath.value = node.folderPath
+    selectedFileNode.value = null
+    return
+  }
+  if (!node.doc || !selectedKbId.value) return
+  await openFileDoc(node.doc)
 }
 
 function allowDrag(draggingNode: { data: KbTreeNode }): boolean {
@@ -1189,7 +1389,86 @@ onBeforeUnmount(() => {
                 <el-skeleton :rows="6" animated />
               </div>
 
-              <div v-else-if="imageDoc" class="preview-container">
+              <template v-else-if="currentSelectedDoc && (imageDoc || binaryDoc || previewDoc)">
+                <!-- Uploader & Interactions Bar -->
+                <div class="doc-social-bar">
+                  <div class="doc-uploader-info">
+                    <span class="uploader-label">上传者</span>
+                    <button
+                      type="button"
+                      class="user-chip-btn"
+                      @click="goToUserProfile(currentSelectedDoc.uploader?.id || currentSelectedDoc.uploader_id)"
+                    >
+                      <el-avatar :size="22" :src="currentSelectedDoc.uploader?.avatar || undefined">
+                        {{ getUserInitial(currentSelectedDoc.uploader, currentSelectedDoc.uploader_id) }}
+                      </el-avatar>
+                      <span class="user-chip-name">
+                        {{ getUserDisplay(currentSelectedDoc.uploader, currentSelectedDoc.uploader_id) }}
+                      </span>
+                    </button>
+                    <span class="doc-time-sep">·</span>
+                    <span class="doc-time-text tabular-nums">
+                      更新于 {{ formatDateTime(currentSelectedDoc.updated_at || currentSelectedDoc.created_at) }}
+                    </span>
+                  </div>
+
+                  <div class="doc-action-btns">
+                    <el-button
+                      size="small"
+                      :type="interactions.liked_by_me ? 'primary' : 'default'"
+                      :plain="!interactions.liked_by_me"
+                      :loading="togglingLike"
+                      :icon="Pointer"
+                      @click="handleToggleLike"
+                    >
+                      {{ interactions.liked_by_me ? '已赞' : '点赞' }}
+                      <span class="tabular-nums" style="margin-left: 4px">{{ interactions.like_count }}</span>
+                    </el-button>
+
+                    <el-popover
+                      v-if="interactions.like_count > 0 && interactions.like_users.length > 0"
+                      placement="bottom"
+                      :width="240"
+                      trigger="click"
+                    >
+                      <template #reference>
+                        <el-button size="small" link type="info">
+                          谁赞过 ({{ interactions.like_users.length }})
+                        </el-button>
+                      </template>
+                      <div class="like-users-popover">
+                        <div class="popover-title">点赞用户</div>
+                        <div class="like-users-list">
+                          <button
+                            v-for="u in interactions.like_users"
+                            :key="u.id"
+                            type="button"
+                            class="like-user-item"
+                            @click="goToUserProfile(u.id)"
+                          >
+                            <el-avatar :size="24" :src="u.avatar || undefined">
+                              {{ getUserInitial(u) }}
+                            </el-avatar>
+                            <span>{{ getUserDisplay(u) }}</span>
+                          </button>
+                        </div>
+                      </div>
+                    </el-popover>
+
+                    <el-button
+                      size="small"
+                      :type="interactions.favorited_by_me ? 'warning' : 'default'"
+                      :plain="!interactions.favorited_by_me"
+                      :loading="togglingFavorite"
+                      :icon="interactions.favorited_by_me ? StarFilled : Star"
+                      @click="handleToggleFavorite"
+                    >
+                      {{ interactions.favorited_by_me ? '已收藏' : '收藏' }}
+                    </el-button>
+                  </div>
+                </div>
+
+                <div v-if="imageDoc" class="preview-container">
                 <div class="preview-header">
                   <div class="preview-meta">
                     <span class="preview-filename mono-text">{{ imageDoc.file_name }}</span>
@@ -1350,6 +1629,90 @@ onBeforeUnmount(() => {
                 </div>
                 <pre v-else class="raw-markdown mono-text">{{ previewDoc.content }}</pre>
               </div>
+
+              <!-- Annotations & Comments Section -->
+              <div class="doc-comments-section">
+                <div class="comments-header">
+                  <div class="comments-title-wrap">
+                    <el-icon :size="16" color="#4F46E5"><ChatLineSquare /></el-icon>
+                    <h4 class="comments-title">批注与评论</h4>
+                    <el-tag size="small" type="info" effect="plain" class="tabular-nums">
+                      {{ comments.length }}
+                    </el-tag>
+                  </div>
+                </div>
+
+                <div class="comment-composer">
+                  <el-input
+                    v-model="commentQuote"
+                    size="small"
+                    placeholder="批注摘录 / 定位（选填，如：第3段或图片区域说明）"
+                    clearable
+                  />
+                  <el-input
+                    v-model="commentContent"
+                    type="textarea"
+                    :rows="2"
+                    placeholder="写下你的批注或评论..."
+                  />
+                  <div class="comment-composer-actions">
+                    <el-button
+                      type="primary"
+                      size="small"
+                      :loading="submittingComment"
+                      :disabled="!commentContent.trim()"
+                      @click="handleSubmitComment"
+                    >
+                      发布评论
+                    </el-button>
+                  </div>
+                </div>
+
+                <div v-loading="loadingComments" class="comments-list">
+                  <div
+                    v-for="c in comments"
+                    :key="c.id"
+                    class="comment-item"
+                  >
+                    <div class="comment-item-header">
+                      <button
+                        type="button"
+                        class="user-chip-btn"
+                        @click="goToUserProfile(c.author?.id || c.user_id)"
+                      >
+                        <el-avatar :size="24" :src="c.author?.avatar || undefined">
+                          {{ getUserInitial(c.author, c.user_id) }}
+                        </el-avatar>
+                        <span class="user-chip-name">{{ getUserDisplay(c.author, c.user_id) }}</span>
+                      </button>
+                      <div class="comment-item-right">
+                        <span class="comment-time tabular-nums">{{ formatDateTime(c.created_at) }}</span>
+                        <el-button
+                          v-if="c.can_delete"
+                          link
+                          type="danger"
+                          size="small"
+                          :icon="Delete"
+                          @click="handleDeleteComment(c)"
+                        >
+                          删除
+                        </el-button>
+                      </div>
+                    </div>
+                    <blockquote v-if="c.quote_text" class="comment-quote">
+                      {{ c.quote_text }}
+                    </blockquote>
+                    <div class="comment-content">{{ c.content }}</div>
+                  </div>
+
+                  <el-empty
+                    v-if="!loadingComments && comments.length === 0"
+                    description="暂无批注或评论，欢迎发表第一条看法"
+                    :image-size="48"
+                  />
+                </div>
+              </div>
+              </template>
 
               <div v-else class="preview-placeholder">
                 在左侧目录树点击任意文件（支持 Markdown、文本、代码、图片及二进制文件），即可在此处预览、编辑或下载。
@@ -2209,5 +2572,190 @@ onBeforeUnmount(() => {
   .kb-panel {
     padding: 14px 12px;
   }
+}
+
+.doc-social-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  border-radius: 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+}
+
+.doc-uploader-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: #64748b;
+}
+
+.uploader-label {
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.user-chip-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  padding: 2px 6px 2px 2px;
+  border-radius: 999px;
+  cursor: pointer;
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 500;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.user-chip-btn:hover {
+  background: #e0e7ff;
+  color: #4f46e5;
+}
+
+.doc-time-text {
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.doc-action-btns {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.like-users-popover .popover-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #64748b;
+  margin-bottom: 8px;
+}
+
+.like-users-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.like-user-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #0f172a;
+  text-align: left;
+}
+
+.like-user-item:hover {
+  background: #f1f5f9;
+  color: #4f46e5;
+}
+
+.doc-comments-section {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.comments-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.comments-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.comments-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.comment-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  margin-bottom: 16px;
+}
+
+.comment-composer-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.comments-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.comment-item {
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid #e2e8f0;
+  background: #ffffff;
+}
+
+.comment-item-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.comment-item-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.comment-time {
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.comment-quote {
+  margin: 0 0 8px;
+  padding: 6px 10px;
+  border-left: 3px solid #6366f1;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 12px;
+  border-radius: 0 6px 6px 0;
+}
+
+.comment-content {
+  font-size: 13px;
+  line-height: 1.6;
+  color: #1e293b;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 </style>

@@ -13,6 +13,23 @@ export interface PaginatedData<T> {
   page_size?: number
 }
 
+export interface UserBrief {
+  id: number
+  username: string
+  nickname: string
+  avatar: string
+}
+
+export interface PublicUserProfile {
+  id: number
+  username: string
+  nickname: string
+  avatar: string
+  bio: string
+  favorites_public: boolean
+  created_at: string
+}
+
 export interface UserInfo {
   id: number
   username: string
@@ -20,6 +37,7 @@ export interface UserInfo {
   email?: string
   avatar: string
   bio?: string
+  favorites_public?: boolean
   roles: string[]
   status?: number
   created_at?: string
@@ -48,6 +66,7 @@ export interface UpdateProfilePayload {
   email?: string
   avatar?: string
   bio?: string
+  favorites_public?: boolean
 }
 
 export interface UpdatePasswordPayload {
@@ -336,6 +355,7 @@ export interface KbDocument {
   error_msg?: string
   chunk_count: number
   uploader_id: number
+  uploader?: UserBrief
   created_at: string
   updated_at?: string
 }
@@ -557,5 +577,58 @@ export interface CrossRefSourceKbFile {
 export interface CrossRefSourceItemsResult {
   assets: AssetItem[]
   kb_files: CrossRefSourceKbFile[]
+}
+
+export interface UserFavoriteItem {
+  id: number
+  kb_asset_id: number
+  doc_id: number
+  domain_id: number
+  domain_name: string
+  kb_name: string
+  file_name: string
+  folder_path: string
+  file_ext: string
+  created_at: string
+}
+
+export interface ConversationItem {
+  id: number
+  peer: UserBrief
+  last_message_preview: string
+  last_message_at: string | null
+  unread_count: number
+  updated_at: string
+}
+
+export interface UserMessageItem {
+  id: number
+  conversation_id: number
+  sender_id: number
+  receiver_id: number
+  content: string
+  is_read: boolean
+  created_at: string
+}
+
+export interface KbDocumentInteractions {
+  like_count: number
+  liked_by_me: boolean
+  like_users: UserBrief[]
+  favorited_by_me: boolean
+  comment_count: number
+}
+
+export interface KbCommentItem {
+  id: number
+  kb_asset_id: number
+  doc_id: number
+  user_id: number
+  author: UserBrief
+  parent_id?: number | null
+  quote_text: string
+  content: string
+  can_delete: boolean
+  created_at: string
 }
 

@@ -2,10 +2,13 @@ import request, { apiDelete, apiGet, apiPost, apiPut } from './request'
 import { deobfuscateBase64ToText, deobfuscateBytes } from '@/utils/obfuscate'
 import type {
   KbChunk,
+  KbCommentItem,
   KbContentResult,
   KbDocument,
+  KbDocumentInteractions,
   KbDownloadPreview,
-  PaginatedData
+  PaginatedData,
+  UserBrief
 } from '@/types/api'
 
 const IMAGE_MIME_MAP: Record<string, string> = {
@@ -182,4 +185,60 @@ export async function downloadKbFiles(
   link.click()
   document.body.removeChild(link)
   URL.revokeObjectURL(blobUrl)
+}
+
+export function getDocumentInteractions(
+  kbAssetId: number,
+  docId: number
+): Promise<KbDocumentInteractions> {
+  return apiGet<KbDocumentInteractions>(`/kb/${kbAssetId}/documents/${docId}/interactions`)
+}
+
+export function toggleDocumentLike(
+  kbAssetId: number,
+  docId: number
+): Promise<{ liked_by_me?: boolean; liked?: boolean; like_count: number; like_users?: UserBrief[] }> {
+  return apiPost<{
+    liked_by_me?: boolean
+    liked?: boolean
+    like_count: number
+    like_users?: UserBrief[]
+  }>(`/kb/${kbAssetId}/documents/${docId}/like`)
+}
+
+export function toggleDocumentFavorite(
+  kbAssetId: number,
+  docId: number
+): Promise<{ favorited_by_me?: boolean; favorited?: boolean }> {
+  return apiPost<{ favorited_by_me?: boolean; favorited?: boolean }>(
+    `/kb/${kbAssetId}/documents/${docId}/favorite`
+  )
+}
+
+export function listDocumentComments(
+  kbAssetId: number,
+  docId: number
+): Promise<{ list: KbCommentItem[] } | KbCommentItem[]> {
+  return apiGet<{ list: KbCommentItem[] } | KbCommentItem[]>(
+    `/kb/${kbAssetId}/documents/${docId}/comments`
+  )
+}
+
+export function createDocumentComment(
+  kbAssetId: number,
+  docId: number,
+  data: { content: string; quote_text?: string; parent_id?: number }
+): Promise<KbCommentItem> {
+  return apiPost<KbCommentItem, { content: string; quote_text?: string; parent_id?: number }>(
+    `/kb/${kbAssetId}/documents/${docId}/comments`,
+    data
+  )
+}
+
+export function deleteDocumentComment(
+  kbAssetId: number,
+  docId: number,
+  commentId: number
+): Promise<null> {
+  return apiDelete<null>(`/kb/${kbAssetId}/documents/${docId}/comments/${commentId}`)
 }

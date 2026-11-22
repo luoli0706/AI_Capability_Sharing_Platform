@@ -91,6 +91,7 @@ type KBDocument struct {
 	ErrorMsg    string         `gorm:"type:varchar(512);not null;default:''" json:"error_msg"`
 	ChunkCount  int            `gorm:"type:int;not null;default:0" json:"chunk_count"`
 	UploaderID  uint64         `gorm:"not null" json:"uploader_id"`
+	Uploader    *UserBrief     `gorm:"-" json:"uploader,omitempty"`
 	CreatedAt   time.Time      `gorm:"autoCreateTime" json:"created_at"`
 	UpdatedAt   time.Time      `gorm:"autoUpdateTime" json:"updated_at"`
 	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`

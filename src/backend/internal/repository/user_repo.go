@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"strings"
 	"time"
 
 	"ascp-backend/internal/model"
@@ -14,10 +15,12 @@ type UserRepository interface {
 	FindByUsername(username string) (*model.SysUser, error)
 	FindByEmail(email string) (*model.SysUser, error)
 	GetUserRoles(userID uint64) ([]string, error)
-	UpdateProfile(userID uint64, nickname string, email *string, avatar, bio string) error
+	UpdateProfile(userID uint64, nickname string, email *string, avatar, bio string, favoritesPublic bool) error
 	UpdatePasswordAndTokenVersion(userID uint64, passwordHash string) error
 	IncrementTokenVersion(userID uint64) error
 	UpdateLastLogin(userID uint64, t time.Time) error
+	SearchActiveUsers(keyword string, excludeUserID uint64, limit int) ([]model.UserBrief, error)
+	FindBriefsByIDs(ids []uint64) (map[uint64]model.UserBrief, error)
 }
 
 type userRepository struct {
@@ -87,12 +90,13 @@ func (r *userRepository) GetUserRoles(userID uint64) ([]string, error) {
 	return roles, nil
 }
 
-func (r *userRepository) UpdateProfile(userID uint64, nickname string, email *string, avatar, bio string) error {
+func (r *userRepository) UpdateProfile(userID uint64, nickname string, email *string, avatar, bio string, favoritesPublic bool) error {
 	updates := map[string]interface{}{
-		"nickname": nickname,
-		"email":    email,
-		"avatar":   avatar,
-		"bio":      bio,
+		"nickname":         nickname,
+		"email":            email,
+		"avatar":           avatar,
+		"bio":              bio,
+		"favorites_public": favoritesPublic,
 	}
 	return r.db.Model(&model.SysUser{}).Where("id = ?", userID).Updates(updates).Error
 }
@@ -112,4 +116,47 @@ func (r *userRepository) IncrementTokenVersion(userID uint64) error {
 func (r *userRepository) UpdateLastLogin(userID uint64, t time.Time) error {
 	return r.db.Model(&model.SysUser{}).Where("id = ?", userID).
 		UpdateColumn("last_login_at", t).Error
+}
+
+func (r *userRepository) SearchActiveUsers(keyword string, excludeUserID uint64, limit int) ([]model.UserBrief, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+	tx := r.db.Model(&model.SysUser{}).
+		Select("id, username, nickname, avatar").
+		Where("status = ?", model.UserStatusActive)
+	if excludeUserID > 0 {
+		tx = tx.Where("id <> ?", excludeUserID)
+	}
+	kw := strings.TrimSpace(keyword)
+	if kw != "" {
+		like := "%" + kw + "%"
+		tx = tx.Where("(username LIKE ? OR nickname LIKE ?)", like, like)
+	}
+	var users []model.UserBrief
+	if err := tx.Order("id ASC").Limit(limit).Scan(&users).Error; err != nil {
+		return nil, err
+	}
+	if users == nil {
+		users = []model.UserBrief{}
+	}
+	return users, nil
+}
+
+func (r *userRepository) FindBriefsByIDs(ids []uint64) (map[uint64]model.UserBrief, error) {
+	result := make(map[uint64]model.UserBrief)
+	if len(ids) == 0 {
+		return result, nil
+	}
+	var users []model.UserBrief
+	if err := r.db.Model(&model.SysUser{}).
+		Select("id, username, nickname, avatar").
+		Where("id IN ?", ids).
+		Scan(&users).Error; err != nil {
+		return nil, err
+	}
+	for _, u := range users {
+		result[u.ID] = u
+	}
+	return result, nil
 }

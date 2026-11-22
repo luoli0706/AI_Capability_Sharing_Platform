@@ -664,10 +664,10 @@ onMounted(() => {
             <el-table :data="pagedOrgMembers" stripe style="width: 100%">
               <el-table-column label="成员" min-width="150">
                 <template #default="{ row }">
-                  <div class="member-cell">
+                  <router-link :to="`/users/${row.user_id}`" class="member-cell member-user-link">
                     <span class="member-nick">{{ row.nickname || row.username }}</span>
                     <span class="member-uname mono-text">@{{ row.username }}</span>
-                  </div>
+                  </router-link>
                 </template>
               </el-table-column>
 

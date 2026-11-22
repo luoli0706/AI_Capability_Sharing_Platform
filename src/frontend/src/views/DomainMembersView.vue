@@ -193,10 +193,10 @@ onMounted(() => {
       <el-table v-loading="loading" :data="pagedMembers" stripe style="width: 100%">
         <el-table-column label="成员姓名 / 用户名" min-width="200">
           <template #default="{ row }">
-            <div class="member-user">
+            <router-link :to="`/users/${row.user_id}`" class="member-user member-user-link">
               <span class="member-nickname">{{ row.nickname || row.username }}</span>
               <span class="member-username mono-text">@{{ row.username }}</span>
-            </div>
+            </router-link>
           </template>
         </el-table-column>
 

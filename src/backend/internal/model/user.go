@@ -22,8 +22,9 @@ type SysUser struct {
 	Nickname     string         `gorm:"type:varchar(64);not null;default:''" json:"nickname"`
 	Email        *string        `gorm:"type:varchar(128);uniqueIndex:uk_email" json:"email"`
 	Avatar       string         `gorm:"type:mediumtext;not null" json:"avatar"`
-	Bio          string         `gorm:"type:varchar(255);not null;default:''" json:"bio"`
-	Status       int8           `gorm:"type:tinyint;not null;default:1" json:"status"`
+	Bio             string         `gorm:"type:varchar(255);not null;default:''" json:"bio"`
+	FavoritesPublic bool           `gorm:"default:false;not null" json:"favorites_public"`
+	Status          int8           `gorm:"type:tinyint;not null;default:1" json:"status"`
 	TokenVersion int            `gorm:"type:int;not null;default:1" json:"-"`
 	LastLoginAt  *time.Time     `gorm:"type:datetime" json:"last_login_at,omitempty"`
 	CreatedAt    time.Time      `gorm:"autoCreateTime" json:"created_at"`
@@ -62,15 +63,59 @@ func (SysUserRole) TableName() string {
 
 // UserInfo is the public user representation returned in auth and profile responses.
 type UserInfo struct {
-	ID        uint64    `json:"id"`
-	Username  string    `json:"username"`
-	Nickname  string    `json:"nickname"`
-	Email     string    `json:"email"`
-	Avatar    string    `json:"avatar"`
-	Bio       string    `json:"bio"`
-	Status    int8      `json:"status,omitempty"`
-	Roles     []string  `json:"roles"`
-	CreatedAt time.Time `json:"created_at,omitempty"`
+	ID              uint64    `json:"id"`
+	Username        string    `json:"username"`
+	Nickname        string    `json:"nickname"`
+	Email           string    `json:"email"`
+	Avatar          string    `json:"avatar"`
+	Bio             string    `json:"bio"`
+	FavoritesPublic bool      `json:"favorites_public"`
+	Status          int8      `json:"status,omitempty"`
+	Roles           []string  `json:"roles"`
+	CreatedAt       time.Time `json:"created_at,omitempty"`
+}
+
+// UserBrief is a compact user summary for lists, uploaders, peers, and interactions.
+type UserBrief struct {
+	ID       uint64 `json:"id"`
+	Username string `json:"username"`
+	Nickname string `json:"nickname"`
+	Avatar   string `json:"avatar"`
+}
+
+// ToUserBrief converts SysUser to UserBrief.
+func ToUserBrief(u *SysUser) UserBrief {
+	return UserBrief{
+		ID:       u.ID,
+		Username: u.Username,
+		Nickname: u.Nickname,
+		Avatar:   u.Avatar,
+	}
+}
+
+// PublicUserProfile represents GET /api/v1/users/:id response data.
+type PublicUserProfile struct {
+	ID              uint64    `json:"id"`
+	Username        string    `json:"username"`
+	Nickname        string    `json:"nickname"`
+	Avatar          string    `json:"avatar"`
+	Bio             string    `json:"bio"`
+	FavoritesPublic bool      `json:"favorites_public"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+// UserFavoriteItem represents a favorited KB document entry.
+type UserFavoriteItem struct {
+	ID         uint64    `json:"id"`
+	KBAssetID  uint64    `json:"kb_asset_id"`
+	DocID      uint64    `json:"doc_id"`
+	DomainID   uint64    `json:"domain_id"`
+	DomainName string    `json:"domain_name"`
+	KBName     string    `json:"kb_name"`
+	FileName   string    `json:"file_name"`
+	FolderPath string    `json:"folder_path"`
+	FileExt    string    `json:"file_ext"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // ToUserInfo converts SysUser to UserInfo, turning nil Email into "".
@@ -83,15 +128,16 @@ func ToUserInfo(u *SysUser, roles []string) UserInfo {
 		roles = []string{}
 	}
 	return UserInfo{
-		ID:        u.ID,
-		Username:  u.Username,
-		Nickname:  u.Nickname,
-		Email:     email,
-		Avatar:    u.Avatar,
-		Bio:       u.Bio,
-		Status:    u.Status,
-		Roles:     roles,
-		CreatedAt: u.CreatedAt,
+		ID:              u.ID,
+		Username:        u.Username,
+		Nickname:        u.Nickname,
+		Email:           email,
+		Avatar:          u.Avatar,
+		Bio:             u.Bio,
+		FavoritesPublic: u.FavoritesPublic,
+		Status:          u.Status,
+		Roles:           roles,
+		CreatedAt:       u.CreatedAt,
 	}
 }
 
@@ -118,10 +164,11 @@ type LoginResponse struct {
 
 // UpdateProfileRequest represents PUT /api/v1/user/profile payload.
 type UpdateProfileRequest struct {
-	Nickname string  `json:"nickname" validate:"max=64"`
-	Email    string  `json:"email" validate:"omitempty,email,max=128"`
-	Avatar   *string `json:"avatar"`
-	Bio      *string `json:"bio" validate:"omitempty,max=255"`
+	Nickname        string  `json:"nickname" validate:"max=64"`
+	Email           string  `json:"email" validate:"omitempty,email,max=128"`
+	Avatar          *string `json:"avatar"`
+	Bio             *string `json:"bio" validate:"omitempty,max=255"`
+	FavoritesPublic *bool   `json:"favorites_public"`
 }
 
 // UpdatePasswordRequest represents PUT /api/v1/user/password payload.

@@ -72,12 +72,13 @@ func (m *memUserRepo) FindByEmail(email string) (*model.SysUser, error) {
 func (m *memUserRepo) GetUserRoles(userID uint64) ([]string, error) {
 	return m.roles[userID], nil
 }
-func (m *memUserRepo) UpdateProfile(userID uint64, nickname string, email *string, avatar, bio string) error {
+func (m *memUserRepo) UpdateProfile(userID uint64, nickname string, email *string, avatar, bio string, favoritesPublic bool) error {
 	if u, ok := m.users[userID]; ok {
 		u.Nickname = nickname
 		u.Email = email
 		u.Avatar = avatar
 		u.Bio = bio
+		u.FavoritesPublic = favoritesPublic
 		return nil
 	}
 	return gorm.ErrRecordNotFound
@@ -98,6 +99,18 @@ func (m *memUserRepo) IncrementTokenVersion(userID uint64) error {
 	return gorm.ErrRecordNotFound
 }
 func (m *memUserRepo) UpdateLastLogin(userID uint64, t time.Time) error { return nil }
+func (m *memUserRepo) SearchActiveUsers(keyword string, excludeUserID uint64, limit int) ([]model.UserBrief, error) {
+	return []model.UserBrief{}, nil
+}
+func (m *memUserRepo) FindBriefsByIDs(ids []uint64) (map[uint64]model.UserBrief, error) {
+	res := make(map[uint64]model.UserBrief)
+	for _, id := range ids {
+		if u, ok := m.users[id]; ok {
+			res[id] = model.ToUserBrief(u)
+		}
+	}
+	return res, nil
+}
 
 type memDomainRepo struct {
 	nextID  uint64

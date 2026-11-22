@@ -84,12 +84,17 @@ func AutoMigrate(db *gorm.DB) error {
 		&model.KBKnowledgeBase{},
 		&model.KBDocument{},
 		&model.KBChunk{},
+		&model.KBDocumentLike{},
+		&model.KBDocumentFavorite{},
+		&model.KBDocumentComment{},
 		&model.AssetPermission{},
 		&model.ApprovalRequest{},
 		&model.ApprovalRecord{},
 		&model.AssetInvokeLog{},
 		&model.AssetAuditLog{},
 		&model.DomainCrossRef{},
+		&model.UserConversation{},
+		&model.UserMessage{},
 	); err != nil {
 		return err
 	}

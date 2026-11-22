@@ -36,7 +36,7 @@ func (m *mockUserRepo) FindByEmail(email string) (*model.SysUser, error) {
 func (m *mockUserRepo) GetUserRoles(userID uint64) ([]string, error) {
 	return m.roles[userID], nil
 }
-func (m *mockUserRepo) UpdateProfile(userID uint64, nickname string, email *string, avatar, bio string) error {
+func (m *mockUserRepo) UpdateProfile(userID uint64, nickname string, email *string, avatar, bio string, favoritesPublic bool) error {
 	return nil
 }
 func (m *mockUserRepo) UpdatePasswordAndTokenVersion(userID uint64, passwordHash string) error {
@@ -44,6 +44,12 @@ func (m *mockUserRepo) UpdatePasswordAndTokenVersion(userID uint64, passwordHash
 }
 func (m *mockUserRepo) IncrementTokenVersion(userID uint64) error          { return nil }
 func (m *mockUserRepo) UpdateLastLogin(userID uint64, t time.Time) error { return nil }
+func (m *mockUserRepo) SearchActiveUsers(keyword string, excludeUserID uint64, limit int) ([]model.UserBrief, error) {
+	return []model.UserBrief{}, nil
+}
+func (m *mockUserRepo) FindBriefsByIDs(ids []uint64) (map[uint64]model.UserBrief, error) {
+	return map[uint64]model.UserBrief{}, nil
+}
 
 func TestAuthMiddleware(t *testing.T) {
 	secret := "unit-test-secret"

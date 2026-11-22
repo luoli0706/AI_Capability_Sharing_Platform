@@ -261,7 +261,13 @@ onBeforeUnmount(() => {
           <div class="footer-meta">
             <span class="meta-domain">{{ asset.domain_name || currentDomain?.domain_name || `域 #${asset.domain_id}` }}</span>
             <span class="meta-dot">·</span>
-            <span class="meta-owner">{{ getOwnerLabel(asset) }}</span>
+            <router-link
+              :to="`/users/${asset.owner?.id || asset.owner_id}`"
+              class="meta-owner meta-owner-link"
+              @click.stop
+            >
+              {{ getOwnerLabel(asset) }}
+            </router-link>
           </div>
           <div class="invoke-stat tabular-nums" title="累计调用次数">
             <el-icon :size="14"><Histogram /></el-icon>

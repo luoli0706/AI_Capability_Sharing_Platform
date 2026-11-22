@@ -569,7 +569,12 @@ async function handleRunInvoke() {
                 {{ detail.domain_name || `域 #${detail.domain_id}` }}
               </el-descriptions-item>
               <el-descriptions-item label="资产负责人">
-                {{ ownerDisplay }}
+                <router-link
+                  :to="`/users/${detail.owner?.id || detail.owner_id}`"
+                  style="color: #4f46e5; text-decoration: none; font-weight: 500"
+                >
+                  {{ ownerDisplay }}
+                </router-link>
               </el-descriptions-item>
               <el-descriptions-item label="可见范围">
                 {{ getVisibilityLabel(detail.visibility) }}

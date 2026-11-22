@@ -94,19 +94,21 @@ type KBService interface {
 	EncryptExistingPlainFiles(ctx context.Context) (int, error)
 	SetAuditRepos(auditRepo repository.AuditLogRepository, userRepo repository.UserRepository)
 	SetCrossRefRepo(crossRefRepo repository.CrossRefRepository)
+	SetInteractionRepo(interactionRepo repository.KBInteractionRepository)
 }
 
 type kbService struct {
-	kbRepo        repository.KBRepository
-	assetRepo     repository.AssetRepository
-	domainRepo    repository.DomainRepository
-	govRepo       repository.GovernanceRepository
-	orgRepo       repository.OrgRepository
-	crossRefRepo  repository.CrossRefRepository
-	auditRepo     repository.AuditLogRepository
-	userRepo      repository.UserRepository
-	uploadDir     string
-	storageSecret string
+	kbRepo          repository.KBRepository
+	assetRepo       repository.AssetRepository
+	domainRepo      repository.DomainRepository
+	govRepo         repository.GovernanceRepository
+	orgRepo         repository.OrgRepository
+	crossRefRepo    repository.CrossRefRepository
+	interactionRepo repository.KBInteractionRepository
+	auditRepo       repository.AuditLogRepository
+	userRepo        repository.UserRepository
+	uploadDir       string
+	storageSecret   string
 }
 
 func (s *kbService) SetAuditRepos(auditRepo repository.AuditLogRepository, userRepo repository.UserRepository) {
@@ -116,6 +118,10 @@ func (s *kbService) SetAuditRepos(auditRepo repository.AuditLogRepository, userR
 
 func (s *kbService) SetCrossRefRepo(crossRefRepo repository.CrossRefRepository) {
 	s.crossRefRepo = crossRefRepo
+}
+
+func (s *kbService) SetInteractionRepo(interactionRepo repository.KBInteractionRepository) {
+	s.interactionRepo = interactionRepo
 }
 
 func NewKBService(
@@ -581,7 +587,12 @@ func (s *kbService) ListDocuments(userID uint64, isSuperAdmin bool, kbID uint64)
 	if _, err := s.ensureKBViewPermission(userID, isSuperAdmin, kbID); err != nil {
 		return nil, err
 	}
-	return s.kbRepo.ListDocuments(kbID)
+	docs, err := s.kbRepo.ListDocuments(kbID)
+	if err != nil {
+		return nil, err
+	}
+	s.enrichDocumentUploaders(docs)
+	return docs, nil
 }
 
 // ListDocumentsLazy returns only direct child folders and files under parentFolder.
@@ -593,7 +604,42 @@ func (s *kbService) ListDocumentsLazy(userID uint64, isSuperAdmin bool, kbID uin
 	if err != nil {
 		return nil, err
 	}
-	return s.kbRepo.ListDocumentsByParent(kbID, normParent)
+	docs, err := s.kbRepo.ListDocumentsByParent(kbID, normParent)
+	if err != nil {
+		return nil, err
+	}
+	s.enrichDocumentUploaders(docs)
+	return docs, nil
+}
+
+func (s *kbService) enrichDocumentUploaders(docs []model.KBDocument) {
+	if s.userRepo == nil || len(docs) == 0 {
+		return
+	}
+	seen := make(map[uint64]struct{})
+	ids := make([]uint64, 0, len(docs))
+	for _, d := range docs {
+		if d.UploaderID == 0 {
+			continue
+		}
+		if _, ok := seen[d.UploaderID]; !ok {
+			seen[d.UploaderID] = struct{}{}
+			ids = append(ids, d.UploaderID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	briefs, err := s.userRepo.FindBriefsByIDs(ids)
+	if err != nil {
+		return
+	}
+	for i := range docs {
+		if brief, ok := briefs[docs[i].UploaderID]; ok {
+			b := brief
+			docs[i].Uploader = &b
+		}
+	}
 }
 
 func (s *kbService) GetDocumentContent(userID uint64, isSuperAdmin bool, kbID, docID uint64, obf bool) (map[string]interface{}, error) {
@@ -730,7 +776,7 @@ func (s *kbService) DeleteDocument(userID uint64, isSuperAdmin bool, kbID, docID
 
 	if doc.IsFolder {
 		var folderDocIDs []uint64
-		if s.crossRefRepo != nil {
+		if s.crossRefRepo != nil || s.interactionRepo != nil {
 			if allDocs, listErr := s.kbRepo.ListDocuments(kbID); listErr == nil {
 				for _, d := range allDocs {
 					if d.FolderPath == doc.FolderPath || strings.HasPrefix(d.FolderPath, doc.FolderPath+"/") {
@@ -746,6 +792,9 @@ func (s *kbService) DeleteDocument(userID uint64, isSuperAdmin bool, kbID, docID
 		if s.crossRefRepo != nil && len(folderDocIDs) > 0 {
 			_ = s.crossRefRepo.DeleteByKBDocIDs(folderDocIDs)
 		}
+		if s.interactionRepo != nil && len(folderDocIDs) > 0 {
+			_ = s.interactionRepo.DeleteByDocIDs(folderDocIDs)
+		}
 		for _, p := range paths {
 			_ = os.Remove(p)
 		}
@@ -758,6 +807,9 @@ func (s *kbService) DeleteDocument(userID uint64, isSuperAdmin bool, kbID, docID
 	}
 	if s.crossRefRepo != nil {
 		_ = s.crossRefRepo.DeleteByKBDocIDs([]uint64{docID})
+	}
+	if s.interactionRepo != nil {
+		_ = s.interactionRepo.DeleteByDocIDs([]uint64{docID})
 	}
 	if doc.FilePath != "" {
 		_ = os.Remove(doc.FilePath)

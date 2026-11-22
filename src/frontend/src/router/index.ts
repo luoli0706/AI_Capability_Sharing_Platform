@@ -79,6 +79,18 @@ const routes: RouteRecordRaw[] = [
         name: 'profile',
         component: () => import('@/views/ProfileView.vue'),
         meta: { title: '个人中心', requiresAuth: true }
+      },
+      {
+        path: 'messages',
+        name: 'messages',
+        component: () => import('@/views/MessagesView.vue'),
+        meta: { title: '消息中心', requiresAuth: true }
+      },
+      {
+        path: 'users/:id',
+        name: 'user-profile',
+        component: () => import('@/views/UserProfileView.vue'),
+        meta: { title: '用户主页', requiresAuth: true }
       }
     ]
   },

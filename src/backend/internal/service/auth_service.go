@@ -180,8 +180,12 @@ func (s *authService) UpdateProfile(userID uint64, req model.UpdateProfileReques
 	if req.Bio != nil {
 		bio = *req.Bio
 	}
+	favoritesPublic := user.FavoritesPublic
+	if req.FavoritesPublic != nil {
+		favoritesPublic = *req.FavoritesPublic
+	}
 
-	if err := s.userRepo.UpdateProfile(userID, nickname, emailPtr, avatar, bio); err != nil {
+	if err := s.userRepo.UpdateProfile(userID, nickname, emailPtr, avatar, bio, favoritesPublic); err != nil {
 		return nil, err
 	}
 

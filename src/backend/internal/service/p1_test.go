@@ -36,7 +36,7 @@ func (m *mockP1UserRepo) FindByEmail(email string) (*model.SysUser, error) {
 func (m *mockP1UserRepo) GetUserRoles(userID uint64) ([]string, error) {
 	return []string{model.RoleDeveloper}, nil
 }
-func (m *mockP1UserRepo) UpdateProfile(userID uint64, nickname string, email *string, avatar, bio string) error {
+func (m *mockP1UserRepo) UpdateProfile(userID uint64, nickname string, email *string, avatar, bio string, favoritesPublic bool) error {
 	return nil
 }
 func (m *mockP1UserRepo) UpdatePasswordAndTokenVersion(userID uint64, passwordHash string) error {
@@ -44,6 +44,18 @@ func (m *mockP1UserRepo) UpdatePasswordAndTokenVersion(userID uint64, passwordHa
 }
 func (m *mockP1UserRepo) IncrementTokenVersion(userID uint64) error          { return nil }
 func (m *mockP1UserRepo) UpdateLastLogin(userID uint64, t time.Time) error { return nil }
+func (m *mockP1UserRepo) SearchActiveUsers(keyword string, excludeUserID uint64, limit int) ([]model.UserBrief, error) {
+	return []model.UserBrief{}, nil
+}
+func (m *mockP1UserRepo) FindBriefsByIDs(ids []uint64) (map[uint64]model.UserBrief, error) {
+	res := make(map[uint64]model.UserBrief)
+	for _, id := range ids {
+		if u, ok := m.users[id]; ok {
+			res[id] = model.ToUserBrief(u)
+		}
+	}
+	return res, nil
+}
 
 type mockP1DomainRepo struct {
 	domains map[uint64]*model.BizDomain

@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { useMediaQuery } from '@vueuse/core'
 import {
   ArrowLeft,
   Box,
+  ChatDotRound,
   Checked,
   Collection,
   Compass,
@@ -21,6 +22,7 @@ import {
   UserFilled
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { getUnreadMessageCount } from '@/api/messages'
 import { useAuthStore } from '@/stores/auth'
 import { useDomainStore } from '@/stores/domain'
 
@@ -74,16 +76,30 @@ const domainNavItems = computed(() => {
   ]
 })
 
+const unreadMessageCount = ref(0)
+let unreadPollTimer: ReturnType<typeof setInterval> | null = null
+
+async function fetchUnreadCount() {
+  if (!authStore.isAuthenticated) return
+  try {
+    const res = await getUnreadMessageCount()
+    unreadMessageCount.value = res.unread_count ?? 0
+  } catch {
+    // Ignore transient polling error
+  }
+}
+
 const globalNavItems = computed(() => {
   const items = [
-    { path: '/organizations', title: '组织中心', icon: Grid },
-    { path: '/approvals', title: '审批中心', icon: Checked },
-    { path: '/logs', title: '日志中心', icon: List },
-    { path: '/tools/7o', title: '7o 加密工具', icon: Lock },
-    { path: '/profile', title: '个人中心', icon: User }
+    { path: '/organizations', title: '组织中心', icon: Grid, badge: 0 },
+    { path: '/messages', title: '消息中心', icon: ChatDotRound, badge: unreadMessageCount.value },
+    { path: '/approvals', title: '审批中心', icon: Checked, badge: 0 },
+    { path: '/logs', title: '日志中心', icon: List, badge: 0 },
+    { path: '/tools/7o', title: '7o 加密工具', icon: Lock, badge: 0 },
+    { path: '/profile', title: '个人中心', icon: User, badge: 0 }
   ]
   if (!activeDomainId.value) {
-    return [{ path: '/domains', title: '域大厅', icon: OfficeBuilding }, ...items]
+    return [{ path: '/domains', title: '域大厅', icon: OfficeBuilding, badge: 0 }, ...items]
   }
   return items
 })
@@ -112,6 +128,17 @@ onMounted(() => {
   domainStore.fetchDomains().catch(() => {
     // Ignore
   })
+  fetchUnreadCount()
+  unreadPollTimer = setInterval(fetchUnreadCount, 30000)
+  window.addEventListener('ascp:messages-updated', fetchUnreadCount)
+})
+
+onBeforeUnmount(() => {
+  if (unreadPollTimer) {
+    clearInterval(unreadPollTimer)
+    unreadPollTimer = null
+  }
+  window.removeEventListener('ascp:messages-updated', fetchUnreadCount)
 })
 
 function handleSwitchDomain(newDomainId: number) {
@@ -236,6 +263,13 @@ async function handleCommand(command: string) {
             <component :is="item.icon" />
           </el-icon>
           <span v-if="!isCollapsed" class="nav-label">{{ item.title }}</span>
+          <span
+            v-if="item.badge > 0"
+            class="nav-badge tabular-nums"
+            :class="{ 'is-collapsed-dot': isCollapsed }"
+          >
+            {{ isCollapsed ? '' : item.badge > 99 ? '99+' : item.badge }}
+          </span>
         </router-link>
 
         <div
@@ -359,6 +393,9 @@ async function handleCommand(command: string) {
               <component :is="item.icon" />
             </el-icon>
             <span class="nav-label">{{ item.title }}</span>
+            <span v-if="item.badge > 0" class="nav-badge tabular-nums">
+              {{ item.badge > 99 ? '99+' : item.badge }}
+            </span>
           </router-link>
 
           <div
@@ -594,6 +631,7 @@ async function handleCommand(command: string) {
 }
 
 .nav-item {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -606,6 +644,30 @@ async function handleCommand(command: string) {
   font-weight: 500;
   transition: all 0.15s ease;
   white-space: nowrap;
+}
+
+.nav-badge {
+  margin-left: auto;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background-color: #ef4444;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+}
+
+.nav-badge.is-collapsed-dot {
+  position: absolute;
+  top: 7px;
+  right: 12px;
+  min-width: 8px;
+  width: 8px;
+  height: 8px;
+  padding: 0;
 }
 
 .layout-sidebar.is-collapsed .nav-item {
