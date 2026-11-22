@@ -169,13 +169,13 @@ onMounted(() => {
         inline
         class="add-member-form"
       >
-        <el-form-item prop="username" style="min-width: 260px">
+        <el-form-item prop="username" class="member-username-item">
           <el-input
             v-model="memberForm.username"
             placeholder="输入平台用户名（如 zhangsan）"
           />
         </el-form-item>
-        <el-form-item prop="domain_role" style="width: 150px">
+        <el-form-item prop="domain_role" class="member-role-item">
           <el-select v-model="memberForm.domain_role">
             <el-option label="普通成员" value="member" />
             <el-option v-if="isOwner" label="域管理员" value="admin" />
@@ -300,8 +300,18 @@ onMounted(() => {
   margin-bottom: 0;
 }
 
+.member-username-item {
+  min-width: 260px;
+  max-width: 100%;
+}
+
+.member-role-item {
+  width: 150px;
+  max-width: 100%;
+}
+
 .table-card {
-  overflow: hidden;
+  overflow-x: auto;
 }
 
 .member-user {
@@ -324,5 +334,14 @@ onMounted(() => {
   display: flex;
   justify-content: flex-end;
   border-top: 1px solid var(--ascp-border);
+}
+
+@media (max-width: 768px) {
+  .member-username-item,
+  .member-role-item {
+    min-width: 0;
+    width: 100%;
+    margin-right: 0 !important;
+  }
 }
 </style>

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
+	"os"
 
 	"ascp-backend/internal/config"
 	"ascp-backend/internal/handler"
@@ -57,7 +59,16 @@ func main() {
 	orgSvc := service.NewOrgService(orgRepo, userRepo)
 	domainSvc := service.NewDomainService(domainRepo, userRepo, orgRepo)
 	assetSvc := service.NewAssetService(assetRepo, domainRepo, govRepo, orgRepo, cfg.Storage.UploadDir)
-	kbSvc := service.NewKBService(kbRepo, assetRepo, domainRepo, govRepo, orgRepo, cfg.Storage.UploadDir)
+	storageSecret := os.Getenv("STORAGE_SECRET")
+	if storageSecret == "" {
+		storageSecret = cfg.JWT.Secret
+	}
+	kbSvc := service.NewKBService(kbRepo, assetRepo, domainRepo, govRepo, orgRepo, cfg.Storage.UploadDir, storageSecret)
+	if encryptedCount, err := kbSvc.EncryptExistingPlainFiles(context.Background()); err != nil {
+		logger.Warn("failed to encrypt existing plain KB files at rest", zap.Error(err))
+	} else if encryptedCount > 0 {
+		logger.Info("encrypted existing plain KB files at rest", zap.Int("count", encryptedCount))
+	}
 	govSvc := service.NewGovernanceService(govRepo, assetRepo, domainRepo, orgRepo)
 	keySvc := service.NewAPIKeyService(keyRepo)
 	invokeSvc := service.NewInvokeService(assetRepo, domainRepo, govRepo, kbRepo, logRepo, orgRepo)

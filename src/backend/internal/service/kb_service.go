@@ -3,21 +3,26 @@ package service
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"mime"
 	"mime/multipart"
 	"net/http"
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"ascp-backend/internal/model"
 	"ascp-backend/internal/pkg/chunker"
+	"ascp-backend/internal/pkg/kbcodec"
 	"ascp-backend/internal/repository"
 
 	"gorm.io/gorm"
@@ -75,8 +80,9 @@ type KBService interface {
 	CreateMarkdownFile(userID uint64, isSuperAdmin bool, kbID uint64, req model.CreateKBFileRequest) (*model.KBDocument, error)
 	UploadDocuments(userID uint64, isSuperAdmin bool, kbID uint64, folderPath, relativePath string, files []*multipart.FileHeader) ([]model.KBDocument, error)
 	ListDocuments(userID uint64, isSuperAdmin bool, kbID uint64) ([]model.KBDocument, error)
-	GetDocumentContent(userID uint64, isSuperAdmin bool, kbID, docID uint64) (map[string]interface{}, error)
-	GetDocumentRaw(userID uint64, isSuperAdmin bool, kbID, docID uint64) (fileName, mimeType string, isSVG bool, data []byte, err error)
+	ListDocumentsLazy(userID uint64, isSuperAdmin bool, kbID uint64, parentFolder string) ([]model.KBDocument, error)
+	GetDocumentContent(userID uint64, isSuperAdmin bool, kbID, docID uint64, obf bool) (map[string]interface{}, error)
+	GetDocumentRaw(userID uint64, isSuperAdmin bool, kbID, docID uint64, obf bool) (fileName, mimeType string, isSVG bool, data []byte, err error)
 	UpdateMarkdownContent(userID uint64, isSuperAdmin bool, kbID, docID uint64, req model.UpdateKBFileRequest) (*model.KBDocument, error)
 	ListChunks(userID uint64, isSuperAdmin bool, kbID, docID uint64, page, pageSize int) ([]model.KBChunk, int64, error)
 	DeleteDocument(userID uint64, isSuperAdmin bool, kbID, docID uint64) error
@@ -85,18 +91,20 @@ type KBService interface {
 	DownloadKB(userID uint64, isSuperAdmin bool, kbID uint64, scope string, docID uint64, folderPath string) (filename, contentType string, data []byte, err error)
 	MoveDocument(userID uint64, isSuperAdmin bool, kbID, docID uint64, targetFolderPath string) (*model.KBDocument, error)
 	CopyDocument(userID uint64, isSuperAdmin bool, kbID, docID uint64, targetFolderPath, newName string) (*model.KBDocument, error)
+	EncryptExistingPlainFiles(ctx context.Context) (int, error)
 	SetAuditRepos(auditRepo repository.AuditLogRepository, userRepo repository.UserRepository)
 }
 
 type kbService struct {
-	kbRepo     repository.KBRepository
-	assetRepo  repository.AssetRepository
-	domainRepo repository.DomainRepository
-	govRepo    repository.GovernanceRepository
-	orgRepo    repository.OrgRepository
-	auditRepo  repository.AuditLogRepository
-	userRepo   repository.UserRepository
-	uploadDir  string
+	kbRepo        repository.KBRepository
+	assetRepo     repository.AssetRepository
+	domainRepo    repository.DomainRepository
+	govRepo       repository.GovernanceRepository
+	orgRepo       repository.OrgRepository
+	auditRepo     repository.AuditLogRepository
+	userRepo      repository.UserRepository
+	uploadDir     string
+	storageSecret string
 }
 
 func (s *kbService) SetAuditRepos(auditRepo repository.AuditLogRepository, userRepo repository.UserRepository) {
@@ -111,18 +119,87 @@ func NewKBService(
 	govRepo repository.GovernanceRepository,
 	orgRepo repository.OrgRepository,
 	uploadDir string,
+	storageSecret string,
 ) KBService {
 	if uploadDir == "" {
 		uploadDir = "./uploads"
 	}
 	return &kbService{
-		kbRepo:     kbRepo,
-		assetRepo:  assetRepo,
-		domainRepo: domainRepo,
-		govRepo:    govRepo,
-		orgRepo:    orgRepo,
-		uploadDir:  uploadDir,
+		kbRepo:        kbRepo,
+		assetRepo:     assetRepo,
+		domainRepo:    domainRepo,
+		govRepo:       govRepo,
+		orgRepo:       orgRepo,
+		uploadDir:     uploadDir,
+		storageSecret: storageSecret,
 	}
+}
+
+func (s *kbService) encryptAndWriteFile(filePath string, plain []byte) error {
+	enc, err := kbcodec.EncryptAtRest(plain, s.storageSecret)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filePath, enc, 0644)
+}
+
+func (s *kbService) readAndDecryptFile(filePath string) ([]byte, error) {
+	diskBytes, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+	return kbcodec.DecryptAtRest(diskBytes, s.storageSecret)
+}
+
+// EncryptExistingPlainFiles walks KB asset directories under uploadDir and encrypts
+// any unencrypted files in-place at rest.
+func (s *kbService) EncryptExistingPlainFiles(ctx context.Context) (int, error) {
+	entries, err := os.ReadDir(s.uploadDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	encryptedCount := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		// KB files are stored under numeric <kbID> directories; skip non-KB dirs like "skills".
+		if _, err := strconv.ParseUint(entry.Name(), 10, 64); err != nil {
+			continue
+		}
+		kbDir := filepath.Join(s.uploadDir, entry.Name())
+		err := filepath.WalkDir(kbDir, func(p string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if d.IsDir() {
+				return nil
+			}
+			raw, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			if kbcodec.IsEncryptedAtRest(raw) {
+				return nil
+			}
+			if err := s.encryptAndWriteFile(p, raw); err != nil {
+				return err
+			}
+			encryptedCount++
+			return nil
+		})
+		if err != nil {
+			return encryptedCount, err
+		}
+	}
+	return encryptedCount, nil
 }
 
 // NormalizeFolderPath converts backslashes to '/', trims leading/trailing '/',
@@ -280,7 +357,7 @@ func (s *kbService) UpdateMarkdownContent(userID uint64, isSuperAdmin bool, kbID
 			return nil, err
 		}
 	}
-	if err := os.WriteFile(doc.FilePath, contentBytes, 0644); err != nil {
+	if err := s.encryptAndWriteFile(doc.FilePath, contentBytes); err != nil {
 		return nil, err
 	}
 
@@ -405,7 +482,7 @@ func (s *kbService) persistKBFileAndChunks(
 		return nil, err
 	}
 	dstPath := filepath.Join(diskDir, fmt.Sprintf("%s_%s", fileHash[:12], safeName))
-	if err := os.WriteFile(dstPath, contentBytes, 0644); err != nil {
+	if err := s.encryptAndWriteFile(dstPath, contentBytes); err != nil {
 		return nil, err
 	}
 
@@ -501,7 +578,19 @@ func (s *kbService) ListDocuments(userID uint64, isSuperAdmin bool, kbID uint64)
 	return s.kbRepo.ListDocuments(kbID)
 }
 
-func (s *kbService) GetDocumentContent(userID uint64, isSuperAdmin bool, kbID, docID uint64) (map[string]interface{}, error) {
+// ListDocumentsLazy returns only direct child folders and files under parentFolder.
+func (s *kbService) ListDocumentsLazy(userID uint64, isSuperAdmin bool, kbID uint64, parentFolder string) ([]model.KBDocument, error) {
+	if _, err := s.ensureKBViewPermission(userID, isSuperAdmin, kbID); err != nil {
+		return nil, err
+	}
+	normParent, err := NormalizeFolderPath(parentFolder)
+	if err != nil {
+		return nil, err
+	}
+	return s.kbRepo.ListDocumentsByParent(kbID, normParent)
+}
+
+func (s *kbService) GetDocumentContent(userID uint64, isSuperAdmin bool, kbID, docID uint64, obf bool) (map[string]interface{}, error) {
 	if _, err := s.ensureKBViewPermission(userID, isSuperAdmin, kbID); err != nil {
 		return nil, err
 	}
@@ -516,9 +605,12 @@ func (s *kbService) GetDocumentContent(userID uint64, isSuperAdmin bool, kbID, d
 		return nil, NewBadRequest("cannot preview content of a folder")
 	}
 
-	raw, err := os.ReadFile(doc.FilePath)
+	raw, err := s.readAndDecryptFile(doc.FilePath)
 	if err != nil {
-		return nil, NewNotFound("document file not found on disk")
+		if os.IsNotExist(err) {
+			return nil, NewNotFound("document file not found on disk")
+		}
+		return nil, err
 	}
 	if !isTextKBFile(doc.FileExt, raw) {
 		return map[string]interface{}{
@@ -527,6 +619,22 @@ func (s *kbService) GetDocumentContent(userID uint64, isSuperAdmin bool, kbID, d
 			"folder_path": doc.FolderPath,
 			"file_size":   doc.FileSize,
 			"is_binary":   true,
+			"content":     "",
+		}, nil
+	}
+	if obf {
+		obfBytes, err := kbcodec.ObfuscateTransport(raw)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{
+			"id":          doc.ID,
+			"file_name":   doc.FileName,
+			"folder_path": doc.FolderPath,
+			"file_size":   doc.FileSize,
+			"is_binary":   false,
+			"obfuscated":  true,
+			"payload":     base64.StdEncoding.EncodeToString(obfBytes),
 			"content":     "",
 		}, nil
 	}
@@ -540,7 +648,7 @@ func (s *kbService) GetDocumentContent(userID uint64, isSuperAdmin bool, kbID, d
 	}, nil
 }
 
-func (s *kbService) GetDocumentRaw(userID uint64, isSuperAdmin bool, kbID, docID uint64) (string, string, bool, []byte, error) {
+func (s *kbService) GetDocumentRaw(userID uint64, isSuperAdmin bool, kbID, docID uint64, obf bool) (string, string, bool, []byte, error) {
 	if _, err := s.ensureKBViewPermission(userID, isSuperAdmin, kbID); err != nil {
 		return "", "", false, nil, err
 	}
@@ -555,9 +663,12 @@ func (s *kbService) GetDocumentRaw(userID uint64, isSuperAdmin bool, kbID, docID
 		return "", "", false, nil, NewBadRequest("cannot stream raw content of a folder")
 	}
 
-	raw, err := os.ReadFile(doc.FilePath)
+	raw, err := s.readAndDecryptFile(doc.FilePath)
 	if err != nil {
-		return "", "", false, nil, NewNotFound("document file not found on disk")
+		if os.IsNotExist(err) {
+			return "", "", false, nil, NewNotFound("document file not found on disk")
+		}
+		return "", "", false, nil, err
 	}
 
 	ext := doc.FileExt
@@ -566,6 +677,13 @@ func (s *kbService) GetDocumentRaw(userID uint64, isSuperAdmin bool, kbID, docID
 	}
 	mimeType := detectKBMIMEType(ext, raw)
 	isSVG := strings.EqualFold(ext, ".svg")
+	if obf {
+		obfData, err := kbcodec.ObfuscateTransport(raw)
+		if err != nil {
+			return "", "", false, nil, err
+		}
+		return doc.FileName, "application/octet-stream", isSVG, obfData, nil
+	}
 	return doc.FileName, mimeType, isSVG, raw, nil
 }
 
@@ -693,9 +811,12 @@ func (s *kbService) CopyDocument(userID uint64, isSuperAdmin bool, kbID, docID u
 		return nil, err
 	}
 
-	contentBytes, err := os.ReadFile(doc.FilePath)
+	contentBytes, err := s.readAndDecryptFile(doc.FilePath)
 	if err != nil {
-		return nil, NewNotFound("source file not found on disk")
+		if os.IsNotExist(err) {
+			return nil, NewNotFound("source file not found on disk")
+		}
+		return nil, err
 	}
 
 	candidateName := doc.FileName
@@ -821,9 +942,12 @@ func (s *kbService) DownloadKB(userID uint64, isSuperAdmin bool, kbID uint64, sc
 
 	if scope == "file" {
 		d := docs[0]
-		raw, err := os.ReadFile(d.FilePath)
+		raw, err := s.readAndDecryptFile(d.FilePath)
 		if err != nil {
-			return "", "", nil, NewNotFound("file not found on disk")
+			if os.IsNotExist(err) {
+				return "", "", nil, NewNotFound("file not found on disk")
+			}
+			return "", "", nil, err
 		}
 		return d.FileName, "text/markdown; charset=utf-8", raw, nil
 	}
@@ -831,9 +955,13 @@ func (s *kbService) DownloadKB(userID uint64, isSuperAdmin bool, kbID uint64, sc
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 	for _, d := range docs {
-		raw, err := os.ReadFile(d.FilePath)
+		raw, err := s.readAndDecryptFile(d.FilePath)
 		if err != nil {
-			continue
+			if os.IsNotExist(err) {
+				continue
+			}
+			_ = zw.Close()
+			return "", "", nil, err
 		}
 		w, err := zw.Create(relativeDocPath(d))
 		if err != nil {

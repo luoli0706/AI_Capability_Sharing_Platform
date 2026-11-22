@@ -1,4 +1,5 @@
 import request, { apiDelete, apiGet, apiPost, apiPut } from './request'
+import { deobfuscateBase64ToText, deobfuscateBytes } from '@/utils/obfuscate'
 import type {
   KbChunk,
   KbContentResult,
@@ -6,6 +7,26 @@ import type {
   KbDownloadPreview,
   PaginatedData
 } from '@/types/api'
+
+const IMAGE_MIME_MAP: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
+  '.bmp': 'image/bmp',
+  '.ico': 'image/x-icon',
+  '.avif': 'image/avif'
+}
+
+function inferMimeType(fileName?: string): string {
+  if (!fileName) return 'application/octet-stream'
+  const dotIdx = fileName.lastIndexOf('.')
+  if (dotIdx === -1) return 'application/octet-stream'
+  const ext = fileName.slice(dotIdx).toLowerCase()
+  return IMAGE_MIME_MAP[ext] ?? 'application/octet-stream'
+}
 
 export interface KbDownloadParams {
   scope: 'file' | 'folder' | 'all'
@@ -60,20 +81,37 @@ export function uploadDocument(
 }
 
 export function getDocuments(
-  kbId: number
+  kbId: number,
+  params?: { lazy?: boolean; folder_path?: string }
 ): Promise<PaginatedData<KbDocument> | KbDocument[]> {
-  return apiGet<PaginatedData<KbDocument> | KbDocument[]>(`/kb/${kbId}/documents`)
-}
-
-export function getDocumentContent(kbId: number, docId: number): Promise<KbContentResult> {
-  return apiGet<KbContentResult>(`/kb/${kbId}/documents/${docId}/content`)
-}
-
-export async function getDocumentRawBlob(kbId: number, docId: number): Promise<Blob> {
-  const res = await request.get<Blob>(`/kb/${kbId}/documents/${docId}/raw`, {
-    responseType: 'blob'
+  return apiGet<PaginatedData<KbDocument> | KbDocument[]>(`/kb/${kbId}/documents`, {
+    params
   })
-  return res.data
+}
+
+export async function getDocumentContent(kbId: number, docId: number): Promise<KbContentResult> {
+  const res = await apiGet<KbContentResult>(`/kb/${kbId}/documents/${docId}/content`, {
+    params: { obf: '1' }
+  })
+  if (res.obfuscated && res.payload) {
+    res.content = deobfuscateBase64ToText(res.payload)
+  }
+  return res
+}
+
+export async function getDocumentRawBlob(
+  kbId: number,
+  docId: number,
+  fileName?: string
+): Promise<Blob> {
+  const res = await request.get<ArrayBuffer>(`/kb/${kbId}/documents/${docId}/raw`, {
+    params: { obf: '1' },
+    responseType: 'arraybuffer'
+  })
+  const rawBytes = new Uint8Array(res.data)
+  const isObf = res.headers['x-ascp-obf'] === '1'
+  const plainBytes = isObf ? deobfuscateBytes(rawBytes) : rawBytes
+  return new Blob([plainBytes as Uint8Array<ArrayBuffer>], { type: inferMimeType(fileName) })
 }
 
 export function getDocumentChunks(

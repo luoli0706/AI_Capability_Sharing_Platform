@@ -69,10 +69,101 @@ export interface KbTreeNode {
   key: string
   label: string
   isFolder: boolean
+  isLeaf?: boolean
   folderPath: string
   fileSize?: number
   doc?: KbDocument
   children: KbTreeNode[]
+}
+
+export function extractImmediateFiles(docs: KbDocument[], folderPath: string): KbDocument[] {
+  const cleanParent = folderPath.replace(/^\/+|\/+$/g, '')
+  return docs
+    .filter(
+      (d) => !d.is_folder && (d.folder_path || '').replace(/^\/+|\/+$/g, '') === cleanParent
+    )
+    .sort((a, b) => a.file_name.localeCompare(b.file_name))
+}
+
+export function buildImmediateKbTreeNodes(
+  docs: KbDocument[],
+  parentFolderPath: string
+): KbTreeNode[] {
+  const cleanParent = parentFolderPath.replace(/^\/+|\/+$/g, '')
+  const prefix = cleanParent ? `${cleanParent}/` : ''
+  const folderMap = new Map<string, KbTreeNode>()
+  const fileNodes: KbTreeNode[] = []
+
+  const ensureImmediateFolder = (immediatePath: string, label: string): KbTreeNode => {
+    const existing = folderMap.get(immediatePath)
+    if (existing) return existing
+    const node: KbTreeNode = {
+      key: `folder:${immediatePath}`,
+      label,
+      isFolder: true,
+      isLeaf: false,
+      folderPath: immediatePath,
+      children: []
+    }
+    folderMap.set(immediatePath, node)
+    return node
+  }
+
+  for (const doc of docs) {
+    if (!doc.is_folder) continue
+    const clean = (doc.folder_path || doc.file_name || '').replace(/^\/+|\/+$/g, '')
+    if (!clean) continue
+    if (cleanParent) {
+      if (!clean.startsWith(prefix)) continue
+      const rest = clean.slice(prefix.length)
+      if (!rest) continue
+      const seg = rest.split('/')[0]
+      const immediatePath = `${cleanParent}/${seg}`
+      const node = ensureImmediateFolder(immediatePath, seg)
+      if (clean === immediatePath) {
+        node.doc = doc
+      }
+    } else {
+      const seg = clean.split('/')[0]
+      const node = ensureImmediateFolder(seg, seg)
+      if (clean === seg) {
+        node.doc = doc
+      }
+    }
+  }
+
+  for (const doc of docs) {
+    if (doc.is_folder) continue
+    const docFolder = (doc.folder_path || '').replace(/^\/+|\/+$/g, '')
+    if (docFolder === cleanParent) {
+      fileNodes.push({
+        key: `file:${doc.id}`,
+        label: doc.file_name,
+        isFolder: false,
+        isLeaf: true,
+        folderPath: docFolder,
+        fileSize: doc.file_size,
+        doc,
+        children: []
+      })
+    } else if (!cleanParent && docFolder) {
+      const seg = docFolder.split('/')[0]
+      ensureImmediateFolder(seg, seg)
+    } else if (cleanParent && docFolder.startsWith(prefix)) {
+      const rest = docFolder.slice(prefix.length)
+      if (rest) {
+        const seg = rest.split('/')[0]
+        ensureImmediateFolder(`${cleanParent}/${seg}`, seg)
+      }
+    }
+  }
+
+  const result = [...folderMap.values(), ...fileNodes]
+  result.sort((a, b) => {
+    if (a.isFolder !== b.isFolder) return a.isFolder ? -1 : 1
+    return a.label.localeCompare(b.label)
+  })
+  return result
 }
 
 export function buildKbTree(docs: KbDocument[]): KbTreeNode[] {

@@ -183,7 +183,7 @@ onBeforeUnmount(() => {
           v-model="filters.keyword"
           placeholder="搜索资产名称、编码或标签..."
           clearable
-          style="width: 260px"
+          class="filter-search-input"
           :prefix-icon="Search"
           @keyup.enter="handleFilterChange"
           @clear="handleFilterChange"
@@ -359,9 +359,14 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
 }
 
+.filter-search-input {
+  width: 260px;
+  max-width: 100%;
+}
+
 .asset-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 290px), 1fr));
   gap: 16px;
 }
 
@@ -506,5 +511,15 @@ onBeforeUnmount(() => {
   display: flex;
   justify-content: flex-end;
   padding-top: 4px;
+}
+
+@media (max-width: 768px) {
+  .filter-controls {
+    width: 100%;
+  }
+
+  .filter-search-input {
+    width: 100%;
+  }
 }
 </style>

@@ -394,6 +394,8 @@ onMounted(() => {
 
 .type-filter {
   margin-bottom: 12px;
+  display: flex;
+  flex-wrap: wrap;
 }
 
 .publish-info {
@@ -494,5 +496,12 @@ onMounted(() => {
   margin: 6px 0 0;
   font-size: 13px;
   color: var(--ascp-text-secondary);
+}
+
+@media (max-width: 768px) {
+  .approvals-card {
+    padding: 12px 12px 16px;
+    overflow-x: auto;
+  }
 }
 </style>

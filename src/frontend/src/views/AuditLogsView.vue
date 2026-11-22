@@ -164,7 +164,7 @@ onMounted(() => {
           v-model="filters.asset_type"
           placeholder="全部对象类型"
           clearable
-          style="width: 150px"
+          class="filter-select-type"
           @change="handleSearch"
         >
           <el-option label="MCP 服务" value="mcp" />
@@ -179,7 +179,7 @@ onMounted(() => {
           v-model="filters.action"
           placeholder="全部操作动作"
           clearable
-          style="width: 190px"
+          class="filter-select-action"
           @change="handleSearch"
         >
           <el-option-group
@@ -200,7 +200,7 @@ onMounted(() => {
           v-model="filters.keyword"
           placeholder="搜索操作人、资产名称、变动对象或详情..."
           clearable
-          style="width: 300px"
+          class="filter-search-input"
           :prefix-icon="Search"
           @keyup.enter="handleSearch"
           @clear="handleSearch"
@@ -302,8 +302,23 @@ onMounted(() => {
   flex-wrap: wrap;
 }
 
+.filter-select-type {
+  width: 150px;
+  max-width: 100%;
+}
+
+.filter-select-action {
+  width: 190px;
+  max-width: 100%;
+}
+
+.filter-search-input {
+  width: 300px;
+  max-width: 100%;
+}
+
 .table-card {
-  overflow: hidden;
+  overflow-x: auto;
 }
 
 .asset-col {
@@ -343,5 +358,13 @@ onMounted(() => {
   display: flex;
   justify-content: flex-end;
   border-top: 1px solid var(--ascp-border);
+}
+
+@media (max-width: 768px) {
+  .filter-select-type,
+  .filter-select-action,
+  .filter-search-input {
+    width: 100%;
+  }
 }
 </style>

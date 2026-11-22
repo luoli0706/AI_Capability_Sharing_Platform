@@ -230,7 +230,7 @@ onMounted(() => {
           v-model="filters.asset_type"
           placeholder="全部类型"
           clearable
-          style="width: 150px"
+          class="filter-select-type"
           @change="handleSearch"
         >
           <el-option label="MCP 服务" value="mcp" />
@@ -243,7 +243,7 @@ onMounted(() => {
           v-model="filters.status"
           placeholder="全部状态"
           clearable
-          style="width: 140px"
+          class="filter-select-status"
           @change="handleSearch"
         >
           <el-option label="草稿" value="draft" />
@@ -256,7 +256,7 @@ onMounted(() => {
           v-model="filters.keyword"
           placeholder="搜索资产名称或编码..."
           clearable
-          style="width: 240px"
+          class="filter-search-input"
           :prefix-icon="Search"
           @keyup.enter="handleSearch"
           @clear="handleSearch"
@@ -464,8 +464,23 @@ onMounted(() => {
   flex-wrap: wrap;
 }
 
+.filter-select-type {
+  width: 150px;
+  max-width: 100%;
+}
+
+.filter-select-status {
+  width: 140px;
+  max-width: 100%;
+}
+
+.filter-search-input {
+  width: 240px;
+  max-width: 100%;
+}
+
 .table-card {
-  overflow: hidden;
+  overflow-x: auto;
 }
 
 .asset-name-cell {
@@ -499,5 +514,13 @@ onMounted(() => {
   display: flex;
   justify-content: flex-end;
   border-top: 1px solid var(--ascp-border);
+}
+
+@media (max-width: 768px) {
+  .filter-select-type,
+  .filter-select-status,
+  .filter-search-input {
+    width: 100%;
+  }
 }
 </style>

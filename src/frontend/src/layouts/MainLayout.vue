@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
+import { useMediaQuery } from '@vueuse/core'
 import {
   ArrowLeft,
   Box,
@@ -12,6 +13,7 @@ import {
   Fold,
   Grid,
   List,
+  Menu as IconMenu,
   OfficeBuilding,
   SwitchButton,
   User,
@@ -29,6 +31,15 @@ const { user } = storeToRefs(authStore)
 const { domains } = storeToRefs(domainStore)
 
 const isCollapsed = ref(false)
+const isMobile = useMediaQuery('(max-width: 768px)')
+const mobileDrawerOpen = ref(false)
+
+watch(
+  () => route.fullPath,
+  () => {
+    mobileDrawerOpen.value = false
+  }
+)
 
 const activeDomainId = computed<number | null>(() => {
   const raw = route.params.domainId
@@ -133,7 +144,7 @@ async function handleCommand(command: string) {
 
 <template>
   <div class="layout-shell">
-    <aside class="layout-sidebar" :class="{ 'is-collapsed': isCollapsed }">
+    <aside v-if="!isMobile" class="layout-sidebar" :class="{ 'is-collapsed': isCollapsed }">
       <div class="sidebar-brand" @click="router.push('/domains')">
         <div class="brand-logo">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none">
@@ -257,10 +268,128 @@ async function handleCommand(command: string) {
       </div>
     </aside>
 
+    <el-drawer
+      v-if="isMobile"
+      v-model="mobileDrawerOpen"
+      direction="ltr"
+      size="250px"
+      :with-header="false"
+      class="mobile-nav-drawer"
+    >
+      <div class="mobile-sidebar-inner">
+        <div class="sidebar-brand" @click="router.push('/domains')">
+          <div class="brand-logo">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none">
+              <path
+                d="M12 2L20 6.5V17.5L12 22L4 17.5V6.5L12 2Z"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M12 8L16 10.5V15.5L12 18L8 15.5V10.5L12 8Z"
+                fill="currentColor"
+                fill-opacity="0.9"
+              />
+            </svg>
+          </div>
+          <div class="brand-text">
+            <span class="brand-title">ASCP</span>
+            <span class="brand-sub">AI 能力共享平台</span>
+          </div>
+        </div>
+
+        <div v-if="activeDomainId" class="domain-switcher-box">
+          <div class="switcher-header">
+            <span class="switcher-label">当前域</span>
+            <button
+              type="button"
+              class="back-hall-btn"
+              @click="router.push('/domains')"
+            >
+              <el-icon :size="12"><ArrowLeft /></el-icon>
+              <span>域大厅</span>
+            </button>
+          </div>
+          <el-select
+            :model-value="activeDomainId"
+            size="small"
+            class="domain-select"
+            @change="handleSwitchDomain"
+          >
+            <el-option
+              v-for="d in domains"
+              :key="d.id"
+              :label="d.domain_name"
+              :value="d.id"
+            />
+          </el-select>
+        </div>
+
+        <nav class="sidebar-nav" aria-label="移动端主导航">
+          <template v-if="activeDomainId">
+            <div class="nav-group-label">域内工作空间</div>
+            <router-link
+              v-for="item in domainNavItems"
+              :key="item.path"
+              :to="item.path"
+              class="nav-item"
+              :class="{ 'is-active': activePath === item.path }"
+            >
+              <el-icon class="nav-icon" :size="18">
+                <component :is="item.icon" />
+              </el-icon>
+              <span class="nav-label">{{ item.title }}</span>
+            </router-link>
+
+            <div class="nav-divider" />
+            <div class="nav-group-label">平台全局</div>
+          </template>
+
+          <router-link
+            v-for="item in globalNavItems"
+            :key="item.path"
+            :to="item.path"
+            class="nav-item"
+            :class="{ 'is-active': activePath === item.path }"
+          >
+            <el-icon class="nav-icon" :size="18">
+              <component :is="item.icon" />
+            </el-icon>
+            <span class="nav-label">{{ item.title }}</span>
+          </router-link>
+
+          <div
+            v-if="!activeDomainId && domainStore.lastDomain"
+            class="last-domain-shortcut"
+          >
+            <div class="shortcut-label">最近进入的域</div>
+            <button
+              type="button"
+              class="shortcut-btn"
+              @click="router.push(`/domains/${domainStore.lastDomain.id}/marketplace`)"
+            >
+              <span class="shortcut-name">{{ domainStore.lastDomain.domain_name }}</span>
+              <span class="shortcut-go">进入 →</span>
+            </button>
+          </div>
+        </nav>
+      </div>
+    </el-drawer>
+
     <div class="layout-main">
       <header class="layout-header">
         <div class="header-left">
-          <el-breadcrumb separator="/">
+          <button
+            v-if="isMobile"
+            type="button"
+            class="mobile-menu-btn"
+            aria-label="打开菜单"
+            @click="mobileDrawerOpen = true"
+          >
+            <el-icon :size="20"><IconMenu /></el-icon>
+          </button>
+          <el-breadcrumb separator="/" class="header-breadcrumb">
             <el-breadcrumb-item :to="{ path: '/domains' }">域大厅</el-breadcrumb-item>
             <el-breadcrumb-item
               v-if="activeDomainId"
@@ -663,5 +792,73 @@ async function handleCommand(command: string) {
   flex: 1;
   overflow-y: auto;
   padding: 24px;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+.header-breadcrumb {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.mobile-menu-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  border: 1px solid var(--ascp-border);
+  background: var(--ascp-bg-surface);
+  color: var(--ascp-text-primary);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.mobile-sidebar-inner {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--ascp-sidebar-bg);
+  user-select: none;
+}
+
+:deep(.mobile-nav-drawer .el-drawer__body) {
+  padding: 0;
+  background-color: var(--ascp-sidebar-bg);
+}
+
+@media (max-width: 768px) {
+  .layout-header {
+    padding: 0 12px;
+    height: 54px;
+  }
+
+  .user-role {
+    display: none;
+  }
+
+  .user-trigger {
+    padding: 2px 4px;
+    gap: 6px;
+  }
+
+  .user-name {
+    max-width: 84px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .layout-content {
+    padding: 0;
+  }
 }
 </style>

@@ -109,7 +109,15 @@ func (h *KBHandler) ListDocuments(c echo.Context) error {
 
 	userID := middleware.GetUserID(c)
 	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
-	list, err := h.kbSvc.ListDocuments(userID, isSuperAdmin, kbID)
+	var (
+		list []model.KBDocument
+		err  error
+	)
+	if c.QueryParam("lazy") == "1" {
+		list, err = h.kbSvc.ListDocumentsLazy(userID, isSuperAdmin, kbID, c.QueryParam("folder_path"))
+	} else {
+		list, err = h.kbSvc.ListDocuments(userID, isSuperAdmin, kbID)
+	}
 	if err != nil {
 		return service.HandleError(c, err)
 	}
@@ -128,7 +136,8 @@ func (h *KBHandler) GetDocumentContent(c echo.Context) error {
 
 	userID := middleware.GetUserID(c)
 	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
-	res, err := h.kbSvc.GetDocumentContent(userID, isSuperAdmin, kbID, docID)
+	obf := c.QueryParam("obf") == "1"
+	res, err := h.kbSvc.GetDocumentContent(userID, isSuperAdmin, kbID, docID, obf)
 	if err != nil {
 		return service.HandleError(c, err)
 	}
@@ -147,7 +156,8 @@ func (h *KBHandler) GetDocumentRaw(c echo.Context) error {
 
 	userID := middleware.GetUserID(c)
 	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
-	fileName, mimeType, isSVG, data, err := h.kbSvc.GetDocumentRaw(userID, isSuperAdmin, kbID, docID)
+	obf := c.QueryParam("obf") == "1"
+	fileName, mimeType, isSVG, data, err := h.kbSvc.GetDocumentRaw(userID, isSuperAdmin, kbID, docID, obf)
 	if err != nil {
 		return service.HandleError(c, err)
 	}
@@ -155,6 +165,9 @@ func (h *KBHandler) GetDocumentRaw(c echo.Context) error {
 	c.Response().Header().Set(echo.HeaderContentDisposition, fmt.Sprintf(`inline; filename="%s"`, fileName))
 	if isSVG {
 		c.Response().Header().Set("Content-Security-Policy", "sandbox")
+	}
+	if obf {
+		c.Response().Header().Set("X-ASCP-Obf", "1")
 	}
 	return c.Blob(http.StatusOK, mimeType, data)
 }

@@ -2,6 +2,8 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
+  ArrowLeft,
+  ArrowRight,
   Check,
   Collection,
   CopyDocument,
@@ -37,8 +39,9 @@ import { useDomainStore } from '@/stores/domain'
 import type { AssetItem, KbChunk, KbContentResult, KbDocument } from '@/types/api'
 import { formatFileSize, getKbParseStatusMeta, normalizeList } from '@/utils/format'
 import {
-  buildKbTree,
+  buildImmediateKbTreeNodes,
   confirmAndDownloadKb,
+  extractImmediateFiles,
   isImageFile,
   isMarkdownFile,
   isTextFile,
@@ -65,8 +68,18 @@ const selectedKb = computed(
 )
 
 const loadingDocs = ref(false)
-const documents = ref<KbDocument[]>([])
-const treeNodes = computed(() => buildKbTree(documents.value))
+const treeRefreshSeed = ref(0)
+const treeKey = computed(() => `${selectedKbId.value || 0}-${treeRefreshSeed.value}`)
+const treeProps = {
+  label: 'label',
+  children: 'children',
+  isLeaf: 'isLeaf'
+}
+const folderFilesCache = ref<Record<string, KbDocument[]>>({})
+const rootEmpty = ref(false)
+const loadedDocCount = computed(() =>
+  Object.values(folderFilesCache.value).reduce((sum, list) => sum + list.length, 0)
+)
 
 const selectedFolderPath = ref('')
 const selectedFileNode = ref<KbTreeNode | null>(null)
@@ -93,7 +106,9 @@ const createFileForm = reactive({
 const rightTab = ref<'preview' | 'search'>('preview')
 const loadingPreview = ref(false)
 const previewDoc = ref<KbContentResult | null>(null)
-const imagePreviewUrl = ref('')
+const imageUrlMap = ref<Record<number, string>>({})
+const sameFolderImages = ref<KbDocument[]>([])
+const loadingImageBlob = ref(false)
 const imageDoc = ref<KbDocument | null>(null)
 const binaryDoc = ref<KbDocument | null>(null)
 const previewMode = ref<'rendered' | 'edit' | 'split' | 'raw'>('rendered')
@@ -101,15 +116,28 @@ const editFileName = ref('')
 const editContent = ref('')
 const savingEdit = ref(false)
 
-function revokeImageUrl() {
-  if (imagePreviewUrl.value) {
-    URL.revokeObjectURL(imagePreviewUrl.value)
-    imagePreviewUrl.value = ''
+const imagePreviewUrl = computed(() =>
+  imageDoc.value ? imageUrlMap.value[imageDoc.value.id] || '' : ''
+)
+const currentImageIndex = computed(() => {
+  if (!imageDoc.value) return 0
+  const idx = sameFolderImages.value.findIndex((d) => d.id === imageDoc.value?.id)
+  return idx >= 0 ? idx : 0
+})
+const folderImageUrls = computed(() =>
+  sameFolderImages.value.map((d) => imageUrlMap.value[d.id] || '')
+)
+
+function revokeAllImageUrls() {
+  for (const url of Object.values(imageUrlMap.value)) {
+    if (url) URL.revokeObjectURL(url)
   }
+  imageUrlMap.value = {}
 }
 
 function resetPreviewState() {
-  revokeImageUrl()
+  revokeAllImageUrls()
+  sameFolderImages.value = []
   previewDoc.value = null
   imageDoc.value = null
   binaryDoc.value = null
@@ -151,14 +179,45 @@ function stopPolling() {
 
 function startPollingIfNeeded() {
   stopPolling()
-  const hasPending = documents.value.some(
-    (d) => !d.is_folder && (d.parse_status === 'pending' || d.parse_status === 'processing')
-  )
+  const hasPending = Object.values(folderFilesCache.value)
+    .flat()
+    .some((d) => !d.is_folder && (d.parse_status === 'pending' || d.parse_status === 'processing'))
   if (hasPending && selectedKbId.value) {
     pollTimer = setInterval(() => {
-      fetchDocuments(true)
+      pollPendingFolders()
     }, 3000)
   }
+}
+
+async function pollPendingFolders() {
+  if (!selectedKbId.value) return
+  const kbId = selectedKbId.value
+  const pendingEntries = Object.entries(folderFilesCache.value).filter(([, list]) =>
+    list.some((d) => !d.is_folder && (d.parse_status === 'pending' || d.parse_status === 'processing'))
+  )
+  if (pendingEntries.length === 0) {
+    stopPolling()
+    return
+  }
+  let anyChanged = false
+  for (const [folderPath, prevList] of pendingEntries) {
+    try {
+      const res = await getDocuments(kbId, { lazy: true, folder_path: folderPath })
+      const items = normalizeList(res).items
+      const nextFiles = extractImmediateFiles(items, folderPath)
+      const prevStatusMap = new Map(prevList.map((d) => [d.id, d.parse_status]))
+      if (nextFiles.some((d) => prevStatusMap.get(d.id) !== d.parse_status)) {
+        anyChanged = true
+      }
+      folderFilesCache.value = { ...folderFilesCache.value, [folderPath]: nextFiles }
+    } catch {
+      // Ignore polling error
+    }
+  }
+  if (anyChanged) {
+    treeRefreshSeed.value++
+  }
+  startPollingIfNeeded()
 }
 
 async function fetchKbs() {
@@ -179,42 +238,74 @@ async function fetchKbs() {
       if (!kbList.value.some((k) => k.id === selectedKbId.value)) {
         selectedKbId.value = kbList.value[0].id
       }
-      await fetchDocuments()
+      refreshTree()
     } else {
       selectedKbId.value = null
-      documents.value = []
+      folderFilesCache.value = {}
+      rootEmpty.value = true
     }
   } catch {
     kbList.value = []
     kbTotal.value = 0
     selectedKbId.value = null
-    documents.value = []
+    folderFilesCache.value = {}
   } finally {
     loadingKbs.value = false
   }
 }
 
-async function fetchDocuments(silent = false) {
-  if (!selectedKbId.value) return
-  if (!silent) loadingDocs.value = true
+function refreshTree() {
+  stopPolling()
+  folderFilesCache.value = {}
+  rootEmpty.value = false
+  treeRefreshSeed.value++
+}
+
+async function loadKbTreeNode(
+  node: { level: number; data?: KbTreeNode },
+  resolve: (data: KbTreeNode[]) => void
+) {
+  if (!selectedKbId.value) {
+    resolve([])
+    return
+  }
+  const kbId = selectedKbId.value
+  const folderPath = node.level === 0 ? '' : (node.data?.folderPath || '')
+  if (node.level === 0) {
+    loadingDocs.value = true
+    rootEmpty.value = false
+  }
   try {
-    const res = await getDocuments(selectedKbId.value)
-    documents.value = normalizeList(res).items
+    const res = await getDocuments(kbId, { lazy: true, folder_path: folderPath })
+    const items = normalizeList(res).items
+    const files = extractImmediateFiles(items, folderPath)
+    folderFilesCache.value = { ...folderFilesCache.value, [folderPath]: files }
+    const nodes = buildImmediateKbTreeNodes(items, folderPath)
+    if (node.level === 0) {
+      rootEmpty.value = nodes.length === 0
+    }
+    resolve(nodes)
     startPollingIfNeeded()
   } catch {
-    if (!silent) documents.value = []
+    if (node.level === 0) {
+      rootEmpty.value = true
+    }
+    resolve([])
   } finally {
-    if (!silent) loadingDocs.value = false
+    if (node.level === 0) {
+      loadingDocs.value = false
+    }
   }
 }
 
 function handleSelectKb(id: number) {
   selectedKbId.value = id
   selectedFolderPath.value = ''
+  selectedFileNode.value = null
   resetPreviewState()
   searchResults.value = []
   hasSearched.value = false
-  fetchDocuments()
+  refreshTree()
 }
 
 function openCreateFolderModal() {
@@ -235,7 +326,7 @@ async function handleCreateFolder() {
     ElMessage.success('文件夹已创建')
     createFolderOpen.value = false
     selectedFolderPath.value = clean
-    await fetchDocuments()
+    refreshTree()
   } catch {
     // Handled by interceptor
   } finally {
@@ -269,7 +360,7 @@ async function handleCreateFile() {
     })
     ElMessage.success(`已新建文档「${created.file_name}」`)
     createFileOpen.value = false
-    await fetchDocuments()
+    refreshTree()
     await loadPreviewDoc(created.id, 'split')
   } catch {
     // Handled by interceptor
@@ -311,7 +402,7 @@ async function handleFilesSelected(event: Event) {
     }
     if (uploadedCount > 0) {
       ElMessage.success(`成功上传 ${uploadedCount} 个文件`)
-      await fetchDocuments()
+      refreshTree()
     }
   } catch {
     // Handled by interceptor
@@ -346,7 +437,7 @@ async function handleFolderSelected(event: Event) {
     }
     if (uploadedCount > 0) {
       ElMessage.success(`成功上传文件夹内 ${uploadedCount} 个文件`)
-      await fetchDocuments()
+      refreshTree()
     }
   } catch {
     // Handled by interceptor
@@ -393,12 +484,36 @@ async function handleSaveEdit() {
     editFileName.value = updated.file_name
     editContent.value = updated.content
     ElMessage.success('文档已保存')
-    await fetchDocuments(true)
+    refreshTree()
   } catch {
     // Handled by interceptor
   } finally {
     savingEdit.value = false
   }
+}
+
+async function ensureImageUrl(doc: KbDocument) {
+  if (!selectedKbId.value) return
+  if (imageUrlMap.value[doc.id]) return
+  loadingImageBlob.value = true
+  try {
+    const blob = await getDocumentRawBlob(selectedKbId.value, doc.id, doc.file_name)
+    const url = URL.createObjectURL(blob)
+    imageUrlMap.value = { ...imageUrlMap.value, [doc.id]: url }
+  } finally {
+    loadingImageBlob.value = false
+  }
+}
+
+async function selectImageAtIndex(idx: number) {
+  const target = sameFolderImages.value[idx]
+  if (!target) return
+  imageDoc.value = target
+  await ensureImageUrl(target)
+}
+
+function handleLightboxSwitch(index: number) {
+  selectImageAtIndex(index)
 }
 
 async function handleNodeClick(node: KbTreeNode) {
@@ -412,13 +527,34 @@ async function handleNodeClick(node: KbTreeNode) {
   selectedFileNode.value = node
   rightTab.value = 'preview'
   resetPreviewState()
+  if (isImageFile(doc.file_name)) {
+    const cleanFolder = (doc.folder_path || '').replace(/^\/+|\/+$/g, '')
+    let folderDocs = folderFilesCache.value[cleanFolder]
+    if (!folderDocs) {
+      try {
+        const res = await getDocuments(selectedKbId.value, { lazy: true, folder_path: cleanFolder })
+        folderDocs = extractImmediateFiles(normalizeList(res).items, cleanFolder)
+        folderFilesCache.value = { ...folderFilesCache.value, [cleanFolder]: folderDocs }
+      } catch {
+        folderDocs = [doc]
+      }
+    }
+    const imgs = folderDocs
+      .filter((d) => !d.is_folder && isImageFile(d.file_name))
+      .sort((a, b) => a.file_name.localeCompare(b.file_name))
+    sameFolderImages.value = imgs.length > 0 ? imgs : [doc]
+    imageDoc.value = doc
+    try {
+      await ensureImageUrl(doc)
+    } catch {
+      resetPreviewState()
+    }
+    return
+  }
+
   loadingPreview.value = true
   try {
-    if (isImageFile(doc.file_name)) {
-      const blob = await getDocumentRawBlob(selectedKbId.value, doc.id)
-      imagePreviewUrl.value = URL.createObjectURL(blob)
-      imageDoc.value = doc
-    } else if (isTextFile(doc.file_name)) {
+    if (isTextFile(doc.file_name)) {
       const contentRes = await getDocumentContent(selectedKbId.value, doc.id)
       if (contentRes.is_binary) {
         binaryDoc.value = doc
@@ -466,9 +602,9 @@ async function handleNodeDrop(
     ElMessage.success(
       targetFolderPath ? `已移动「${doc.file_name}」至 ${targetFolderPath}` : `已移动「${doc.file_name}」至根目录`
     )
-    await fetchDocuments()
+    refreshTree()
   } catch {
-    await fetchDocuments()
+    refreshTree()
   }
 }
 
@@ -495,7 +631,7 @@ async function handlePaste(targetFolder?: string) {
     ElMessage.success(
       targetPath ? `已粘贴至目录 ${targetPath}` : '已粘贴至根目录'
     )
-    await fetchDocuments()
+    refreshTree()
   } catch {
     // Handled by interceptor
   } finally {
@@ -552,7 +688,7 @@ async function handleDeleteNode(node: KbTreeNode) {
     if (node.isFolder && selectedFolderPath.value === node.folderPath) {
       selectedFolderPath.value = ''
     }
-    await fetchDocuments()
+    refreshTree()
   } catch {
     // Cancelled or failed
   }
@@ -617,7 +753,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   stopPolling()
-  revokeImageUrl()
+  revokeAllImageUrls()
   window.removeEventListener('keydown', handleKeydown)
 })
 </script>
@@ -658,7 +794,7 @@ onBeforeUnmount(() => {
             <span class="selector-label">当前知识库：</span>
             <el-select
               :model-value="selectedKbId"
-              style="width: 260px"
+              class="kb-select"
               @change="handleSelectKb"
             >
               <el-option
@@ -715,7 +851,7 @@ onBeforeUnmount(() => {
             >
               下载整个知识库
             </el-button>
-            <el-button :icon="Refresh" @click="fetchDocuments()">刷新</el-button>
+            <el-button :icon="Refresh" @click="refreshTree()">刷新</el-button>
           </div>
         </div>
 
@@ -766,20 +902,23 @@ onBeforeUnmount(() => {
         <div class="surface-card kb-panel tree-panel">
           <div class="panel-header">
             <h3 class="panel-title">目录与文件</h3>
-            <span class="doc-count tabular-nums">{{ documents.length }} 项</span>
+            <span class="doc-count tabular-nums">{{ loadedDocCount }} 项</span>
           </div>
 
           <div v-loading="loadingDocs" class="tree-scroll">
             <el-empty
-              v-if="treeNodes.length === 0"
+              v-if="rootEmpty"
               description="暂无文件或文件夹，请点击上方按钮上传文件或新建 Markdown"
               :image-size="64"
             />
             <el-tree
-              v-else
-              :data="treeNodes"
+              v-show="!rootEmpty"
+              :key="treeKey"
+              lazy
+              :load="loadKbTreeNode"
+              :props="treeProps"
               node-key="key"
-              default-expand-all
+              :default-expand-all="false"
               highlight-current
               draggable
               :allow-drag="allowDrag"
@@ -870,7 +1009,7 @@ onBeforeUnmount(() => {
                 <el-skeleton :rows="6" animated />
               </div>
 
-              <div v-else-if="imageDoc && imagePreviewUrl" class="preview-container">
+              <div v-else-if="imageDoc" class="preview-container">
                 <div class="preview-header">
                   <div class="preview-meta">
                     <span class="preview-filename mono-text">{{ imageDoc.file_name }}</span>
@@ -878,22 +1017,48 @@ onBeforeUnmount(() => {
                       {{ imageDoc.folder_path || '/' }} · {{ formatFileSize(imageDoc.file_size) }}
                     </span>
                   </div>
-                  <el-button
-                    type="primary"
-                    size="small"
-                    plain
-                    :icon="Download"
-                    @click="handleDownloadFile(imageDoc.id, imageDoc.file_name)"
-                  >
-                    下载图片
-                  </el-button>
+                  <div class="preview-controls">
+                    <div v-if="sameFolderImages.length > 0" class="image-nav-controls">
+                      <el-button
+                        size="small"
+                        :icon="ArrowLeft"
+                        :disabled="currentImageIndex <= 0"
+                        @click="selectImageAtIndex(currentImageIndex - 1)"
+                      >
+                        上一张
+                      </el-button>
+                      <span class="image-nav-counter tabular-nums">
+                        {{ currentImageIndex + 1 }} / {{ sameFolderImages.length }}
+                      </span>
+                      <el-button
+                        size="small"
+                        :disabled="currentImageIndex >= sameFolderImages.length - 1"
+                        @click="selectImageAtIndex(currentImageIndex + 1)"
+                      >
+                        下一张
+                        <el-icon class="el-icon--right"><ArrowRight /></el-icon>
+                      </el-button>
+                    </div>
+                    <el-button
+                      type="primary"
+                      size="small"
+                      plain
+                      :icon="Download"
+                      @click="handleDownloadFile(imageDoc.id, imageDoc.file_name)"
+                    >
+                      下载图片
+                    </el-button>
+                  </div>
                 </div>
-                <div class="image-preview-box">
+                <div v-loading="loadingImageBlob" class="image-preview-box">
                   <el-image
+                    v-if="imagePreviewUrl"
                     :src="imagePreviewUrl"
-                    :preview-src-list="[imagePreviewUrl]"
+                    :preview-src-list="folderImageUrls"
+                    :initial-index="currentImageIndex"
                     fit="contain"
                     style="max-height: 480px; width: 100%"
+                    @switch="handleLightboxSwitch"
                   />
                 </div>
               </div>
@@ -1172,6 +1337,12 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-wrap: wrap;
+}
+
+.kb-select {
+  width: 260px;
+  max-width: 100%;
 }
 
 .selector-label {
@@ -1318,6 +1489,19 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-wrap: wrap;
+}
+
+.image-nav-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.image-nav-counter {
+  font-size: 12.5px;
+  color: var(--ascp-text-secondary);
+  padding: 0 4px;
 }
 
 .preview-content {
@@ -1488,13 +1672,24 @@ onBeforeUnmount(() => {
   color: var(--ascp-text-muted);
 }
 
-@media (max-width: 1080px) {
+@media (max-width: 992px) {
   .kb-columns {
     grid-template-columns: 1fr;
   }
 
   .split-editor-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 768px) {
+  .selector-left,
+  .kb-select {
+    width: 100%;
+  }
+
+  .kb-panel {
+    padding: 14px 12px;
   }
 }
 </style>

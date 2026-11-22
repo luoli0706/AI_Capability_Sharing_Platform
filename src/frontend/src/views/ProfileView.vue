@@ -815,7 +815,7 @@ onMounted(async () => {
 
 .basic-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 290px), 1fr));
   gap: 32px;
   padding-top: 8px;
 }
@@ -910,5 +910,20 @@ onMounted(async () => {
   margin-top: 16px;
   display: flex;
   justify-content: flex-end;
+}
+
+@media (max-width: 768px) {
+  .profile-tabs-card {
+    padding: 12px 14px 18px;
+  }
+
+  .basic-grid {
+    gap: 20px;
+  }
+
+  .avatar-editor {
+    flex-direction: column;
+    align-items: flex-start;
+  }
 }
 </style>

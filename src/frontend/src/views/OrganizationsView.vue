@@ -722,7 +722,7 @@ onMounted(() => {
 <style scoped>
 .org-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 290px), 1fr));
   gap: 18px;
 }
 
@@ -852,6 +852,8 @@ onMounted(() => {
 .add-member-form {
   display: flex;
   align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .add-member-form :deep(.el-form-item) {
@@ -929,6 +931,7 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
 .pagination-wrap,
@@ -936,5 +939,21 @@ onMounted(() => {
   display: flex;
   justify-content: flex-end;
   padding-top: 12px;
+}
+
+@media (max-width: 768px) {
+  .tabs-toolbar {
+    padding: 10px 14px 14px;
+  }
+
+  .search-row .el-input {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .public-domain-item {
+    flex-direction: column;
+    align-items: flex-start;
+  }
 }
 </style>

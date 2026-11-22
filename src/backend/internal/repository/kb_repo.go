@@ -14,6 +14,7 @@ type KBRepository interface {
 	CreateDocument(doc *model.KBDocument) error
 	EnsureFolderHierarchy(kbAssetID, uploaderID uint64, folderPath string) (*model.KBDocument, error)
 	ListDocuments(kbAssetID uint64) ([]model.KBDocument, error)
+	ListDocumentsByParent(kbAssetID uint64, parentFolder string) ([]model.KBDocument, error)
 	FindDocumentByID(kbAssetID, docID uint64) (*model.KBDocument, error)
 	ListMatchingFiles(kbAssetID uint64, scope string, docID uint64, folderPath string) ([]model.KBDocument, error)
 	FileExistsInFolder(kbAssetID uint64, folderPath, fileName string, excludeDocID uint64) (bool, error)
@@ -88,6 +89,26 @@ func (r *kbRepository) ListDocuments(kbAssetID uint64) ([]model.KBDocument, erro
 	if err := r.db.Where("kb_asset_id = ?", kbAssetID).
 		Order("is_folder DESC, folder_path ASC, file_name ASC").
 		Find(&docs).Error; err != nil {
+		return nil, err
+	}
+	if docs == nil {
+		docs = []model.KBDocument{}
+	}
+	return docs, nil
+}
+
+// ListDocumentsByParent returns direct child folders and direct child files under parentFolder.
+func (r *kbRepository) ListDocumentsByParent(kbAssetID uint64, parentFolder string) ([]model.KBDocument, error) {
+	var docs []model.KBDocument
+	tx := r.db.Where("kb_asset_id = ?", kbAssetID)
+	if parentFolder == "" {
+		tx = tx.Where("((is_folder = ? AND folder_path <> '' AND folder_path NOT LIKE ?) OR (is_folder = ? AND folder_path = ''))",
+			true, "%/%", false)
+	} else {
+		tx = tx.Where("((is_folder = ? AND folder_path LIKE ? AND folder_path NOT LIKE ?) OR (is_folder = ? AND folder_path = ?))",
+			true, parentFolder+"/%", parentFolder+"/%/%", false, parentFolder)
+	}
+	if err := tx.Order("is_folder DESC, file_name ASC").Find(&docs).Error; err != nil {
 		return nil, err
 	}
 	if docs == nil {

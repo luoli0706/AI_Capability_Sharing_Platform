@@ -198,3 +198,50 @@ body,
   border-top: 1px solid var(--ascp-border);
   margin: 14px 0;
 }
+
+.el-table {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+@media (max-width: 1200px) {
+  .page-container {
+    gap: 16px;
+  }
+
+  .page-header {
+    gap: 12px;
+  }
+}
+
+@media (max-width: 768px) {
+  .page-container {
+    padding: 14px 12px;
+    gap: 14px;
+  }
+
+  .page-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  .page-title {
+    font-size: 19px;
+  }
+
+  .el-dialog {
+    width: 94vw !important;
+    max-width: 94vw !important;
+  }
+
+  .el-drawer:not(.mobile-nav-drawer) {
+    width: 94vw !important;
+    max-width: 94vw !important;
+  }
+
+  .el-table__inner-wrapper,
+  .el-table {
+    overflow-x: auto !important;
+  }
+}

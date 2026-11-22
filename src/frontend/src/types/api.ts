@@ -342,6 +342,8 @@ export interface KbContentResult {
   file_size: number
   content: string
   is_binary?: boolean
+  obfuscated?: boolean
+  payload?: string
 }
 
 export interface KbDownloadPreview {

@@ -540,11 +540,12 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
 .domain-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 290px), 1fr));
   gap: 18px;
 }
 
@@ -686,5 +687,16 @@ onMounted(() => {
   display: flex;
   justify-content: flex-end;
   padding-top: 4px;
+}
+
+@media (max-width: 768px) {
+  .tabs-toolbar {
+    padding: 10px 14px 14px;
+  }
+
+  .search-row .el-input {
+    width: 100%;
+    max-width: 100%;
+  }
 }
 </style>

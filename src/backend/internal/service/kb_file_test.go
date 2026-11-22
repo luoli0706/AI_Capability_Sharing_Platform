@@ -4,16 +4,19 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
 	"ascp-backend/internal/model"
+	"ascp-backend/internal/pkg/kbcodec"
 
 	"gorm.io/gorm"
 )
@@ -49,6 +52,35 @@ func (m *mockFileKBRepo) ListDocuments(kbAssetID uint64) ([]model.KBDocument, er
 			out = append(out, *d)
 		}
 	}
+	return out, nil
+}
+func (m *mockFileKBRepo) ListDocumentsByParent(kbAssetID uint64, parentFolder string) ([]model.KBDocument, error) {
+	var out []model.KBDocument
+	for _, d := range m.docs {
+		if d.KBAssetID != kbAssetID {
+			continue
+		}
+		if d.IsFolder {
+			if parentFolder == "" {
+				if d.FolderPath != "" && !strings.Contains(d.FolderPath, "/") {
+					out = append(out, *d)
+				}
+			} else {
+				prefix := parentFolder + "/"
+				if strings.HasPrefix(d.FolderPath, prefix) && !strings.Contains(strings.TrimPrefix(d.FolderPath, prefix), "/") {
+					out = append(out, *d)
+				}
+			}
+		} else if d.FolderPath == parentFolder {
+			out = append(out, *d)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].IsFolder != out[j].IsFolder {
+			return out[i].IsFolder
+		}
+		return out[i].FileName < out[j].FileName
+	})
 	return out, nil
 }
 func (m *mockFileKBRepo) FindDocumentByID(kbAssetID, docID uint64) (*model.KBDocument, error) {
@@ -168,7 +200,7 @@ func TestKBDownloadPreviewAndZip(t *testing.T) {
 		},
 	}
 	domainRepo := &mockP1DomainRepo{members: map[uint64]map[uint64]string{}}
-	kbSvc := NewKBService(kbRepo, assetRepo, domainRepo, nil, nil, tmpDir)
+	kbSvc := NewKBService(kbRepo, assetRepo, domainRepo, nil, nil, tmpDir, "test-storage-secret")
 
 	// 1. Recursive folder preview ("guides" includes "guides/intro.md" + "guides/api/auth.md")
 	prevFolder, err := kbSvc.GetDownloadPreview(10, false, 1, "folder", 0, "/guides/")
@@ -262,7 +294,7 @@ func TestKBMoveCopyAndAuditLogs(t *testing.T) {
 	}
 	auditRepo := &mockAuditRepo{}
 
-	kbSvc := NewKBService(kbRepo, assetRepo, domainRepo, nil, nil, tmpDir)
+	kbSvc := NewKBService(kbRepo, assetRepo, domainRepo, nil, nil, tmpDir, "test-storage-secret")
 	kbSvc.SetAuditRepos(auditRepo, nil)
 	auditSvc := NewAuditService(auditRepo, domainRepo, nil)
 
@@ -321,7 +353,7 @@ func TestKBCreateAndUpdateMarkdownFile(t *testing.T) {
 	}
 	auditRepo := &mockAuditRepo{}
 
-	kbSvc := NewKBService(kbRepo, assetRepo, domainRepo, nil, nil, tmpDir)
+	kbSvc := NewKBService(kbRepo, assetRepo, domainRepo, nil, nil, tmpDir, "test-storage-secret")
 	kbSvc.SetAuditRepos(auditRepo, nil)
 
 	// 1. CreateMarkdownFile without extension -> auto-appends .md
@@ -380,8 +412,15 @@ func TestKBCreateAndUpdateMarkdownFile(t *testing.T) {
 		t.Fatalf("expected renamed file with >=2 re-indexed chunks, got %+v", updated)
 	}
 	diskBytes, err := os.ReadFile(updated.FilePath)
-	if err != nil || string(diskBytes) != longContent {
-		t.Fatalf("expected updated content on disk, err=%v", err)
+	if err != nil {
+		t.Fatalf("os.ReadFile failed: %v", err)
+	}
+	if !kbcodec.IsEncryptedAtRest(diskBytes) {
+		t.Fatalf("expected updated disk file to be encrypted with %s", kbcodec.MagicHeader)
+	}
+	decrypted, err := kbcodec.DecryptAtRest(diskBytes, "test-storage-secret")
+	if err != nil || string(decrypted) != longContent {
+		t.Fatalf("expected decrypted updated content to match, err=%v", err)
 	}
 
 	// 5. Verify audit logs include kb.file_create and kb.file_update
@@ -427,7 +466,7 @@ func TestKBAnyFileUploadSizeLimitAndRawPreview(t *testing.T) {
 			5: {10: model.DomainRoleOwner},
 		},
 	}
-	kbSvc := NewKBService(kbRepo, assetRepo, domainRepo, nil, nil, tmpDir)
+	kbSvc := NewKBService(kbRepo, assetRepo, domainRepo, nil, nil, tmpDir, "test-storage-secret")
 
 	// 1. Upload PNG image (no chunks created)
 	pngBytes := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D}
@@ -441,7 +480,7 @@ func TestKBAnyFileUploadSizeLimitAndRawPreview(t *testing.T) {
 	}
 
 	// 2. GetDocumentContent returns is_binary=true and empty content
-	contentRes, err := kbSvc.GetDocumentContent(10, false, 1, docs[0].ID)
+	contentRes, err := kbSvc.GetDocumentContent(10, false, 1, docs[0].ID, false)
 	if err != nil {
 		t.Fatalf("GetDocumentContent failed: %v", err)
 	}
@@ -450,7 +489,7 @@ func TestKBAnyFileUploadSizeLimitAndRawPreview(t *testing.T) {
 	}
 
 	// 3. GetDocumentRaw returns exact PNG bytes & image/png
-	fn, mt, isSVG, raw, err := kbSvc.GetDocumentRaw(10, false, 1, docs[0].ID)
+	fn, mt, isSVG, raw, err := kbSvc.GetDocumentRaw(10, false, 1, docs[0].ID, false)
 	if err != nil {
 		t.Fatalf("GetDocumentRaw failed: %v", err)
 	}
@@ -490,5 +529,200 @@ func TestKBAnyFileUploadSizeLimitAndRawPreview(t *testing.T) {
 	zr, err := zip.NewReader(bytes.NewReader(zipData), int64(len(zipData)))
 	if err != nil || len(zr.File) != 2 {
 		t.Fatalf("expected 2 files in zip, err=%v", err)
+	}
+}
+
+func TestKBAtRestEncryptionAndTransportObfuscation(t *testing.T) {
+	tmpDir := t.TempDir()
+	kbRepo := newMockFileKBRepo()
+	assetRepo := &mockP1AssetRepo{
+		assets: map[uint64]*model.AIAsset{
+			1: {ID: 1, AssetCode: "kb-enc", Name: "Encrypted KB", AssetType: model.AssetTypeKB, DomainID: 5, OwnerID: 10, Visibility: model.VisibilityPublic, Status: model.AssetStatusPublished},
+		},
+	}
+	domainRepo := &mockP1DomainRepo{members: map[uint64]map[uint64]string{}}
+	kbSvc := NewKBService(kbRepo, assetRepo, domainRepo, nil, nil, tmpDir, "test-storage-secret")
+
+	plainText := "# Secret Architecture\nSensitive plaintext that must NEVER appear on disk."
+	doc, err := kbSvc.CreateMarkdownFile(10, false, 1, model.CreateKBFileRequest{
+		FileName: "arch.md",
+		Content:  plainText,
+	})
+	if err != nil {
+		t.Fatalf("CreateMarkdownFile failed: %v", err)
+	}
+
+	// 1. Disk file starts with ASCPENC1 and does NOT contain plaintext
+	diskBytes, err := os.ReadFile(doc.FilePath)
+	if err != nil {
+		t.Fatalf("os.ReadFile failed: %v", err)
+	}
+	if !kbcodec.IsEncryptedAtRest(diskBytes) {
+		t.Fatalf("expected disk file to start with %s", kbcodec.MagicHeader)
+	}
+	if bytes.Contains(diskBytes, []byte("Sensitive plaintext")) {
+		t.Fatal("disk file must not contain plaintext")
+	}
+
+	// 2. GetDocumentContent (obf=false) returns exact plaintext
+	plainRes, err := kbSvc.GetDocumentContent(10, false, 1, doc.ID, false)
+	if err != nil {
+		t.Fatalf("GetDocumentContent(obf=false) failed: %v", err)
+	}
+	if plainRes["content"] != plainText {
+		t.Fatalf("unexpected content: %v", plainRes["content"])
+	}
+
+	// 3. GetDocumentContent (obf=true) returns obfuscated=true, payload, and empty content
+	obfRes, err := kbSvc.GetDocumentContent(10, false, 1, doc.ID, true)
+	if err != nil {
+		t.Fatalf("GetDocumentContent(obf=true) failed: %v", err)
+	}
+	if obfRes["obfuscated"] != true || obfRes["content"] != "" {
+		t.Fatalf("unexpected obfuscated response metadata: %+v", obfRes)
+	}
+	payloadB64, _ := obfRes["payload"].(string)
+	obfBytes, err := base64.StdEncoding.DecodeString(payloadB64)
+	if err != nil {
+		t.Fatalf("base64 decode failed: %v", err)
+	}
+	deobfBytes, err := kbcodec.DeobfuscateTransport(obfBytes)
+	if err != nil {
+		t.Fatalf("DeobfuscateTransport failed: %v", err)
+	}
+	if string(deobfBytes) != plainText {
+		t.Fatalf("deobfuscated content mismatch: got %q want %q", string(deobfBytes), plainText)
+	}
+
+	// 4. GetDocumentRaw (obf=false & obf=true)
+	_, mtPlain, _, rawPlain, err := kbSvc.GetDocumentRaw(10, false, 1, doc.ID, false)
+	if err != nil || !strings.HasPrefix(mtPlain, "text/markdown") || string(rawPlain) != plainText {
+		t.Fatalf("GetDocumentRaw(obf=false) mismatch: mt=%s err=%v", mtPlain, err)
+	}
+	_, mtObf, _, rawObf, err := kbSvc.GetDocumentRaw(10, false, 1, doc.ID, true)
+	if err != nil || mtObf != "application/octet-stream" {
+		t.Fatalf("GetDocumentRaw(obf=true) mismatch: mt=%s err=%v", mtObf, err)
+	}
+	rawDeobf, err := kbcodec.DeobfuscateTransport(rawObf)
+	if err != nil || string(rawDeobf) != plainText {
+		t.Fatalf("GetDocumentRaw deobfuscation mismatch: err=%v", err)
+	}
+
+	// 5. DownloadKB returns exact plaintext (single file)
+	_, _, dlPlain, err := kbSvc.DownloadKB(10, false, 1, "file", doc.ID, "")
+	if err != nil || string(dlPlain) != plainText {
+		t.Fatalf("DownloadKB file mismatch: err=%v", err)
+	}
+
+	// 6. EncryptExistingPlainFiles encrypts legacy plain KB files and skips non-KB dirs
+	legacyPath := filepath.Join(tmpDir, "1", "legacy.md")
+	if err := os.WriteFile(legacyPath, []byte("legacy plain text"), 0644); err != nil {
+		t.Fatalf("write legacy file failed: %v", err)
+	}
+	skillDir := filepath.Join(tmpDir, "skills", "99")
+	if err := os.MkdirAll(skillDir, 0755); err != nil {
+		t.Fatalf("mkdir skill dir failed: %v", err)
+	}
+	skillPkgPath := filepath.Join(skillDir, "pkg.zip")
+	if err := os.WriteFile(skillPkgPath, []byte("PK-skill-zip"), 0644); err != nil {
+		t.Fatalf("write skill file failed: %v", err)
+	}
+
+	count, err := kbSvc.EncryptExistingPlainFiles(context.Background())
+	if err != nil {
+		t.Fatalf("EncryptExistingPlainFiles failed: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 legacy file encrypted, got %d", count)
+	}
+
+	legacyDisk, _ := os.ReadFile(legacyPath)
+	if !kbcodec.IsEncryptedAtRest(legacyDisk) {
+		t.Fatal("expected legacy KB file to be encrypted at rest")
+	}
+	legacyPlain, err := kbcodec.DecryptAtRest(legacyDisk, "test-storage-secret")
+	if err != nil || string(legacyPlain) != "legacy plain text" {
+		t.Fatalf("decrypted legacy mismatch: err=%v", err)
+	}
+
+	skillDisk, _ := os.ReadFile(skillPkgPath)
+	if string(skillDisk) != "PK-skill-zip" {
+		t.Fatal("expected non-KB skills file to remain untouched")
+	}
+}
+
+func TestListDocumentsLazy(t *testing.T) {
+	kbRepo := newMockFileKBRepo()
+	assetRepo := &mockP1AssetRepo{
+		assets: map[uint64]*model.AIAsset{
+			1: {ID: 1, AssetCode: "kb-lazy", Name: "Lazy KB", AssetType: model.AssetTypeKB, DomainID: 5, OwnerID: 10, Visibility: model.VisibilityDomain, Status: model.AssetStatusPublished},
+		},
+	}
+	domainRepo := &mockP1DomainRepo{
+		members: map[uint64]map[uint64]string{
+			5: {
+				10: model.DomainRoleOwner,
+				20: model.DomainRoleMember,
+			},
+		},
+	}
+	kbSvc := NewKBService(kbRepo, assetRepo, domainRepo, nil, nil, t.TempDir(), "test-storage-secret")
+
+	// Seed hierarchy:
+	// - guides (folder)
+	//   - intro.md (file)
+	//   - guides/api (folder)
+	//     - auth.md (file)
+	// - notes (folder)
+	// - readme.md (root file)
+	seed := []model.KBDocument{
+		{KBAssetID: 1, FolderPath: "guides", IsFolder: true, FileName: "guides", UploaderID: 10},
+		{KBAssetID: 1, FolderPath: "guides/api", IsFolder: true, FileName: "api", UploaderID: 10},
+		{KBAssetID: 1, FolderPath: "notes", IsFolder: true, FileName: "notes", UploaderID: 10},
+		{KBAssetID: 1, FolderPath: "", IsFolder: false, FileName: "readme.md", UploaderID: 10},
+		{KBAssetID: 1, FolderPath: "guides", IsFolder: false, FileName: "intro.md", UploaderID: 10},
+		{KBAssetID: 1, FolderPath: "guides/api", IsFolder: false, FileName: "auth.md", UploaderID: 10},
+	}
+	for i := range seed {
+		if err := kbRepo.CreateDocument(&seed[i]); err != nil {
+			t.Fatalf("seed CreateDocument failed: %v", err)
+		}
+	}
+
+	// 1. Root "" as domain member (userID 20): returns top-level folders ("guides", "notes") + root file ("readme.md"), NOT nested grandchild files
+	rootDocs, err := kbSvc.ListDocumentsLazy(20, false, 1, "")
+	if err != nil {
+		t.Fatalf("ListDocumentsLazy root failed: %v", err)
+	}
+	if len(rootDocs) != 3 {
+		t.Fatalf("expected 3 root items, got %d: %+v", len(rootDocs), rootDocs)
+	}
+	if !rootDocs[0].IsFolder || rootDocs[0].FolderPath != "guides" ||
+		!rootDocs[1].IsFolder || rootDocs[1].FolderPath != "notes" ||
+		rootDocs[2].IsFolder || rootDocs[2].FileName != "readme.md" {
+		t.Fatalf("unexpected root lazy items: %+v", rootDocs)
+	}
+
+	// 2. Subfolder "guides" (and unnormalized "/guides/"): returns "guides/api" folder + "guides/intro.md", NOT "guides/api/auth.md"
+	guideDocs, err := kbSvc.ListDocumentsLazy(20, false, 1, "/guides/")
+	if err != nil {
+		t.Fatalf("ListDocumentsLazy guides failed: %v", err)
+	}
+	if len(guideDocs) != 2 {
+		t.Fatalf("expected 2 items under guides, got %d: %+v", len(guideDocs), guideDocs)
+	}
+	if !guideDocs[0].IsFolder || guideDocs[0].FolderPath != "guides/api" ||
+		guideDocs[1].IsFolder || guideDocs[1].FileName != "intro.md" {
+		t.Fatalf("unexpected guides lazy items: %+v", guideDocs)
+	}
+
+	// 3. Invalid traversal path is rejected
+	if _, err := kbSvc.ListDocumentsLazy(20, false, 1, "../secret"); err == nil {
+		t.Fatal("expected error for invalid folder_path traversal")
+	}
+
+	// 4. Non-member cannot access domain-visibility KB
+	if _, err := kbSvc.ListDocumentsLazy(99, false, 1, ""); err == nil {
+		t.Fatal("expected forbidden error for non-member on domain KB")
 	}
 }
