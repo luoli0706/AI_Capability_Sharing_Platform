@@ -33,8 +33,11 @@ services:
       MYSQL_PASSWORD: ${MYSQL_ROOT_PASSWORD:-ascp123456}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-ascp}
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production-ascp-jwt-secret}
+      SEVENO_BIN_PATH: /app/releases/seventhcv-7o-linux
+      SEVENO_RELEASE_DIR: /app/releases
     volumes:
       - backend_uploads:/app/uploads
+      - ../releases:/app/releases:ro
     networks:
       - ascp-net
 

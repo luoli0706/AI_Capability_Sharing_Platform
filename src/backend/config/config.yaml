@@ -13,3 +13,7 @@ jwt:
 
 storage:
   upload_dir: "./uploads"
+
+seveno:
+  bin_path: "./bin/seventhcv-7o"
+  release_dir: "./releases"

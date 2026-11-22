@@ -14,6 +14,7 @@ type Config struct {
 	Database DatabaseConfig `mapstructure:"database"`
 	JWT      JWTConfig      `mapstructure:"jwt"`
 	Storage  StorageConfig  `mapstructure:"storage"`
+	SevenO   SevenOConfig   `mapstructure:"seveno"`
 }
 
 type ServerConfig struct {
@@ -34,6 +35,11 @@ type JWTConfig struct {
 
 type StorageConfig struct {
 	UploadDir string `mapstructure:"upload_dir"`
+}
+
+type SevenOConfig struct {
+	BinPath    string `mapstructure:"bin_path"`
+	ReleaseDir string `mapstructure:"release_dir"`
 }
 
 // Load reads configuration from yaml file, optional .env file, and environment variables.
@@ -83,6 +89,20 @@ func loadFrom(path, dotEnvPath string) (*Config, error) {
 
 	if jwtSecret := getEnvValue(dotEnv, "JWT_SECRET"); jwtSecret != "" {
 		cfg.JWT.Secret = jwtSecret
+	}
+
+	if binPath := getEnvValue(dotEnv, "SEVENO_BIN_PATH"); binPath != "" {
+		cfg.SevenO.BinPath = binPath
+	}
+	if cfg.SevenO.BinPath == "" {
+		cfg.SevenO.BinPath = "./bin/seventhcv-7o"
+	}
+
+	if releaseDir := getEnvValue(dotEnv, "SEVENO_RELEASE_DIR"); releaseDir != "" {
+		cfg.SevenO.ReleaseDir = releaseDir
+	}
+	if cfg.SevenO.ReleaseDir == "" {
+		cfg.SevenO.ReleaseDir = "./releases"
 	}
 
 	return &cfg, nil

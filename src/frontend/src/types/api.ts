@@ -490,3 +490,17 @@ export interface AuditLogQuery {
   page_size?: number
 }
 
+export interface SevenOReleaseItem {
+  file_name: string
+  platform: string
+  kind: string
+  size: number
+  sha256: string
+  updated_at: string
+}
+
+export interface SevenOInspectResult {
+  kind: string
+  detail: string
+}
+

@@ -13,6 +13,7 @@ import {
   Fold,
   Grid,
   List,
+  Lock,
   Menu as IconMenu,
   OfficeBuilding,
   SwitchButton,
@@ -78,6 +79,7 @@ const globalNavItems = computed(() => {
     { path: '/organizations', title: '组织中心', icon: Grid },
     { path: '/approvals', title: '审批中心', icon: Checked },
     { path: '/logs', title: '日志中心', icon: List },
+    { path: '/tools/7o', title: '7o 加密工具', icon: Lock },
     { path: '/profile', title: '个人中心', icon: User }
   ]
   if (!activeDomainId.value) {

@@ -69,6 +69,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '日志中心', requiresAuth: true }
       },
       {
+        path: 'tools/7o',
+        name: 'tools-7o',
+        component: () => import('@/views/SevenOToolView.vue'),
+        meta: { title: '7o 加密工具', requiresAuth: true }
+      },
+      {
         path: 'profile',
         name: 'profile',
         component: () => import('@/views/ProfileView.vue'),

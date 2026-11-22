@@ -73,6 +73,7 @@ func main() {
 	keySvc := service.NewAPIKeyService(keyRepo)
 	invokeSvc := service.NewInvokeService(assetRepo, domainRepo, govRepo, kbRepo, logRepo, orgRepo)
 	auditSvc := service.NewAuditService(auditRepo, domainRepo, orgRepo)
+	sevenOSvc := service.NewSevenOService(cfg.SevenO.BinPath, cfg.SevenO.ReleaseDir)
 
 	assetSvc.SetAuditRepos(auditRepo, userRepo)
 	kbSvc.SetAuditRepos(auditRepo, userRepo)
@@ -90,6 +91,7 @@ func main() {
 	apiKeyHandler := handler.NewAPIKeyHandler(keySvc)
 	invokeHandler := handler.NewInvokeHandler(invokeSvc)
 	auditHandler := handler.NewAuditHandler(auditSvc)
+	sevenOHandler := handler.NewSevenOHandler(sevenOSvc)
 
 	e := echo.New()
 	e.HideBanner = true
@@ -196,6 +198,12 @@ func main() {
 	protected.GET("/approvals/pending", govHandler.ListPendingRequests)
 	protected.GET("/approvals/handled", govHandler.ListHandledRequests)
 	protected.POST("/approvals/:id/handle", govHandler.HandleApproval)
+
+	protected.GET("/tools/7o/releases", sevenOHandler.ListReleases)
+	protected.GET("/tools/7o/releases/:filename", sevenOHandler.DownloadRelease)
+	protected.POST("/tools/7o/encrypt", sevenOHandler.Encrypt)
+	protected.POST("/tools/7o/decrypt", sevenOHandler.Decrypt)
+	protected.POST("/tools/7o/inspect", sevenOHandler.Inspect)
 
 	// Unified invoke routes (JWT or X-API-Key + AssetGuardMiddleware)
 	invoke := v1.Group(
