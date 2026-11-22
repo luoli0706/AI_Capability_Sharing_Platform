@@ -7,6 +7,7 @@ import (
 	"ascp-backend/internal/model"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type MessageRepository interface {
@@ -137,6 +138,11 @@ func (r *messageRepository) CreateMessage(conv *model.UserConversation, msg *mod
 
 func (r *messageRepository) MarkConversationRead(convID, readerID uint64, readAt time.Time) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
+		var conv model.UserConversation
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			First(&conv, convID).Error; err != nil {
+			return err
+		}
 		if err := tx.Model(&model.UserMessage{}).
 			Where("conversation_id = ? AND receiver_id = ? AND is_read = ?", convID, readerID, false).
 			Updates(map[string]interface{}{
@@ -145,13 +151,22 @@ func (r *messageRepository) MarkConversationRead(convID, readerID uint64, readAt
 			}).Error; err != nil {
 			return err
 		}
-		if err := tx.Model(&model.UserConversation{}).
-			Where("id = ? AND user1_id = ?", convID, readerID).
-			Update("user1_unread_count", 0).Error; err != nil {
+		var remaining int64
+		if err := tx.Model(&model.UserMessage{}).
+			Where("conversation_id = ? AND receiver_id = ? AND is_read = ?", convID, readerID, false).
+			Count(&remaining).Error; err != nil {
 			return err
 		}
-		return tx.Model(&model.UserConversation{}).
-			Where("id = ? AND user2_id = ?", convID, readerID).
-			Update("user2_unread_count", 0).Error
+		if conv.User1ID == readerID {
+			return tx.Model(&model.UserConversation{}).
+				Where("id = ?", convID).
+				Update("user1_unread_count", remaining).Error
+		}
+		if conv.User2ID == readerID {
+			return tx.Model(&model.UserConversation{}).
+				Where("id = ?", convID).
+				Update("user2_unread_count", remaining).Error
+		}
+		return nil
 	})
 }

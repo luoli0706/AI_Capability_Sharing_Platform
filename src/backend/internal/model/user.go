@@ -116,6 +116,11 @@ type UserFavoriteItem struct {
 	FolderPath string    `json:"folder_path"`
 	FileExt    string    `json:"file_ext"`
 	CreatedAt  time.Time `json:"created_at"`
+
+	DomainVisibility string `json:"-"`
+	AssetOwnerID     uint64 `json:"-"`
+	AssetVisibility  string `json:"-"`
+	AssetStatus      string `json:"-"`
 }
 
 // ToUserInfo converts SysUser to UserInfo, turning nil Email into "".

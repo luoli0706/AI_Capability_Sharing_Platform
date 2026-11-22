@@ -60,3 +60,36 @@ func getAccessibleDomainIDs(
 	}
 	return domainRepo.GetAccessibleDomainIDs(userID, userOrgIDs, adminOrgIDs)
 }
+
+// canAccessKBAsset checks whether viewerID can read a KB asset given pre-fetched
+// domain and asset permission sets, avoiding N+1 queries.
+func canAccessKBAsset(
+	viewerID uint64,
+	isSuperAdmin bool,
+	domainID uint64,
+	domainVisibility string,
+	assetID uint64,
+	assetOwnerID uint64,
+	assetVisibility string,
+	assetStatus string,
+	accessibleDomainSet map[uint64]bool,
+	adminDomainSet map[uint64]bool,
+	permittedAssetSet map[uint64]bool,
+) bool {
+	if isSuperAdmin || assetOwnerID == viewerID || adminDomainSet[domainID] {
+		return true
+	}
+	if assetStatus != model.AssetStatusPublished {
+		return false
+	}
+	switch assetVisibility {
+	case model.VisibilityPublic:
+		return domainVisibility == model.DomainVisibilityPublic || accessibleDomainSet[domainID] || permittedAssetSet[assetID]
+	case model.VisibilityDomain:
+		return accessibleDomainSet[domainID] || permittedAssetSet[assetID]
+	case model.VisibilityPrivate:
+		return permittedAssetSet[assetID]
+	default:
+		return false
+	}
+}

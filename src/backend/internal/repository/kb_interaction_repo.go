@@ -6,6 +6,7 @@ import (
 	"ascp-backend/internal/model"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type KBInteractionRepository interface {
@@ -47,26 +48,32 @@ func (r *kbInteractionRepository) GetLikeStats(docID, userID uint64) (int64, boo
 }
 
 func (r *kbInteractionRepository) ToggleLike(kbAssetID, docID, userID uint64) (bool, error) {
-	var existing model.KBDocumentLike
-	err := r.db.Where("doc_id = ? AND user_id = ?", docID, userID).First(&existing).Error
-	if err == nil {
-		if delErr := r.db.Delete(&existing).Error; delErr != nil {
-			return false, delErr
+	var liked bool
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		var existing model.KBDocumentLike
+		err := tx.Where("doc_id = ? AND user_id = ?", docID, userID).First(&existing).Error
+		if err == nil {
+			if delErr := tx.Delete(&existing).Error; delErr != nil {
+				return delErr
+			}
+			liked = false
+			return nil
 		}
-		return false, nil
-	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return false, err
-	}
-	rec := model.KBDocumentLike{
-		KBAssetID: kbAssetID,
-		DocID:     docID,
-		UserID:    userID,
-	}
-	if err := r.db.Create(&rec).Error; err != nil {
-		return false, err
-	}
-	return true, nil
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		rec := model.KBDocumentLike{
+			KBAssetID: kbAssetID,
+			DocID:     docID,
+			UserID:    userID,
+		}
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&rec).Error; err != nil {
+			return err
+		}
+		liked = true
+		return nil
+	})
+	return liked, err
 }
 
 func (r *kbInteractionRepository) IsFavorited(docID, userID uint64) (bool, error) {
@@ -80,32 +87,38 @@ func (r *kbInteractionRepository) IsFavorited(docID, userID uint64) (bool, error
 }
 
 func (r *kbInteractionRepository) ToggleFavorite(kbAssetID, docID, userID uint64) (bool, error) {
-	var existing model.KBDocumentFavorite
-	err := r.db.Where("doc_id = ? AND user_id = ?", docID, userID).First(&existing).Error
-	if err == nil {
-		if delErr := r.db.Delete(&existing).Error; delErr != nil {
-			return false, delErr
+	var favorited bool
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		var existing model.KBDocumentFavorite
+		err := tx.Where("doc_id = ? AND user_id = ?", docID, userID).First(&existing).Error
+		if err == nil {
+			if delErr := tx.Delete(&existing).Error; delErr != nil {
+				return delErr
+			}
+			favorited = false
+			return nil
 		}
-		return false, nil
-	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return false, err
-	}
-	rec := model.KBDocumentFavorite{
-		KBAssetID: kbAssetID,
-		DocID:     docID,
-		UserID:    userID,
-	}
-	if err := r.db.Create(&rec).Error; err != nil {
-		return false, err
-	}
-	return true, nil
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		rec := model.KBDocumentFavorite{
+			KBAssetID: kbAssetID,
+			DocID:     docID,
+			UserID:    userID,
+		}
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&rec).Error; err != nil {
+			return err
+		}
+		favorited = true
+		return nil
+	})
+	return favorited, err
 }
 
 func (r *kbInteractionRepository) ListUserFavorites(userID uint64) ([]model.UserFavoriteItem, error) {
 	var items []model.UserFavoriteItem
 	err := r.db.Table("kb_document_favorite AS f").
-		Select("f.id, f.kb_asset_id, f.doc_id, a.domain_id, dom.domain_name, a.name AS kb_name, d.file_name, d.folder_path, d.file_ext, f.created_at").
+		Select("f.id, f.kb_asset_id, f.doc_id, a.domain_id, dom.domain_name, a.name AS kb_name, d.file_name, d.folder_path, d.file_ext, f.created_at, dom.visibility AS domain_visibility, a.owner_id AS asset_owner_id, a.visibility AS asset_visibility, a.status AS asset_status").
 		Joins("INNER JOIN kb_document d ON d.id = f.doc_id AND d.deleted_at IS NULL").
 		Joins("INNER JOIN ai_asset a ON a.id = f.kb_asset_id AND a.deleted_at IS NULL").
 		Joins("INNER JOIN biz_domain dom ON dom.id = a.domain_id AND dom.deleted_at IS NULL").

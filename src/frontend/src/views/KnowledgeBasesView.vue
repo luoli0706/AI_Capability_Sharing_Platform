@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowLeft,
@@ -156,8 +156,10 @@ const currentImageIndex = computed(() => {
 })
 
 // Background image preloading & controlled lightbox state
-const preloadingImageIds = new Set<number>()
+const imageLoadPromises = new Map<number, Promise<string | null>>()
 const decodedImageElements = new Map<number, HTMLImageElement>()
+let previewRequestSeq = 0
+let previewSessionSeq = 0
 const lightboxOpen = ref(false)
 const lightboxScale = ref(1)
 const lightboxTranslateX = ref(0)
@@ -179,18 +181,31 @@ function decodeImageIntoMemory(docId: number, url: string) {
   decodedImageElements.set(docId, img)
 }
 
+function setImageUrl(docId: number, url: string) {
+  const previousUrl = imageUrlMap.value[docId]
+  if (previousUrl && previousUrl !== url) {
+    URL.revokeObjectURL(previousUrl)
+  }
+  imageUrlMap.value = { ...imageUrlMap.value, [docId]: url }
+}
+
 function revokeAllImageUrls() {
   for (const url of Object.values(imageUrlMap.value)) {
     if (url) URL.revokeObjectURL(url)
   }
   imageUrlMap.value = {}
-  preloadingImageIds.clear()
+  imageLoadPromises.clear()
   decodedImageElements.clear()
 }
 
 function resetPreviewState() {
+  previewSessionSeq += 1
+  previewRequestSeq += 1
   lightboxOpen.value = false
+  loadingPreview.value = false
+  loadingImageBlob.value = false
   revokeAllImageUrls()
+  imageLoadPromises.clear()
   sameFolderImages.value = []
   previewDoc.value = null
   imageDoc.value = null
@@ -515,19 +530,25 @@ async function loadPreviewDoc(
   docId: number,
   targetMode?: 'rendered' | 'edit' | 'split' | 'raw'
 ) {
-  if (!selectedKbId.value) return
+  const kbId = selectedKbId.value
+  if (!kbId) return
+  const requestSeq = ++previewRequestSeq
   rightTab.value = 'preview'
   if (targetMode) previewMode.value = targetMode
   loadingPreview.value = true
   try {
-    const doc = await getDocumentContent(selectedKbId.value, docId)
+    const doc = await getDocumentContent(kbId, docId)
+    if (requestSeq !== previewRequestSeq || selectedKbId.value !== kbId) return
     previewDoc.value = doc
     editFileName.value = doc.file_name
     editContent.value = doc.content
   } catch {
+    if (requestSeq !== previewRequestSeq || selectedKbId.value !== kbId) return
     previewDoc.value = null
   } finally {
-    loadingPreview.value = false
+    if (requestSeq === previewRequestSeq) {
+      loadingPreview.value = false
+    }
   }
 }
 
@@ -556,42 +577,67 @@ async function handleSaveEdit() {
   }
 }
 
-async function ensureImageUrl(doc: KbDocument) {
-  if (!selectedKbId.value) return
+async function fetchAndCacheImageUrl(doc: KbDocument): Promise<string | null> {
+  const requestKbId = selectedKbId.value
+  if (!requestKbId) return null
+
   const existing = imageUrlMap.value[doc.id]
   if (existing) {
     decodeImageIntoMemory(doc.id, existing)
-    return
+    return existing
+  }
+
+  const inFlight = imageLoadPromises.get(doc.id)
+  if (inFlight) {
+    return inFlight
+  }
+
+  const requestSessionSeq = previewSessionSeq
+  const promise = (async (): Promise<string | null> => {
+    const blob = await getDocumentRawBlob(requestKbId, doc.id, doc.file_name)
+    const url = URL.createObjectURL(blob)
+    if (selectedKbId.value !== requestKbId || previewSessionSeq !== requestSessionSeq) {
+      URL.revokeObjectURL(url)
+      return null
+    }
+    setImageUrl(doc.id, url)
+    decodeImageIntoMemory(doc.id, url)
+    return url
+  })()
+
+  imageLoadPromises.set(doc.id, promise)
+  try {
+    return await promise
+  } finally {
+    if (imageLoadPromises.get(doc.id) === promise) {
+      imageLoadPromises.delete(doc.id)
+    }
+  }
+}
+
+async function ensureImageUrl(doc: KbDocument): Promise<string | null> {
+  if (!selectedKbId.value) return null
+  const existing = imageUrlMap.value[doc.id]
+  if (existing) {
+    decodeImageIntoMemory(doc.id, existing)
+    return existing
   }
   loadingImageBlob.value = true
   try {
-    const blob = await getDocumentRawBlob(selectedKbId.value, doc.id, doc.file_name)
-    const url = URL.createObjectURL(blob)
-    imageUrlMap.value = { ...imageUrlMap.value, [doc.id]: url }
-    decodeImageIntoMemory(doc.id, url)
+    return await fetchAndCacheImageUrl(doc)
   } finally {
-    loadingImageBlob.value = false
+    if (!imageDoc.value || imageDoc.value.id === doc.id) {
+      loadingImageBlob.value = false
+    }
   }
 }
 
 async function preloadImageDoc(doc: KbDocument | undefined) {
   if (!doc || !selectedKbId.value) return
-  const existing = imageUrlMap.value[doc.id]
-  if (existing) {
-    decodeImageIntoMemory(doc.id, existing)
-    return
-  }
-  if (preloadingImageIds.has(doc.id)) return
-  preloadingImageIds.add(doc.id)
   try {
-    const blob = await getDocumentRawBlob(selectedKbId.value, doc.id, doc.file_name)
-    const url = URL.createObjectURL(blob)
-    imageUrlMap.value = { ...imageUrlMap.value, [doc.id]: url }
-    decodeImageIntoMemory(doc.id, url)
+    await fetchAndCacheImageUrl(doc)
   } catch {
     // 后台预加载静默失败，切换时会按需重试
-  } finally {
-    preloadingImageIds.delete(doc.id)
   }
 }
 
@@ -604,9 +650,19 @@ function preloadAdjacentImages(centerIndex: number) {
 
 async function selectImageAtIndex(idx: number) {
   const target = sameFolderImages.value[idx]
-  if (!target) return
+  const kbId = selectedKbId.value
+  if (!target || !kbId) return
+  const sessionSeq = previewSessionSeq
   imageDoc.value = target
-  await ensureImageUrl(target)
+  const url = await ensureImageUrl(target)
+  if (
+    !url ||
+    sessionSeq !== previewSessionSeq ||
+    selectedKbId.value !== kbId ||
+    imageDoc.value?.id !== target.id
+  ) {
+    return
+  }
   preloadAdjacentImages(idx)
 }
 
@@ -710,6 +766,8 @@ function goToUserProfile(targetUserId?: number | null) {
 }
 
 function resetSocialState() {
+  loadingInteractions.value = false
+  loadingComments.value = false
   interactions.value = {
     like_count: 0,
     liked_by_me: false,
@@ -722,23 +780,37 @@ function resetSocialState() {
   commentContent.value = ''
 }
 
-async function loadDocSocialData(kbId: number, docId: number) {
+async function loadDocSocialData(kbId: number, docId: number, requestSeq = previewRequestSeq) {
+  const isStale = () =>
+    requestSeq !== previewRequestSeq ||
+    selectedKbId.value !== kbId ||
+    currentSelectedDoc.value?.id !== docId
+
   loadingInteractions.value = true
   loadingComments.value = true
   try {
-    interactions.value = await getDocumentInteractions(kbId, docId)
+    const res = await getDocumentInteractions(kbId, docId)
+    if (isStale()) return
+    interactions.value = res
   } catch {
     // Keep defaults
   } finally {
-    loadingInteractions.value = false
+    if (!isStale()) {
+      loadingInteractions.value = false
+    }
   }
+  if (isStale()) return
   try {
     const res = await listDocumentComments(kbId, docId)
+    if (isStale()) return
     comments.value = Array.isArray(res) ? res : (res.list ?? [])
   } catch {
+    if (isStale()) return
     comments.value = []
   } finally {
-    loadingComments.value = false
+    if (!isStale()) {
+      loadingComments.value = false
+    }
   }
 }
 
@@ -820,7 +892,8 @@ async function handleDeleteComment(comment: KbCommentItem) {
 }
 
 async function openFileDoc(doc: KbDocument) {
-  if (!selectedKbId.value) return
+  const kbId = selectedKbId.value
+  if (!kbId) return
   selectedFileNode.value = {
     key: `file-${doc.id}`,
     label: doc.file_name,
@@ -834,30 +907,42 @@ async function openFileDoc(doc: KbDocument) {
   rightTab.value = 'preview'
   resetPreviewState()
   resetSocialState()
-  void loadDocSocialData(selectedKbId.value, doc.id)
+  const requestSeq = ++previewRequestSeq
+  const isStale = () =>
+    requestSeq !== previewRequestSeq ||
+    selectedKbId.value !== kbId ||
+    currentSelectedDoc.value?.id !== doc.id
+
+  void loadDocSocialData(kbId, doc.id, requestSeq)
 
   if (isImageFile(doc.file_name)) {
     const cleanFolder = (doc.folder_path || '').replace(/^\/+|\/+$/g, '')
     let folderDocs = folderFilesCache.value[cleanFolder]
     if (!folderDocs) {
       try {
-        const res = await getDocuments(selectedKbId.value, { lazy: true, folder_path: cleanFolder })
+        const res = await getDocuments(kbId, { lazy: true, folder_path: cleanFolder })
+        if (isStale()) return
         folderDocs = extractImmediateFiles(normalizeList(res).items, cleanFolder)
         folderFilesCache.value = { ...folderFilesCache.value, [cleanFolder]: folderDocs }
       } catch {
+        if (isStale()) return
         folderDocs = [doc]
       }
     }
+    if (isStale()) return
     const imgs = folderDocs
       .filter((d) => !d.is_folder && isImageFile(d.file_name))
       .sort((a, b) => a.file_name.localeCompare(b.file_name))
     sameFolderImages.value = imgs.length > 0 ? imgs : [doc]
     imageDoc.value = doc
     try {
-      await ensureImageUrl(doc)
+      const url = await ensureImageUrl(doc)
+      if (!url || isStale()) return
       preloadAdjacentImages(currentImageIndex.value)
     } catch {
-      resetPreviewState()
+      if (!isStale()) {
+        resetPreviewState()
+      }
     }
     return
   }
@@ -865,7 +950,8 @@ async function openFileDoc(doc: KbDocument) {
   loadingPreview.value = true
   try {
     if (isTextFile(doc.file_name)) {
-      const contentRes = await getDocumentContent(selectedKbId.value, doc.id)
+      const contentRes = await getDocumentContent(kbId, doc.id)
+      if (isStale()) return
       if (contentRes.is_binary) {
         binaryDoc.value = doc
       } else {
@@ -878,9 +964,13 @@ async function openFileDoc(doc: KbDocument) {
       binaryDoc.value = doc
     }
   } catch {
-    resetPreviewState()
+    if (!isStale()) {
+      resetPreviewState()
+    }
   } finally {
-    loadingPreview.value = false
+    if (requestSeq === previewRequestSeq) {
+      loadingPreview.value = false
+    }
   }
 }
 
@@ -1120,6 +1210,10 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleKeydown)
   window.removeEventListener('mousemove', handleLightboxMouseMove)
   window.removeEventListener('mouseup', handleLightboxMouseUp)
+})
+
+onUnmounted(() => {
+  imageLoadPromises.clear()
 })
 </script>
 

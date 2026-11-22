@@ -101,6 +101,9 @@ func (s *messageService) CreateOrGetConversation(userID, targetUserID uint64) (*
 		}
 		return nil, err
 	}
+	if target.Status != model.UserStatusActive {
+		return nil, NewBadRequest("目标用户不可用")
+	}
 
 	u1, u2 := userID, targetUserID
 	if u1 > u2 {
@@ -153,6 +156,17 @@ func (s *messageService) SendMessage(userID, convID uint64, content string) (*mo
 	receiverID := conv.User2ID
 	if conv.User2ID == userID {
 		receiverID = conv.User1ID
+	}
+
+	receiver, err := s.userRepo.FindByID(receiverID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, NewNotFound("user not found")
+		}
+		return nil, err
+	}
+	if receiver.Status != model.UserStatusActive {
+		return nil, NewBadRequest("目标用户不可用")
 	}
 
 	msg := &model.UserMessage{

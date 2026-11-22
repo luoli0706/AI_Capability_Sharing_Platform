@@ -59,7 +59,7 @@ func main() {
 
 	// Services
 	authSvc := service.NewAuthService(userRepo, cfg.JWT)
-	userSvc := service.NewUserService(userRepo, kbInteractionRepo)
+	userSvc := service.NewUserService(userRepo, kbInteractionRepo, domainRepo, orgRepo, govRepo)
 	msgSvc := service.NewMessageService(msgRepo, userRepo)
 	orgSvc := service.NewOrgService(orgRepo, userRepo)
 	domainSvc := service.NewDomainService(domainRepo, userRepo, orgRepo)

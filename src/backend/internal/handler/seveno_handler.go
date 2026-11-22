@@ -1,7 +1,9 @@
 package handler
 
 import (
+	"errors"
 	"fmt"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
@@ -40,11 +42,44 @@ func (h *SevenOHandler) DownloadRelease(c echo.Context) error {
 	return c.Attachment(fullPath, filepath.Base(fullPath))
 }
 
+func (h *SevenOHandler) limitRequestBody(c echo.Context) {
+	if maxBytes := h.svc.MaxRequestBytes(); maxBytes > 0 {
+		c.Request().Body = http.MaxBytesReader(c.Response(), c.Request().Body, maxBytes+(1<<20))
+	}
+}
+
+func (h *SevenOHandler) payloadTooLargeResponse(c echo.Context) error {
+	mb := h.svc.MaxRequestBytes() / (1024 * 1024)
+	if mb <= 0 {
+		mb = 50
+	}
+	return response.Error(c, http.StatusRequestEntityTooLarge, 41301, fmt.Sprintf("在线处理文件大小超过 %dMB 限制，请下载桌面客户端处理", mb))
+}
+
+func isMaxBytesError(err error) bool {
+	var maxErr *http.MaxBytesError
+	return errors.As(err, &maxErr)
+}
+
+func setAttachmentDisposition(c echo.Context, outName string) {
+	disp := mime.FormatMediaType("attachment", map[string]string{"filename": outName})
+	if disp == "" {
+		disp = fmt.Sprintf("attachment; filename=%q", outName)
+	}
+	c.Response().Header().Set(echo.HeaderContentDisposition, disp)
+}
+
 func (h *SevenOHandler) Encrypt(c echo.Context) error {
+	h.limitRequestBody(c)
+
 	var files []*multipart.FileHeader
 	var relPaths []string
 
-	if form, err := c.MultipartForm(); err == nil && form != nil {
+	form, err := c.MultipartForm()
+	if err != nil && isMaxBytesError(err) {
+		return h.payloadTooLargeResponse(c)
+	}
+	if err == nil && form != nil {
 		if multi := form.File["files"]; len(multi) > 0 {
 			files = append(files, multi...)
 		}
@@ -58,7 +93,11 @@ func (h *SevenOHandler) Encrypt(c echo.Context) error {
 		}
 	}
 	if len(files) == 0 {
-		if fh, err := c.FormFile("file"); err == nil && fh != nil {
+		fh, err := c.FormFile("file")
+		if err != nil && isMaxBytesError(err) {
+			return h.payloadTooLargeResponse(c)
+		}
+		if err == nil && fh != nil {
 			files = append(files, fh)
 		}
 	}
@@ -86,17 +125,25 @@ func (h *SevenOHandler) Encrypt(c echo.Context) error {
 		return service.HandleError(c, err)
 	}
 
-	c.Response().Header().Set(echo.HeaderContentDisposition, fmt.Sprintf(`attachment; filename="%s"`, outName))
+	setAttachmentDisposition(c, outName)
 	return c.Blob(http.StatusOK, "application/zip", zipBytes)
 }
 
 func (h *SevenOHandler) Decrypt(c echo.Context) error {
+	h.limitRequestBody(c)
+
 	fh, err := c.FormFile("file")
-	if err != nil || fh == nil {
+	if err != nil {
+		if isMaxBytesError(err) {
+			return h.payloadTooLargeResponse(c)
+		}
+		return response.BadRequest(c, "file is required")
+	}
+	if fh == nil {
 		return response.BadRequest(c, "file is required")
 	}
 	if maxBytes := h.svc.MaxRequestBytes(); maxBytes > 0 && fh.Size > maxBytes {
-		return response.Error(c, http.StatusRequestEntityTooLarge, 41301, fmt.Sprintf("在线处理文件大小超过 %dMB 限制，请下载桌面客户端处理", maxBytes/(1024*1024)))
+		return h.payloadTooLargeResponse(c)
 	}
 	src, err := fh.Open()
 	if err != nil {
@@ -114,17 +161,25 @@ func (h *SevenOHandler) Decrypt(c echo.Context) error {
 	if base := strings.TrimSuffix(filepath.Base(fh.Filename), filepath.Ext(fh.Filename)); base != "" && base != "." {
 		outName = base + "-decrypted.zip"
 	}
-	c.Response().Header().Set(echo.HeaderContentDisposition, fmt.Sprintf(`attachment; filename="%s"`, outName))
+	setAttachmentDisposition(c, outName)
 	return c.Blob(http.StatusOK, "application/zip", outZipBytes)
 }
 
 func (h *SevenOHandler) Inspect(c echo.Context) error {
+	h.limitRequestBody(c)
+
 	fh, err := c.FormFile("file")
-	if err != nil || fh == nil {
+	if err != nil {
+		if isMaxBytesError(err) {
+			return h.payloadTooLargeResponse(c)
+		}
+		return response.BadRequest(c, "file is required")
+	}
+	if fh == nil {
 		return response.BadRequest(c, "file is required")
 	}
 	if maxBytes := h.svc.MaxRequestBytes(); maxBytes > 0 && fh.Size > maxBytes {
-		return response.Error(c, http.StatusRequestEntityTooLarge, 41301, fmt.Sprintf("在线处理文件大小超过 %dMB 限制，请下载桌面客户端处理", maxBytes/(1024*1024)))
+		return h.payloadTooLargeResponse(c)
 	}
 	src, err := fh.Open()
 	if err != nil {

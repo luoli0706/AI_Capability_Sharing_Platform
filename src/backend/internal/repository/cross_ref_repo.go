@@ -206,24 +206,30 @@ func (r *crossRefRepository) DeleteByID(id uint64) error {
 }
 
 func (r *crossRefRepository) DeleteByAssetID(assetID uint64) error {
-	return r.deleteWhere(r.db.Where("source_asset_id = ?", assetID))
+	return r.deleteWhere(func(tx *gorm.DB) *gorm.DB {
+		return tx.Where("source_asset_id = ?", assetID)
+	})
 }
 
 func (r *crossRefRepository) DeleteByKBDocIDs(docIDs []uint64) error {
 	if len(docIDs) == 0 {
 		return nil
 	}
-	return r.deleteWhere(r.db.Where("ref_type = ? AND source_doc_id IN ?", model.CrossRefTypeKBFile, docIDs))
+	return r.deleteWhere(func(tx *gorm.DB) *gorm.DB {
+		return tx.Where("ref_type = ? AND source_doc_id IN ?", model.CrossRefTypeKBFile, docIDs)
+	})
 }
 
 func (r *crossRefRepository) DeleteByDomainID(domainID uint64) error {
-	return r.deleteWhere(r.db.Where("source_domain_id = ? OR target_domain_id = ?", domainID, domainID))
+	return r.deleteWhere(func(tx *gorm.DB) *gorm.DB {
+		return tx.Where("source_domain_id = ? OR target_domain_id = ?", domainID, domainID)
+	})
 }
 
-func (r *crossRefRepository) deleteWhere(scope *gorm.DB) error {
+func (r *crossRefRepository) deleteWhere(applyScope func(*gorm.DB) *gorm.DB) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
 		var refs []model.DomainCrossRef
-		if err := scope.Session(&gorm.Session{NewDB: false}).Find(&refs).Error; err != nil {
+		if err := applyScope(tx).Find(&refs).Error; err != nil {
 			return err
 		}
 		if len(refs) == 0 {

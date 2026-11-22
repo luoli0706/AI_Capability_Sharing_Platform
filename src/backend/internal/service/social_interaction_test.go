@@ -19,6 +19,7 @@ import (
 
 type mockSocialUserRepo struct {
 	users map[uint64]*model.SysUser
+	roles map[uint64][]string
 }
 
 func (m *mockSocialUserRepo) CreateWithRole(user *model.SysUser, roleCode string) error { return nil }
@@ -42,6 +43,11 @@ func (m *mockSocialUserRepo) FindByEmail(email string) (*model.SysUser, error) {
 	return nil, gorm.ErrRecordNotFound
 }
 func (m *mockSocialUserRepo) GetUserRoles(userID uint64) ([]string, error) {
+	if m.roles != nil {
+		if r, ok := m.roles[userID]; ok {
+			return r, nil
+		}
+	}
 	return []string{model.RoleDeveloper}, nil
 }
 func (m *mockSocialUserRepo) UpdateProfile(userID uint64, nickname string, email *string, avatar, bio string, favoritesPublic bool) error {
@@ -311,16 +317,20 @@ func (m *mockKBInteractionRepo) ListUserFavorites(userID uint64) ([]model.UserFa
 		}
 		dom := m.domains[asset.DomainID]
 		out = append(out, model.UserFavoriteItem{
-			ID:         f.ID,
-			KBAssetID:  f.KBAssetID,
-			DocID:      f.DocID,
-			DomainID:   asset.DomainID,
-			DomainName: dom.DomainName,
-			KBName:     asset.Name,
-			FileName:   doc.FileName,
-			FolderPath: doc.FolderPath,
-			FileExt:    doc.FileExt,
-			CreatedAt:  f.CreatedAt,
+			ID:               f.ID,
+			KBAssetID:        f.KBAssetID,
+			DocID:            f.DocID,
+			DomainID:         asset.DomainID,
+			DomainName:       dom.DomainName,
+			KBName:           asset.Name,
+			FileName:         doc.FileName,
+			FolderPath:       doc.FolderPath,
+			FileExt:          doc.FileExt,
+			CreatedAt:        f.CreatedAt,
+			DomainVisibility: dom.Visibility,
+			AssetOwnerID:     asset.OwnerID,
+			AssetVisibility:  asset.Visibility,
+			AssetStatus:      asset.Status,
 		})
 	}
 	if out == nil {
@@ -435,15 +445,33 @@ func TestUserProfileAndFavoritesPrivacy(t *testing.T) {
 		},
 	}
 	interRepo := newMockKBInteractionRepo()
-	interRepo.domains[10] = model.BizDomain{ID: 10, DomainName: "Core AI"}
-	interRepo.assets[20] = model.AIAsset{ID: 20, Name: "Prompt KB", DomainID: 10, AssetType: model.AssetTypeKB}
+	interRepo.domains[10] = model.BizDomain{ID: 10, DomainName: "Core AI", Visibility: model.DomainVisibilityPublic}
+	interRepo.assets[20] = model.AIAsset{
+		ID:         20,
+		Name:       "Prompt KB",
+		DomainID:   10,
+		OwnerID:    1,
+		AssetType:  model.AssetTypeKB,
+		Visibility: model.VisibilityPublic,
+		Status:     model.AssetStatusPublished,
+	}
 	interRepo.docs[30] = model.KBDocument{ID: 30, KBAssetID: 20, FileName: "guide.md", FileExt: ".md"}
 	if _, err := interRepo.ToggleFavorite(20, 30, 1); err != nil {
 		t.Fatalf("ToggleFavorite failed: %v", err)
 	}
 
+	domainRepo := &mockP1DomainRepo{
+		domains: map[uint64]*model.BizDomain{
+			10: {ID: 10, DomainName: "Core AI", Visibility: model.DomainVisibilityPublic},
+		},
+		members: map[uint64]map[uint64]string{
+			10: {1: model.DomainRoleOwner},
+		},
+	}
+	govRepo := &mockP1GovRepo{}
+
 	authSvc := NewAuthService(userRepo, config.JWTConfig{Secret: "test", ExpireHours: 1})
-	userSvc := NewUserService(userRepo, interRepo)
+	userSvc := NewUserService(userRepo, interRepo, domainRepo, nil, govRepo)
 
 	// Search excludes self and disabled users
 	results, err := userSvc.SearchUsers(1, "")
@@ -484,6 +512,139 @@ func TestUserProfileAndFavoritesPrivacy(t *testing.T) {
 	if items[0].FileName != "guide.md" || items[0].DomainName != "Core AI" || items[0].KBName != "Prompt KB" {
 		t.Fatalf("unexpected favorite item fields: %+v", items[0])
 	}
+}
+
+type mockFavDomainRepo struct {
+	*mockP1DomainRepo
+}
+
+func (m *mockFavDomainRepo) GetAccessibleDomainIDs(userID uint64, userOrgIDs, adminOrgIDs []uint64) ([]uint64, error) {
+	var ids []uint64
+	for domID, members := range m.members {
+		if role := members[userID]; role != "" {
+			ids = append(ids, domID)
+		}
+	}
+	return ids, nil
+}
+
+func TestUserFavoritesDomainAndAssetVisibility(t *testing.T) {
+	userRepo := &mockSocialUserRepo{
+		users: map[uint64]*model.SysUser{
+			1:  {ID: 1, Username: "alice", Nickname: "Alice", Status: model.UserStatusActive, FavoritesPublic: true},
+			2:  {ID: 2, Username: "bob", Nickname: "Bob", Status: model.UserStatusActive},
+			3:  {ID: 3, Username: "charlie", Nickname: "Charlie", Status: model.UserStatusActive},
+			99: {ID: 99, Username: "admin", Nickname: "Admin", Status: model.UserStatusActive},
+		},
+		roles: map[uint64][]string{
+			99: {model.RoleSuperAdmin},
+		},
+	}
+
+	domainRepo := &mockFavDomainRepo{
+		mockP1DomainRepo: &mockP1DomainRepo{
+			domains: map[uint64]*model.BizDomain{
+				10: {ID: 10, DomainName: "Secret Lab", Visibility: model.DomainVisibilityPrivate},
+				11: {ID: 11, DomainName: "Open Commons", Visibility: model.DomainVisibilityPublic},
+			},
+			members: map[uint64]map[uint64]string{
+				10: {
+					1: model.DomainRoleOwner,
+					3: model.DomainRoleMember,
+				},
+				11: {
+					1: model.DomainRoleOwner,
+				},
+			},
+		},
+	}
+
+	interRepo := newMockKBInteractionRepo()
+	interRepo.domains[10] = *domainRepo.domains[10]
+	interRepo.domains[11] = *domainRepo.domains[11]
+	interRepo.assets[20] = model.AIAsset{
+		ID: 20, Name: "Private Domain KB", DomainID: 10, OwnerID: 1,
+		AssetType: model.AssetTypeKB, Visibility: model.VisibilityDomain, Status: model.AssetStatusPublished,
+	}
+	interRepo.assets[21] = model.AIAsset{
+		ID: 21, Name: "Owner Only KB", DomainID: 10, OwnerID: 1,
+		AssetType: model.AssetTypeKB, Visibility: model.VisibilityPrivate, Status: model.AssetStatusPublished,
+	}
+	interRepo.assets[22] = model.AIAsset{
+		ID: 22, Name: "Public KB", DomainID: 11, OwnerID: 1,
+		AssetType: model.AssetTypeKB, Visibility: model.VisibilityPublic, Status: model.AssetStatusPublished,
+	}
+	interRepo.docs[30] = model.KBDocument{ID: 30, KBAssetID: 20, FileName: "secret-domain.md", FileExt: ".md"}
+	interRepo.docs[31] = model.KBDocument{ID: 31, KBAssetID: 21, FileName: "owner-private.md", FileExt: ".md"}
+	interRepo.docs[32] = model.KBDocument{ID: 32, KBAssetID: 22, FileName: "public-guide.md", FileExt: ".md"}
+
+	for _, pair := range [][2]uint64{{20, 30}, {21, 31}, {22, 32}} {
+		if _, err := interRepo.ToggleFavorite(pair[0], pair[1], 1); err != nil {
+			t.Fatalf("ToggleFavorite(%d, %d) failed: %v", pair[0], pair[1], err)
+		}
+	}
+
+	userSvc := NewUserService(userRepo, interRepo, domainRepo, nil, &mockP1GovRepo{})
+
+	// Non-member Bob must NOT see private domain documents, only public domain published public asset
+	isPub, bobItems, err := userSvc.GetUserFavorites(2, 1)
+	if err != nil || !isPub {
+		t.Fatalf("expected isPub=true and nil err for Bob, got isPub=%v err=%v", isPub, err)
+	}
+	if len(bobItems) != 1 || bobItems[0].DocID != 32 {
+		t.Fatalf("expected Bob to see only doc 32, got %+v", bobItems)
+	}
+
+	// Private domain member Charlie sees domain-visible doc 30 and public doc 32, but NOT owner-private doc 31
+	isPub, charlieItems, err := userSvc.GetUserFavorites(3, 1)
+	if err != nil || !isPub {
+		t.Fatalf("expected isPub=true and nil err for Charlie, got isPub=%v err=%v", isPub, err)
+	}
+	if len(charlieItems) != 2 {
+		t.Fatalf("expected Charlie to see 2 items (30, 32), got %+v", charlieItems)
+	}
+	for _, it := range charlieItems {
+		if it.DocID == 31 {
+			t.Fatalf("Charlie should not see owner-private doc 31")
+		}
+	}
+
+	// Owner Alice sees all 3
+	isPub, aliceItems, err := userSvc.GetUserFavorites(1, 1)
+	if err != nil || !isPub || len(aliceItems) != 3 {
+		t.Fatalf("expected Alice to see all 3 items, got isPub=%v len=%d err=%v", isPub, len(aliceItems), err)
+	}
+
+	// Super admin sees all 3
+	isPub, adminItems, err := userSvc.GetUserFavorites(99, 1)
+	if err != nil || !isPub || len(adminItems) != 3 {
+		t.Fatalf("expected super admin to see all 3 items, got isPub=%v len=%d err=%v", isPub, len(adminItems), err)
+	}
+}
+
+func TestDirectMessagingDisabledUserRejected(t *testing.T) {
+	userRepo := &mockSocialUserRepo{
+		users: map[uint64]*model.SysUser{
+			1: {ID: 1, Username: "alice", Nickname: "Alice", Status: model.UserStatusActive},
+			2: {ID: 2, Username: "bob", Nickname: "Bob", Status: model.UserStatusDisabled},
+			3: {ID: 3, Username: "charlie", Nickname: "Charlie", Status: model.UserStatusActive},
+		},
+	}
+	msgRepo := newMockMessageRepo()
+	msgSvc := NewMessageService(msgRepo, userRepo)
+
+	// Disabled target user cannot start a conversation
+	_, err := msgSvc.CreateOrGetConversation(1, 2)
+	assertAppErrStatus(t, err, http.StatusBadRequest)
+
+	// Active target user can start conversation, but if later disabled, SendMessage is rejected
+	conv, err := msgSvc.CreateOrGetConversation(1, 3)
+	if err != nil {
+		t.Fatalf("CreateOrGetConversation failed: %v", err)
+	}
+	userRepo.users[3].Status = model.UserStatusDisabled
+	_, err = msgSvc.SendMessage(1, conv.ID, "Hi Charlie")
+	assertAppErrStatus(t, err, http.StatusBadRequest)
 }
 
 func TestDirectMessagingLifecycle(t *testing.T) {
