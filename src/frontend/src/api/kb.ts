@@ -107,8 +107,14 @@ export function getDocuments(
   params?: GetDocumentsParams,
   refDomainId?: number
 ): Promise<KbDocumentListResponse | KbDocument[]> {
+  const normalizedParams: Record<string, unknown> | undefined = params
+    ? {
+        ...params,
+        ...(params.lazy !== undefined ? { lazy: params.lazy ? 1 : 0 } : {})
+      }
+    : undefined
   return apiGet<KbDocumentListResponse | KbDocument[]>(`/kb/${kbId}/documents`, {
-    params: withRefDomainId(params as Record<string, unknown> | undefined, refDomainId)
+    params: withRefDomainId(normalizedParams, refDomainId)
   })
 }
 

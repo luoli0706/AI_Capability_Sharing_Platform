@@ -102,6 +102,11 @@ func (h *KBHandler) UploadDocument(c echo.Context) error {
 	return response.Success(c, map[string]interface{}{"list": docs})
 }
 
+func isTruthyQueryParam(c echo.Context, key string) bool {
+	val := strings.TrimSpace(strings.ToLower(c.QueryParam(key)))
+	return val == "1" || val == "true"
+}
+
 func (h *KBHandler) ListDocuments(c echo.Context) error {
 	kbID, ok := parseUintParam(c, "id")
 	if !ok {
@@ -111,7 +116,7 @@ func (h *KBHandler) ListDocuments(c echo.Context) error {
 	userID := middleware.GetUserID(c)
 	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
 	refDomainID := parseOptionalUintQuery(c, "ref_domain_id")
-	if c.QueryParam("lazy") == "1" {
+	if isTruthyQueryParam(c, "lazy") {
 		folderPath := c.QueryParam("folder_path")
 		offset, _ := strconv.Atoi(c.QueryParam("offset"))
 		limit, _ := strconv.Atoi(c.QueryParam("limit"))
@@ -174,7 +179,7 @@ func (h *KBHandler) GetDocumentContent(c echo.Context) error {
 
 	userID := middleware.GetUserID(c)
 	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
-	obf := c.QueryParam("obf") == "1"
+	obf := isTruthyQueryParam(c, "obf")
 	refDomainID := parseOptionalUintQuery(c, "ref_domain_id")
 	res, err := h.kbSvc.GetDocumentContent(userID, isSuperAdmin, kbID, docID, obf, refDomainID)
 	if err != nil {
@@ -195,7 +200,7 @@ func (h *KBHandler) GetDocumentRaw(c echo.Context) error {
 
 	userID := middleware.GetUserID(c)
 	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
-	obf := c.QueryParam("obf") == "1"
+	obf := isTruthyQueryParam(c, "obf")
 	refDomainID := parseOptionalUintQuery(c, "ref_domain_id")
 	fileName, mimeType, isSVG, data, err := h.kbSvc.GetDocumentRaw(userID, isSuperAdmin, kbID, docID, obf, refDomainID)
 	if err != nil {
