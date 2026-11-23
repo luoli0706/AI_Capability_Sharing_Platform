@@ -5,6 +5,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"ascp-backend/internal/middleware"
 	"ascp-backend/internal/model"
@@ -110,19 +111,55 @@ func (h *KBHandler) ListDocuments(c echo.Context) error {
 	userID := middleware.GetUserID(c)
 	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
 	refDomainID := parseOptionalUintQuery(c, "ref_domain_id")
-	var (
-		list []model.KBDocument
-		err  error
-	)
 	if c.QueryParam("lazy") == "1" {
-		list, err = h.kbSvc.ListDocumentsLazy(userID, isSuperAdmin, kbID, c.QueryParam("folder_path"), refDomainID)
-	} else {
-		list, err = h.kbSvc.ListDocuments(userID, isSuperAdmin, kbID, refDomainID)
+		folderPath := c.QueryParam("folder_path")
+		offset, _ := strconv.Atoi(c.QueryParam("offset"))
+		limit, _ := strconv.Atoi(c.QueryParam("limit"))
+		extGroup := c.QueryParam("ext_group")
+		fields := c.QueryParam("fields")
+
+		etag, err := h.kbSvc.GetFolderETag(userID, isSuperAdmin, kbID, folderPath, offset, limit, extGroup, fields, refDomainID)
+		if err != nil {
+			return service.HandleError(c, err)
+		}
+		if inm := strings.TrimSpace(c.Request().Header.Get("If-None-Match")); inm != "" && inm == etag {
+			c.Response().Header().Set("ETag", etag)
+			return c.NoContent(http.StatusNotModified)
+		}
+
+		res, err := h.kbSvc.ListDocumentsLazyPaged(userID, isSuperAdmin, kbID, folderPath, offset, limit, extGroup, fields, refDomainID)
+		if err != nil {
+			return service.HandleError(c, err)
+		}
+		c.Response().Header().Set("ETag", etag)
+		return response.Success(c, res)
 	}
+
+	list, err := h.kbSvc.ListDocuments(userID, isSuperAdmin, kbID, refDomainID)
 	if err != nil {
 		return service.HandleError(c, err)
 	}
 	return response.Success(c, map[string]interface{}{"list": list})
+}
+
+func (h *KBHandler) GetDocumentMeta(c echo.Context) error {
+	kbID, ok := parseUintParam(c, "id")
+	if !ok {
+		return nil
+	}
+	docID, ok := parseUintParam(c, "docId")
+	if !ok {
+		return nil
+	}
+
+	userID := middleware.GetUserID(c)
+	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
+	refDomainID := parseOptionalUintQuery(c, "ref_domain_id")
+	meta, err := h.kbSvc.GetDocumentMeta(userID, isSuperAdmin, kbID, docID, refDomainID)
+	if err != nil {
+		return service.HandleError(c, err)
+	}
+	return response.Success(c, meta)
 }
 
 func (h *KBHandler) GetDocumentContent(c echo.Context) error {

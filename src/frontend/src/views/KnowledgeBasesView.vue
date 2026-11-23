@@ -18,6 +18,7 @@ import {
   Folder,
   FolderAdd,
   FolderOpened,
+  Loading,
   Notebook,
   Picture,
   Pointer,
@@ -49,8 +50,8 @@ import {
   deleteDocumentComment,
   getDocumentContent,
   getDocumentInteractions,
+  getDocumentMeta,
   getDocumentRawBlob,
-  getDocuments,
   listDocumentComments,
   moveDocument,
   renameDocument,
@@ -61,6 +62,7 @@ import {
   uploadDocument
 } from '@/api/kb'
 import { useDomainStore } from '@/stores/domain'
+import { useKbTreeCacheStore } from '@/stores/kbTreeCache'
 import type {
   AssetItem,
   DomainCrossRefItem,
@@ -69,6 +71,7 @@ import type {
   KbContentResult,
   KbDocument,
   KbDocumentInteractions,
+  KbUserSummary,
   UserBrief
 } from '@/types/api'
 import {
@@ -79,7 +82,9 @@ import {
 } from '@/utils/format'
 import {
   buildImmediateKbTreeNodes,
+  buildPaginatedKbTreeNodes,
   confirmAndDownloadKb,
+  createLoadMoreSentinelNode,
   extractImmediateFiles,
   isImageFile,
   isMarkdownFile,
@@ -93,6 +98,7 @@ import { renderMarkdown } from '@/utils/markdown'
 const route = useRoute()
 const router = useRouter()
 const domainStore = useDomainStore()
+const kbTreeCache = useKbTreeCacheStore()
 
 const domainId = computed(() => Number(route.params.domainId))
 const currentDomain = computed(() => domainStore.getDomainById(domainId.value))
@@ -193,11 +199,15 @@ const treeProps = {
   children: 'children',
   isLeaf: 'isLeaf'
 }
+const treeScrollRef = ref<HTMLElement | null>(null)
 const folderFilesCache = ref<Record<string, KbDocument[]>>({})
 const rootEmpty = ref(false)
 const loadedDocCount = computed(() =>
   Object.values(folderFilesCache.value).reduce((sum, list) => sum + list.length, 0)
 )
+const sentinelNodeByEl = new WeakMap<Element, KbTreeNode>()
+const loadingSentinelKeys = new Set<string>()
+let sentinelObserver: IntersectionObserver | null = null
 
 const selectedFolderPath = ref('')
 const selectedFileNode = ref<KbTreeNode | null>(null)
@@ -396,9 +406,12 @@ async function pollPendingFolders() {
   const changedFolders: string[] = []
   for (const [folderPath, prevList] of pendingEntries) {
     try {
-      const res = await getDocuments(kbId, { lazy: true, folder_path: folderPath }, refDomId)
-      const items = normalizeList(res).items
-      const nextFiles = extractImmediateFiles(items, folderPath)
+      const entry = await kbTreeCache.fetchFolderPage(kbId, folderPath, {
+        refDomainId: refDomId,
+        force: true,
+        limit: Math.max(50, prevList.length)
+      })
+      const nextFiles = extractImmediateFiles(entry.items, folderPath)
       const prevStatusMap = new Map(prevList.map((d) => [d.id, d.parse_status]))
       if (nextFiles.some((d) => prevStatusMap.get(d.id) !== d.parse_status)) {
         changedFolders.push(folderPath)
@@ -549,13 +562,21 @@ async function refreshFolderInPlace(folderPath: string) {
   const refDomId = activeRefDomainId.value
   const cleanPath = folderPath.replace(/^\/+|\/+$/g, '')
 
+  kbTreeCache.invalidateFolder(kbId, cleanPath, refDomId)
+
   if (cleanPath === '') {
     try {
-      const res = await getDocuments(kbId, { lazy: true, folder_path: '' }, refDomId)
-      const items = normalizeList(res).items
-      const files = extractImmediateFiles(items, '')
+      const entry = await kbTreeCache.fetchFolderPage(kbId, '', {
+        refDomainId: refDomId,
+        force: true
+      })
+      const files = extractImmediateFiles(entry.items, '')
       folderFilesCache.value = { ...folderFilesCache.value, '': files }
-      const nodes = buildImmediateKbTreeNodes(items, '')
+      const nodes = buildPaginatedKbTreeNodes(entry.items, '', {
+        hasMore: entry.hasMore,
+        nextOffset: entry.nextOffset,
+        total: entry.total
+      })
       rootEmpty.value = nodes.length === 0
       await nextTick()
       const store = kbTreeRef.value?.store as { setData?: (data: KbTreeNode[]) => void } | undefined
@@ -590,11 +611,17 @@ async function refreshFolderInPlace(folderPath: string) {
   }
 
   try {
-    const res = await getDocuments(kbId, { lazy: true, folder_path: cleanPath }, refDomId)
-    const items = normalizeList(res).items
-    const files = extractImmediateFiles(items, cleanPath)
+    const entry = await kbTreeCache.fetchFolderPage(kbId, cleanPath, {
+      refDomainId: refDomId,
+      force: true
+    })
+    const files = extractImmediateFiles(entry.items, cleanPath)
     folderFilesCache.value = { ...folderFilesCache.value, [cleanPath]: files }
-    const nodes = buildImmediateKbTreeNodes(items, cleanPath)
+    const nodes = buildPaginatedKbTreeNodes(entry.items, cleanPath, {
+      hasMore: entry.hasMore,
+      nextOffset: entry.nextOffset,
+      total: entry.total
+    })
     kbTreeRef.value?.updateKeyChildren(nodeKey, nodes)
     folderNode.loaded = true
     folderNode.expanded = true
@@ -636,6 +663,103 @@ function refreshTree(preserveExpanded = false) {
   treeRefreshSeed.value++
 }
 
+function handleManualRefreshTree() {
+  if (selectedKbId.value) {
+    kbTreeCache.invalidateKb(selectedKbId.value)
+  }
+  refreshTree(true)
+}
+
+function ensureSentinelObserver() {
+  if (sentinelObserver || typeof IntersectionObserver === 'undefined') return
+  sentinelObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue
+        const nodeData = sentinelNodeByEl.get(entry.target)
+        if (nodeData && !nodeData.sentinelLoading) {
+          void handleLoadMoreSentinel(nodeData)
+        }
+      }
+    },
+    {
+      root: treeScrollRef.value,
+      rootMargin: '80px',
+      threshold: 0.01
+    }
+  )
+}
+
+function observeSentinelEl(el: HTMLElement | null, data: KbTreeNode) {
+  if (!el) return
+  ensureSentinelObserver()
+  sentinelNodeByEl.set(el, data)
+  sentinelObserver?.observe(el)
+}
+
+async function handleLoadMoreSentinel(sentinel: KbTreeNode) {
+  if (isCrossFilesMode.value || !selectedKbId.value) return
+  if (!sentinel.isLoadMoreSentinel || sentinel.sentinelLoading) return
+  if (loadingSentinelKeys.has(sentinel.key)) return
+
+  const kbId = selectedKbId.value
+  const refDomId = activeRefDomainId.value
+  const folderPath = sentinel.sentinelFolderPath ?? sentinel.folderPath ?? ''
+  const nextOffset = sentinel.sentinelNextOffset ?? 0
+
+  loadingSentinelKeys.add(sentinel.key)
+  sentinel.sentinelLoading = true
+  try {
+    const entry = await kbTreeCache.fetchFolderPage(kbId, folderPath, {
+      offset: nextOffset,
+      refDomainId: refDomId
+    })
+    if (selectedKbId.value !== kbId) return
+    const files = extractImmediateFiles(entry.items, folderPath)
+    folderFilesCache.value = { ...folderFilesCache.value, [folderPath]: files }
+
+    const tree = kbTreeRef.value
+    if (!tree) return
+    const sentinelNode = tree.getNode(sentinel.key)
+    if (sentinelNode) {
+      tree.remove(sentinelNode)
+    }
+
+    const parentNode = folderPath
+      ? tree.getNode(`folder:${folderPath}`)
+      : (tree.store as { root?: unknown } | undefined)?.root
+    const existingKeys = new Set<string>()
+    const childNodes = (parentNode as { childNodes?: Array<{ data?: KbTreeNode }> } | undefined)?.childNodes
+    if (Array.isArray(childNodes)) {
+      for (const cn of childNodes) {
+        if (cn.data?.key) existingKeys.add(cn.data.key)
+      }
+    }
+
+    type TreeAppendParent = Parameters<NonNullable<typeof tree>['append']>[1]
+    const appendTarget = (
+      folderPath ? `folder:${folderPath}` : (tree.store as { root?: unknown } | undefined)?.root
+    ) as TreeAppendParent | undefined
+    const allNodes = buildImmediateKbTreeNodes(entry.items, folderPath)
+    for (const n of allNodes) {
+      if (!existingKeys.has(n.key) && appendTarget) {
+        tree.append(n, appendTarget)
+      }
+    }
+
+    if (entry.hasMore && appendTarget) {
+      const remaining = Math.max(0, entry.total - entry.items.length)
+      const nextSentinel = createLoadMoreSentinelNode(folderPath, entry.nextOffset, remaining)
+      tree.append(nextSentinel, appendTarget)
+    }
+    startPollingIfNeeded()
+  } catch {
+    sentinel.sentinelLoading = false
+  } finally {
+    loadingSentinelKeys.delete(sentinel.key)
+  }
+}
+
 async function loadKbTreeNode(
   node: { level: number; data?: KbTreeNode },
   resolve: (data: KbTreeNode[]) => void
@@ -652,11 +776,16 @@ async function loadKbTreeNode(
     rootEmpty.value = false
   }
   try {
-    const res = await getDocuments(kbId, { lazy: true, folder_path: folderPath }, refDomId)
-    const items = normalizeList(res).items
-    const files = extractImmediateFiles(items, folderPath)
+    const entry = await kbTreeCache.fetchFolderPage(kbId, folderPath, {
+      refDomainId: refDomId
+    })
+    const files = extractImmediateFiles(entry.items, folderPath)
     folderFilesCache.value = { ...folderFilesCache.value, [folderPath]: files }
-    const nodes = buildImmediateKbTreeNodes(items, folderPath)
+    const nodes = buildPaginatedKbTreeNodes(entry.items, folderPath, {
+      hasMore: entry.hasMore,
+      nextOffset: entry.nextOffset,
+      total: entry.total
+    })
     if (node.level === 0) {
       rootEmpty.value = nodes.length === 0
     }
@@ -1129,12 +1258,22 @@ const commentQuote = ref('')
 const commentContent = ref('')
 const submittingComment = ref(false)
 
-function getUserDisplay(u?: UserBrief | null, fallbackId?: number): string {
+const currentSelectedUploader = computed<UserBrief | KbUserSummary | undefined>(() => {
+  const doc = currentSelectedDoc.value
+  if (!doc) return undefined
+  if (doc.uploader) return doc.uploader
+  if (doc.uploader_id && selectedKbId.value) {
+    return kbTreeCache.resolveUser(selectedKbId.value, doc.uploader_id)
+  }
+  return undefined
+})
+
+function getUserDisplay(u?: UserBrief | KbUserSummary | null, fallbackId?: number): string {
   if (u) return u.nickname || u.username || `用户 #${u.id}`
   return fallbackId ? `用户 #${fallbackId}` : '未知用户'
 }
 
-function getUserInitial(u?: UserBrief | null, fallbackId?: number): string {
+function getUserInitial(u?: UserBrief | KbUserSummary | null, fallbackId?: number): string {
   return getUserDisplay(u, fallbackId).slice(0, 1).toUpperCase()
 }
 
@@ -1400,17 +1539,15 @@ async function openFileDoc(doc: KbDocument, overrideKbId?: number) {
       sameFolderImages.value = [doc]
     } else {
       const cleanFolder = (doc.folder_path || '').replace(/^\/+|\/+$/g, '')
-      let folderDocs = folderFilesCache.value[cleanFolder]
-      if (!folderDocs) {
-        try {
-          const res = await getDocuments(kbId, { lazy: true, folder_path: cleanFolder }, refDomId)
-          if (isStale()) return
-          folderDocs = extractImmediateFiles(normalizeList(res).items, cleanFolder)
-          folderFilesCache.value = { ...folderFilesCache.value, [cleanFolder]: folderDocs }
-        } catch {
-          if (isStale()) return
-          folderDocs = [doc]
-        }
+      let folderDocs: KbDocument[]
+      try {
+        folderDocs = await kbTreeCache.fetchExtGroupIndex(kbId, cleanFolder, 'image', {
+          refDomainId: refDomId
+        })
+        if (isStale()) return
+      } catch {
+        if (isStale()) return
+        folderDocs = [doc]
       }
       if (isStale()) return
       const imgs = folderDocs
@@ -1482,12 +1619,15 @@ async function tryOpenQueryDocument() {
   const queryDocId = Number(route.query.docId)
   if (!Number.isFinite(queryDocId) || queryDocId <= 0 || !selectedKbId.value) return
   try {
-    const res = await getDocuments(selectedKbId.value, undefined, activeRefDomainId.value)
-    const docs = normalizeList(res).items
-    const match = docs.find((d) => d.id === queryDocId)
+    const match = await getDocumentMeta(selectedKbId.value, queryDocId, activeRefDomainId.value)
     if (!match) return
     if (!match.is_folder) {
+      const folderPath = (match.folder_path || '').replace(/^\/+|\/+$/g, '')
+      if (folderPath) {
+        await expandFolderPathInTree(folderPath)
+      }
       await openFileDoc(match)
+      kbTreeRef.value?.setCurrentKey(`file:${match.id}`)
     } else {
       const folderPath = (match.folder_path || match.file_name || '').replace(/^\/+|\/+$/g, '')
       selectedFolderPath.value = folderPath
@@ -1500,6 +1640,10 @@ async function tryOpenQueryDocument() {
 }
 
 async function handleNodeClick(node: KbTreeNode) {
+  if (node.isLoadMoreSentinel) {
+    void handleLoadMoreSentinel(node)
+    return
+  }
   if (node.isFolder) {
     selectedFolderPath.value = node.folderPath
     selectedFileNode.value = null
@@ -1511,6 +1655,7 @@ async function handleNodeClick(node: KbTreeNode) {
 
 function allowDrag(draggingNode: { data: KbTreeNode }): boolean {
   if (isReadOnlyKb.value) return false
+  if (draggingNode.data.isLoadMoreSentinel) return false
   return !draggingNode.data.isFolder && Boolean(draggingNode.data.doc)
 }
 
@@ -1733,16 +1878,12 @@ async function openNovelReader() {
   const cleanFolder = (previewDoc.value.folder_path || '').replace(/^\/+|\/+$/g, '')
   loadingNovelChapters.value = true
   try {
-    let folderDocs = folderFilesCache.value[cleanFolder]
-    if (!folderDocs) {
-      const res = await getDocuments(
-        selectedKbId.value,
-        { lazy: true, folder_path: cleanFolder },
-        activeRefDomainId.value
-      )
-      folderDocs = extractImmediateFiles(normalizeList(res).items, cleanFolder)
-      folderFilesCache.value = { ...folderFilesCache.value, [cleanFolder]: folderDocs }
-    }
+    const folderDocs = await kbTreeCache.fetchExtGroupIndex(
+      selectedKbId.value,
+      cleanFolder,
+      'txt',
+      { refDomainId: activeRefDomainId.value }
+    )
     const chapters = folderDocs
       .filter((d) => !d.is_folder && isTxtFile(d.file_name))
       .sort((a, b) => a.file_name.localeCompare(b.file_name, 'zh-CN', { numeric: true }))
@@ -1959,6 +2100,8 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  sentinelObserver?.disconnect()
+  sentinelObserver = null
   stopPolling()
   revokeAllImageUrls()
   window.removeEventListener('keydown', handleKeydown)
@@ -2110,7 +2253,7 @@ onUnmounted(() => {
             >
               下载整个知识库
             </el-button>
-            <el-button :icon="Refresh" @click="isCrossFilesMode ? fetchKbs() : refreshTree(true)">
+            <el-button :icon="Refresh" @click="isCrossFilesMode ? fetchKbs() : handleManualRefreshTree()">
               刷新
             </el-button>
           </div>
@@ -2234,7 +2377,7 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <div v-else v-loading="loadingDocs" class="tree-scroll">
+          <div v-else ref="treeScrollRef" v-loading="loadingDocs" class="tree-scroll">
             <el-empty
               v-if="rootEmpty"
               :description="isReadOnlyKb ? '该知识库暂无文件或文件夹' : '暂无文件或文件夹，请点击上方按钮上传文件或新建 Markdown'"
@@ -2261,7 +2404,16 @@ onUnmounted(() => {
               @node-drop="handleNodeDrop"
             >
               <template #default="{ data }">
-                <div class="tree-node-row">
+                <div
+                  v-if="data.isLoadMoreSentinel"
+                  :ref="(el) => observeSentinelEl(el as HTMLElement | null, data)"
+                  class="tree-sentinel-row"
+                  @click.stop="handleLoadMoreSentinel(data)"
+                >
+                  <el-icon v-if="data.sentinelLoading" class="is-loading"><Loading /></el-icon>
+                  <span>{{ data.sentinelLoading ? '正在加载更多...' : data.label }}</span>
+                </div>
+                <div v-else class="tree-node-row">
                   <div class="tree-node-left">
                     <el-icon :size="15" :color="data.isFolder ? '#D97706' : isImageFile(data.label) ? '#059669' : '#4F46E5'">
                       <Folder v-if="data.isFolder" />
@@ -2273,7 +2425,7 @@ onUnmounted(() => {
                       {{ formatFileSize(data.fileSize) }}
                     </span>
                     <el-tag
-                      v-if="!data.isFolder && data.doc && data.doc.parse_status !== 'completed'"
+                      v-if="!data.isFolder && data.doc && data.doc.parse_status && data.doc.parse_status !== 'completed'"
                       :type="getKbParseStatusMeta(data.doc.parse_status).tagType"
                       size="small"
                       effect="plain"
@@ -2370,13 +2522,13 @@ onUnmounted(() => {
                     <button
                       type="button"
                       class="user-chip-btn"
-                      @click="goToUserProfile(currentSelectedDoc.uploader?.id || currentSelectedDoc.uploader_id)"
+                      @click="goToUserProfile(currentSelectedUploader?.id || currentSelectedDoc.uploader_id)"
                     >
-                      <el-avatar :size="22" :src="currentSelectedDoc.uploader?.avatar || undefined">
-                        {{ getUserInitial(currentSelectedDoc.uploader, currentSelectedDoc.uploader_id) }}
+                      <el-avatar :size="22" :src="currentSelectedUploader?.avatar || undefined">
+                        {{ getUserInitial(currentSelectedUploader, currentSelectedDoc.uploader_id) }}
                       </el-avatar>
                       <span class="user-chip-name">
-                        {{ getUserDisplay(currentSelectedDoc.uploader, currentSelectedDoc.uploader_id) }}
+                        {{ getUserDisplay(currentSelectedUploader, currentSelectedDoc.uploader_id) }}
                       </span>
                     </button>
                     <span class="doc-time-sep">·</span>
@@ -4023,6 +4175,22 @@ onUnmounted(() => {
   flex-wrap: wrap;
   font-size: 13px;
   color: #64748b;
+}
+
+.tree-sentinel-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--ascp-primary, #4f46e5);
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: background-color 0.15s ease;
+}
+
+.tree-sentinel-row:hover {
+  background-color: rgba(79, 70, 229, 0.08);
 }
 
 .uploader-label {

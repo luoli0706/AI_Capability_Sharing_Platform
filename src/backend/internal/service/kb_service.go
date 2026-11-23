@@ -81,6 +81,9 @@ type KBService interface {
 	UploadDocuments(userID uint64, isSuperAdmin bool, kbID uint64, folderPath, relativePath string, files []*multipart.FileHeader) ([]model.KBDocument, error)
 	ListDocuments(userID uint64, isSuperAdmin bool, kbID, refDomainID uint64) ([]model.KBDocument, error)
 	ListDocumentsLazy(userID uint64, isSuperAdmin bool, kbID uint64, parentFolder string, refDomainID uint64) ([]model.KBDocument, error)
+	ListDocumentsLazyPaged(userID uint64, isSuperAdmin bool, kbID uint64, parentFolder string, offset, limit int, extGroup, fields string, refDomainID uint64) (*model.KBDocumentListResult, error)
+	GetFolderETag(userID uint64, isSuperAdmin bool, kbID uint64, parentFolder string, offset, limit int, extGroup, fields string, refDomainID uint64) (string, error)
+	GetDocumentMeta(userID uint64, isSuperAdmin bool, kbID, docID, refDomainID uint64) (*model.KBDocumentListItem, error)
 	GetDocumentContent(userID uint64, isSuperAdmin bool, kbID, docID uint64, obf bool, refDomainID uint64) (map[string]interface{}, error)
 	GetDocumentRaw(userID uint64, isSuperAdmin bool, kbID, docID uint64, obf bool, refDomainID uint64) (fileName, mimeType string, isSVG bool, data []byte, err error)
 	UpdateMarkdownContent(userID uint64, isSuperAdmin bool, kbID, docID uint64, req model.UpdateKBFileRequest) (*model.KBDocument, error)
@@ -611,6 +614,162 @@ func (s *kbService) ListDocumentsLazy(userID uint64, isSuperAdmin bool, kbID uin
 	}
 	s.enrichDocumentUploaders(docs)
 	return docs, nil
+}
+
+func normalizeLazyPageParams(offset, limit int, extGroup, fields string) (int, int, string, string) {
+	if offset < 0 {
+		offset = 0
+	}
+	normExtGroup := strings.ToLower(strings.TrimSpace(extGroup))
+	normFields := strings.ToLower(strings.TrimSpace(fields))
+	if normFields == "minimal" && normExtGroup != "" {
+		if limit <= 0 || limit > 1000 {
+			limit = 1000
+		}
+	} else {
+		if limit <= 0 {
+			limit = 50
+		} else if limit > 200 {
+			limit = 200
+		}
+	}
+	return offset, limit, normExtGroup, normFields
+}
+
+func toKBDocumentListItem(d model.KBDocument) model.KBDocumentListItem {
+	return model.KBDocumentListItem{
+		ID:          d.ID,
+		KBAssetID:   d.KBAssetID,
+		FolderPath:  d.FolderPath,
+		IsFolder:    d.IsFolder,
+		FileName:    d.FileName,
+		FileExt:     d.FileExt,
+		FileSize:    d.FileSize,
+		ParseStatus: d.ParseStatus,
+		UploaderID:  d.UploaderID,
+		UpdatedAt:   d.UpdatedAt,
+	}
+}
+
+func (s *kbService) buildUserSummaryMap(docs []model.KBDocument) map[uint64]model.KBUserSummary {
+	users := make(map[uint64]model.KBUserSummary)
+	if s.userRepo == nil || len(docs) == 0 {
+		return users
+	}
+	seen := make(map[uint64]struct{})
+	ids := make([]uint64, 0, len(docs))
+	for _, d := range docs {
+		if d.UploaderID == 0 {
+			continue
+		}
+		if _, ok := seen[d.UploaderID]; !ok {
+			seen[d.UploaderID] = struct{}{}
+			ids = append(ids, d.UploaderID)
+		}
+	}
+	if len(ids) == 0 {
+		return users
+	}
+	briefs, err := s.userRepo.FindBriefsByIDs(ids)
+	if err != nil {
+		return users
+	}
+	for id, brief := range briefs {
+		users[id] = model.KBUserSummary{
+			ID:       brief.ID,
+			Username: brief.Username,
+			Nickname: brief.Nickname,
+		}
+	}
+	return users
+}
+
+// ListDocumentsLazyPaged returns paginated slim document projections with deduplicated user summaries.
+func (s *kbService) ListDocumentsLazyPaged(userID uint64, isSuperAdmin bool, kbID uint64, parentFolder string, offset, limit int, extGroup, fields string, refDomainID uint64) (*model.KBDocumentListResult, error) {
+	if _, err := s.ensureKBViewPermission(userID, isSuperAdmin, kbID, refDomainID, 0); err != nil {
+		return nil, err
+	}
+	normParent, err := NormalizeFolderPath(parentFolder)
+	if err != nil {
+		return nil, err
+	}
+	normOffset, normLimit, normExtGroup, normFields := normalizeLazyPageParams(offset, limit, extGroup, fields)
+	docs, total, err := s.kbRepo.ListDocumentsByParentPaged(kbID, normParent, normOffset, normLimit, normExtGroup)
+	if err != nil {
+		return nil, err
+	}
+
+	nextOffset := normOffset + len(docs)
+	hasMore := int64(nextOffset) < total
+
+	if normFields == "minimal" {
+		items := make([]model.KBDocumentMinimalItem, 0, len(docs))
+		for _, d := range docs {
+			items = append(items, model.KBDocumentMinimalItem{
+				ID:         d.ID,
+				KBAssetID:  d.KBAssetID,
+				FolderPath: d.FolderPath,
+				IsFolder:   d.IsFolder,
+				FileName:   d.FileName,
+				FileExt:    d.FileExt,
+			})
+		}
+		return &model.KBDocumentListResult{
+			List:       items,
+			Users:      make(map[uint64]model.KBUserSummary),
+			Total:      total,
+			HasMore:    hasMore,
+			NextOffset: nextOffset,
+		}, nil
+	}
+
+	items := make([]model.KBDocumentListItem, 0, len(docs))
+	for _, d := range docs {
+		items = append(items, toKBDocumentListItem(d))
+	}
+	return &model.KBDocumentListResult{
+		List:       items,
+		Users:      s.buildUserSummaryMap(docs),
+		Total:      total,
+		HasMore:    hasMore,
+		NextOffset: nextOffset,
+	}, nil
+}
+
+// GetFolderETag computes a strong ETag for a paginated/filtered folder listing.
+func (s *kbService) GetFolderETag(userID uint64, isSuperAdmin bool, kbID uint64, parentFolder string, offset, limit int, extGroup, fields string, refDomainID uint64) (string, error) {
+	if _, err := s.ensureKBViewPermission(userID, isSuperAdmin, kbID, refDomainID, 0); err != nil {
+		return "", err
+	}
+	normParent, err := NormalizeFolderPath(parentFolder)
+	if err != nil {
+		return "", err
+	}
+	normOffset, normLimit, normExtGroup, normFields := normalizeLazyPageParams(offset, limit, extGroup, fields)
+	total, maxUpdated, err := s.kbRepo.GetFolderSummary(kbID, normParent, normExtGroup)
+	if err != nil {
+		return "", err
+	}
+	raw := fmt.Sprintf("kb=%d|parent=%s|ext=%s|fields=%s|offset=%d|limit=%d|total=%d|max=%d",
+		kbID, normParent, normExtGroup, normFields, normOffset, normLimit, total, maxUpdated.UnixNano())
+	sum := sha256.Sum256([]byte(raw))
+	return fmt.Sprintf(`"%x"`, sum[:16]), nil
+}
+
+// GetDocumentMeta returns slim metadata for a single document node.
+func (s *kbService) GetDocumentMeta(userID uint64, isSuperAdmin bool, kbID, docID, refDomainID uint64) (*model.KBDocumentListItem, error) {
+	if _, err := s.ensureKBViewPermission(userID, isSuperAdmin, kbID, refDomainID, docID); err != nil {
+		return nil, err
+	}
+	doc, err := s.kbRepo.FindDocumentByID(kbID, docID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, NewNotFound("document not found")
+		}
+		return nil, err
+	}
+	item := toKBDocumentListItem(*doc)
+	return &item, nil
 }
 
 func (s *kbService) enrichDocumentUploaders(docs []model.KBDocument) {

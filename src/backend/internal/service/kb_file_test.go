@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"mime/multipart"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"ascp-backend/internal/model"
 	"ascp-backend/internal/pkg/kbcodec"
@@ -82,6 +84,63 @@ func (m *mockFileKBRepo) ListDocumentsByParent(kbAssetID uint64, parentFolder st
 		return out[i].FileName < out[j].FileName
 	})
 	return out, nil
+}
+func (m *mockFileKBRepo) filterParentAndExt(kbAssetID uint64, parentFolder, extGroup string) ([]model.KBDocument, error) {
+	all, err := m.ListDocumentsByParent(kbAssetID, parentFolder)
+	if err != nil {
+		return nil, err
+	}
+	extGroup = strings.ToLower(strings.TrimSpace(extGroup))
+	if extGroup == "" {
+		return all, nil
+	}
+	filtered := make([]model.KBDocument, 0, len(all))
+	for _, d := range all {
+		if d.IsFolder {
+			continue
+		}
+		ext := strings.ToLower(d.FileExt)
+		if extGroup == "image" {
+			switch ext {
+			case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico", ".avif":
+				filtered = append(filtered, d)
+			}
+		} else if extGroup == "txt" && ext == ".txt" {
+			filtered = append(filtered, d)
+		}
+	}
+	return filtered, nil
+}
+func (m *mockFileKBRepo) ListDocumentsByParentPaged(kbAssetID uint64, parentFolder string, offset, limit int, extGroup string) ([]model.KBDocument, int64, error) {
+	all, err := m.filterParentAndExt(kbAssetID, parentFolder, extGroup)
+	if err != nil {
+		return nil, 0, err
+	}
+	total := int64(len(all))
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(all) {
+		return []model.KBDocument{}, total, nil
+	}
+	end := len(all)
+	if limit > 0 && offset+limit < end {
+		end = offset + limit
+	}
+	return all[offset:end], total, nil
+}
+func (m *mockFileKBRepo) GetFolderSummary(kbAssetID uint64, parentFolder string, extGroup string) (int64, time.Time, error) {
+	all, err := m.filterParentAndExt(kbAssetID, parentFolder, extGroup)
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	var maxT time.Time
+	for _, d := range all {
+		if d.UpdatedAt.After(maxT) {
+			maxT = d.UpdatedAt
+		}
+	}
+	return int64(len(all)), maxT, nil
 }
 func (m *mockFileKBRepo) FindDocumentByID(kbAssetID, docID uint64) (*model.KBDocument, error) {
 	if d, ok := m.docs[docID]; ok && d.KBAssetID == kbAssetID {
@@ -848,5 +907,169 @@ func TestRenameDocument_FileAndFolder(t *testing.T) {
 	}
 	if kbRepo.docs[6].FolderPath != "notes" {
 		t.Fatalf("expected sibling folder notes untouched, got %s", kbRepo.docs[6].FolderPath)
+	}
+}
+
+func TestKBService_ListDocumentsLazyPagedAndMeta(t *testing.T) {
+	kbRepo := newMockFileKBRepo()
+	assetRepo := &mockP1AssetRepo{
+		assets: map[uint64]*model.AIAsset{
+			1: {
+				ID:         1,
+				AssetCode:  "kb-paged",
+				Name:       "Paged KB",
+				AssetType:  model.AssetTypeKB,
+				DomainID:   100,
+				OwnerID:    10,
+				Visibility: model.VisibilityDomain,
+				Status:     model.AssetStatusPublished,
+			},
+		},
+	}
+	domainRepo := &mockP1DomainRepo{
+		domains: map[uint64]*model.BizDomain{
+			100: {ID: 100, Visibility: "private"},
+		},
+		members: map[uint64]map[uint64]string{
+			100: {10: model.DomainRoleOwner, 20: model.DomainRoleMember},
+		},
+	}
+	userRepo := &mockP1UserRepo{
+		users: map[uint64]*model.SysUser{
+			10: {ID: 10, Username: "alice", Nickname: "Alice", Avatar: "data:image/png;base64,HUGE_AVATAR_A"},
+			20: {ID: 20, Username: "bob", Nickname: "Bob", Avatar: "data:image/png;base64,HUGE_AVATAR_B"},
+		},
+	}
+	kbSvc := NewKBService(kbRepo, assetRepo, domainRepo, nil, nil, t.TempDir(), "secret")
+	kbSvc.SetAuditRepos(nil, userRepo)
+
+	now := time.Now().UTC()
+	_ = kbRepo.CreateDocument(&model.KBDocument{
+		ID: 1, KBAssetID: 1, IsFolder: true, FolderPath: "assets", FileName: "assets",
+		ParseStatus: model.ParseStatusCompleted, UploaderID: 10, UpdatedAt: now,
+	})
+	_ = kbRepo.CreateDocument(&model.KBDocument{
+		ID: 2, KBAssetID: 1, IsFolder: false, FolderPath: "", FileName: "a-note.txt", FileExt: ".txt",
+		FileSize: 128, FilePath: "/secret/path/a.txt", FileHash: "hash-a", ErrorMsg: "none", ChunkCount: 3,
+		ParseStatus: model.ParseStatusCompleted, UploaderID: 10, UpdatedAt: now,
+	})
+	_ = kbRepo.CreateDocument(&model.KBDocument{
+		ID: 3, KBAssetID: 1, IsFolder: false, FolderPath: "", FileName: "b-cover.png", FileExt: ".png",
+		FileSize: 2048, FilePath: "/secret/path/b.png", FileHash: "hash-b",
+		ParseStatus: model.ParseStatusCompleted, UploaderID: 20, UpdatedAt: now,
+	})
+	_ = kbRepo.CreateDocument(&model.KBDocument{
+		ID: 4, KBAssetID: 1, IsFolder: false, FolderPath: "", FileName: "c-photo.JPG", FileExt: ".JPG",
+		FileSize: 4096, FilePath: "/secret/path/c.jpg", FileHash: "hash-c",
+		ParseStatus: model.ParseStatusCompleted, UploaderID: 10, UpdatedAt: now,
+	})
+	_ = kbRepo.CreateDocument(&model.KBDocument{
+		ID: 5, KBAssetID: 1, IsFolder: false, FolderPath: "", FileName: "d-chapter.txt", FileExt: ".txt",
+		FileSize: 512, FilePath: "/secret/path/d.txt", FileHash: "hash-d",
+		ParseStatus: model.ParseStatusCompleted, UploaderID: 20, UpdatedAt: now,
+	})
+
+	// 1. Pagination: offset=0, limit=2 -> folder "assets" + "a-note.txt", total=5, has_more=true, next_offset=2
+	page1, err := kbSvc.ListDocumentsLazyPaged(20, false, 1, "", 0, 2, "", "", 0)
+	if err != nil {
+		t.Fatalf("ListDocumentsLazyPaged page1 failed: %v", err)
+	}
+	if page1.Total != 5 || !page1.HasMore || page1.NextOffset != 2 {
+		t.Fatalf("unexpected page1 metadata: total=%d hasMore=%v nextOffset=%d", page1.Total, page1.HasMore, page1.NextOffset)
+	}
+	items1, ok := page1.List.([]model.KBDocumentListItem)
+	if !ok || len(items1) != 2 {
+		t.Fatalf("expected 2 KBDocumentListItem items, got %T (%v)", page1.List, page1.List)
+	}
+	if !items1[0].IsFolder || items1[0].FileName != "assets" || items1[1].FileName != "a-note.txt" {
+		t.Fatalf("unexpected page1 ordering: %+v", items1)
+	}
+
+	// Verify deduplicated Users map without Avatar and omitted heavy fields in JSON
+	if len(page1.Users) != 1 || page1.Users[10].Username != "alice" || page1.Users[10].Nickname != "Alice" {
+		t.Fatalf("unexpected deduplicated users on page1: %+v", page1.Users)
+	}
+	rawJSON, err := json.Marshal(page1)
+	if err != nil {
+		t.Fatalf("json.Marshal page1 failed: %v", err)
+	}
+	jsonStr := string(rawJSON)
+	for _, forbidden := range []string{"HUGE_AVATAR", `"avatar"`, `"file_path"`, `"file_hash"`, `"error_msg"`, `"chunk_count"`, `"uploader"`} {
+		if strings.Contains(jsonStr, forbidden) {
+			t.Fatalf("expected slim JSON to omit %s, got: %s", forbidden, jsonStr)
+		}
+	}
+
+	// Page 2: offset=2, limit=2 -> "b-cover.png", "c-photo.JPG" (both uploaders 10 & 20)
+	page2, err := kbSvc.ListDocumentsLazyPaged(20, false, 1, "", 2, 2, "", "", 0)
+	if err != nil {
+		t.Fatalf("ListDocumentsLazyPaged page2 failed: %v", err)
+	}
+	if !page2.HasMore || page2.NextOffset != 4 || len(page2.Users) != 2 {
+		t.Fatalf("unexpected page2 result: %+v", page2)
+	}
+
+	// Page 3: offset=4, limit=2 -> "d-chapter.txt", has_more=false, next_offset=5
+	page3, err := kbSvc.ListDocumentsLazyPaged(20, false, 1, "", 4, 2, "", "", 0)
+	if err != nil {
+		t.Fatalf("ListDocumentsLazyPaged page3 failed: %v", err)
+	}
+	if page3.HasMore || page3.NextOffset != 5 {
+		t.Fatalf("unexpected page3 metadata: hasMore=%v nextOffset=%d", page3.HasMore, page3.NextOffset)
+	}
+
+	// 2. ext_group=image + fields=minimal
+	imgRes, err := kbSvc.ListDocumentsLazyPaged(20, false, 1, "", 0, 0, "image", "minimal", 0)
+	if err != nil {
+		t.Fatalf("ListDocumentsLazyPaged image+minimal failed: %v", err)
+	}
+	if imgRes.Total != 2 || imgRes.HasMore {
+		t.Fatalf("unexpected image+minimal counts: total=%d hasMore=%v", imgRes.Total, imgRes.HasMore)
+	}
+	imgItems, ok := imgRes.List.([]model.KBDocumentMinimalItem)
+	if !ok || len(imgItems) != 2 || imgItems[0].FileName != "b-cover.png" || imgItems[1].FileName != "c-photo.JPG" {
+		t.Fatalf("unexpected image minimal items: %+v", imgRes.List)
+	}
+	if len(imgRes.Users) != 0 {
+		t.Fatalf("expected empty users map for fields=minimal, got %+v", imgRes.Users)
+	}
+
+	// 3. ext_group=txt + fields=minimal
+	txtRes, err := kbSvc.ListDocumentsLazyPaged(20, false, 1, "", 0, 0, "txt", "minimal", 0)
+	if err != nil {
+		t.Fatalf("ListDocumentsLazyPaged txt+minimal failed: %v", err)
+	}
+	txtItems, ok := txtRes.List.([]model.KBDocumentMinimalItem)
+	if !ok || len(txtItems) != 2 || txtItems[0].FileName != "a-note.txt" || txtItems[1].FileName != "d-chapter.txt" {
+		t.Fatalf("unexpected txt minimal items: %+v", txtRes.List)
+	}
+
+	// 4. ETag stability & change detection
+	etag1, err := kbSvc.GetFolderETag(20, false, 1, "", 0, 2, "", "", 0)
+	if err != nil || etag1 == "" {
+		t.Fatalf("GetFolderETag failed: etag=%q err=%v", etag1, err)
+	}
+	etag2, err := kbSvc.GetFolderETag(20, false, 1, "", 0, 2, "", "", 0)
+	if err != nil || etag1 != etag2 {
+		t.Fatalf("expected stable ETag, got %q vs %q (err=%v)", etag1, etag2, err)
+	}
+
+	// 5. GetDocumentMeta single-node lookup + 403/404 checks
+	meta, err := kbSvc.GetDocumentMeta(20, false, 1, 3, 0)
+	if err != nil {
+		t.Fatalf("GetDocumentMeta failed: %v", err)
+	}
+	if meta.ID != 3 || meta.FileName != "b-cover.png" || meta.FileSize != 2048 {
+		t.Fatalf("unexpected GetDocumentMeta result: %+v", meta)
+	}
+	if _, err := kbSvc.GetDocumentMeta(999, false, 1, 3, 0); err == nil {
+		t.Fatal("expected forbidden error for non-member")
+	} else {
+		assertAppErrStatus(t, err, http.StatusForbidden)
+	}
+	if _, err := kbSvc.GetDocumentMeta(20, false, 1, 9999, 0); err == nil {
+		t.Fatal("expected not found error for missing doc")
+	} else {
+		assertAppErrStatus(t, err, http.StatusNotFound)
 	}
 }

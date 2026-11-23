@@ -4,6 +4,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"time"
 
 	"ascp-backend/internal/model"
 
@@ -15,6 +16,8 @@ type KBRepository interface {
 	EnsureFolderHierarchy(kbAssetID, uploaderID uint64, folderPath string) (*model.KBDocument, error)
 	ListDocuments(kbAssetID uint64) ([]model.KBDocument, error)
 	ListDocumentsByParent(kbAssetID uint64, parentFolder string) ([]model.KBDocument, error)
+	ListDocumentsByParentPaged(kbAssetID uint64, parentFolder string, offset, limit int, extGroup string) ([]model.KBDocument, int64, error)
+	GetFolderSummary(kbAssetID uint64, parentFolder string, extGroup string) (int64, time.Time, error)
 	FindDocumentByID(kbAssetID, docID uint64) (*model.KBDocument, error)
 	ListMatchingFiles(kbAssetID uint64, scope string, docID uint64, folderPath string) ([]model.KBDocument, error)
 	FileExistsInFolder(kbAssetID uint64, folderPath, fileName string, excludeDocID uint64) (bool, error)
@@ -100,10 +103,8 @@ func (r *kbRepository) ListDocuments(kbAssetID uint64) ([]model.KBDocument, erro
 	return docs, nil
 }
 
-// ListDocumentsByParent returns direct child folders and direct child files under parentFolder.
-func (r *kbRepository) ListDocumentsByParent(kbAssetID uint64, parentFolder string) ([]model.KBDocument, error) {
-	var docs []model.KBDocument
-	tx := r.db.Where("kb_asset_id = ?", kbAssetID)
+func (r *kbRepository) buildParentFolderQuery(kbAssetID uint64, parentFolder, extGroup string) *gorm.DB {
+	tx := r.db.Model(&model.KBDocument{}).Where("kb_asset_id = ?", kbAssetID)
 	if parentFolder == "" {
 		tx = tx.Where("((is_folder = ? AND folder_path <> '' AND folder_path NOT LIKE ?) OR (is_folder = ? AND folder_path = ''))",
 			true, "%/%", false)
@@ -111,13 +112,70 @@ func (r *kbRepository) ListDocumentsByParent(kbAssetID uint64, parentFolder stri
 		tx = tx.Where("((is_folder = ? AND folder_path LIKE ? AND folder_path NOT LIKE ?) OR (is_folder = ? AND folder_path = ?))",
 			true, parentFolder+"/%", parentFolder+"/%/%", false, parentFolder)
 	}
-	if err := tx.Order("is_folder DESC, file_name ASC").Find(&docs).Error; err != nil {
+	switch strings.ToLower(strings.TrimSpace(extGroup)) {
+	case "image":
+		tx = tx.Where("is_folder = ? AND LOWER(file_ext) IN ?", false, []string{".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico", ".avif"})
+	case "txt":
+		tx = tx.Where("is_folder = ? AND LOWER(file_ext) = ?", false, ".txt")
+	}
+	return tx
+}
+
+// ListDocumentsByParent returns direct child folders and direct child files under parentFolder.
+func (r *kbRepository) ListDocumentsByParent(kbAssetID uint64, parentFolder string) ([]model.KBDocument, error) {
+	var docs []model.KBDocument
+	if err := r.buildParentFolderQuery(kbAssetID, parentFolder, "").
+		Order("is_folder DESC, file_name ASC").
+		Find(&docs).Error; err != nil {
 		return nil, err
 	}
 	if docs == nil {
 		docs = []model.KBDocument{}
 	}
 	return docs, nil
+}
+
+// ListDocumentsByParentPaged returns a paginated, slim-column projection of direct children under parentFolder.
+func (r *kbRepository) ListDocumentsByParentPaged(kbAssetID uint64, parentFolder string, offset, limit int, extGroup string) ([]model.KBDocument, int64, error) {
+	base := r.buildParentFolderQuery(kbAssetID, parentFolder, extGroup)
+	var total int64
+	if err := base.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	var docs []model.KBDocument
+	q := base.Select("id, kb_asset_id, folder_path, is_folder, file_name, file_ext, file_size, parse_status, uploader_id, updated_at").
+		Order("is_folder DESC, file_name ASC")
+	if offset > 0 {
+		q = q.Offset(offset)
+	}
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	if err := q.Find(&docs).Error; err != nil {
+		return nil, 0, err
+	}
+	if docs == nil {
+		docs = []model.KBDocument{}
+	}
+	return docs, total, nil
+}
+
+// GetFolderSummary returns matching row count and latest updated_at timestamp for ETag calculation.
+func (r *kbRepository) GetFolderSummary(kbAssetID uint64, parentFolder string, extGroup string) (int64, time.Time, error) {
+	var row struct {
+		Total      int64      `gorm:"column:total"`
+		MaxUpdated *time.Time `gorm:"column:max_updated"`
+	}
+	if err := r.buildParentFolderQuery(kbAssetID, parentFolder, extGroup).
+		Select("COUNT(*) AS total, MAX(updated_at) AS max_updated").
+		Scan(&row).Error; err != nil {
+		return 0, time.Time{}, err
+	}
+	if row.MaxUpdated != nil {
+		return row.Total, *row.MaxUpdated, nil
+	}
+	return row.Total, time.Time{}, nil
 }
 
 func (r *kbRepository) FindDocumentByID(kbAssetID, docID uint64) (*model.KBDocument, error) {

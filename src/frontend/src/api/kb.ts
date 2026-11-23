@@ -6,6 +6,7 @@ import type {
   KbContentResult,
   KbDocument,
   KbDocumentInteractions,
+  KbDocumentListResponse,
   KbDownloadPreview,
   KbReadingProgress,
   PaginatedData,
@@ -92,13 +93,32 @@ function withRefDomainId<T extends Record<string, unknown>>(
   return { ...(params ?? ({} as T)), ref_domain_id: refDomainId }
 }
 
+export interface GetDocumentsParams {
+  lazy?: boolean
+  folder_path?: string
+  offset?: number
+  limit?: number
+  ext_group?: 'image' | 'txt'
+  fields?: 'minimal'
+}
+
 export function getDocuments(
   kbId: number,
-  params?: { lazy?: boolean; folder_path?: string },
+  params?: GetDocumentsParams,
   refDomainId?: number
-): Promise<PaginatedData<KbDocument> | KbDocument[]> {
-  return apiGet<PaginatedData<KbDocument> | KbDocument[]>(`/kb/${kbId}/documents`, {
-    params: withRefDomainId(params, refDomainId)
+): Promise<KbDocumentListResponse | KbDocument[]> {
+  return apiGet<KbDocumentListResponse | KbDocument[]>(`/kb/${kbId}/documents`, {
+    params: withRefDomainId(params as Record<string, unknown> | undefined, refDomainId)
+  })
+}
+
+export function getDocumentMeta(
+  kbAssetId: number,
+  docId: number,
+  refDomainId?: number
+): Promise<KbDocument> {
+  return apiGet<KbDocument>(`/kb/${kbAssetId}/documents/${docId}/meta`, {
+    params: withRefDomainId(undefined, refDomainId)
   })
 }
 

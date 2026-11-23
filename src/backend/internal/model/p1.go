@@ -101,6 +101,42 @@ func (KBDocument) TableName() string {
 	return "kb_document"
 }
 
+type KBUserSummary struct {
+	ID       uint64 `json:"id"`
+	Username string `json:"username"`
+	Nickname string `json:"nickname"`
+}
+
+type KBDocumentListItem struct {
+	ID          uint64    `json:"id"`
+	KBAssetID   uint64    `json:"kb_asset_id"`
+	FolderPath  string    `json:"folder_path"`
+	IsFolder    bool      `json:"is_folder"`
+	FileName    string    `json:"file_name"`
+	FileExt     string    `json:"file_ext"`
+	FileSize    uint64    `json:"file_size"`
+	ParseStatus string    `json:"parse_status"`
+	UploaderID  uint64    `json:"uploader_id"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type KBDocumentMinimalItem struct {
+	ID         uint64 `json:"id"`
+	KBAssetID  uint64 `json:"kb_asset_id"`
+	FolderPath string `json:"folder_path"`
+	IsFolder   bool   `json:"is_folder"`
+	FileName   string `json:"file_name"`
+	FileExt    string `json:"file_ext"`
+}
+
+type KBDocumentListResult struct {
+	List       interface{}              `json:"list"`
+	Users      map[uint64]KBUserSummary `json:"users"`
+	Total      int64                    `json:"total"`
+	HasMore    bool                     `json:"has_more"`
+	NextOffset int                      `json:"next_offset"`
+}
+
 type KBChunk struct {
 	ID         uint64    `gorm:"primaryKey;autoIncrement" json:"id"`
 	KBAssetID  uint64    `gorm:"column:kb_asset_id;index:idx_kb_doc;not null" json:"kb_asset_id"`

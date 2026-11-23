@@ -79,6 +79,48 @@ export interface KbTreeNode {
   fileSize?: number
   doc?: KbDocument
   children: KbTreeNode[]
+  isLoadMoreSentinel?: boolean
+  sentinelFolderPath?: string
+  sentinelNextOffset?: number
+  sentinelRemaining?: number
+  sentinelLoading?: boolean
+}
+
+export function createLoadMoreSentinelNode(
+  folderPath: string,
+  nextOffset: number,
+  remaining: number
+): KbTreeNode {
+  const clean = folderPath.replace(/^\/+|\/+$/g, '')
+  const remainingLabel = remaining > 0 ? `（还有 ${remaining} 项）` : ''
+  return {
+    key: `sentinel:${clean || '__root__'}:${nextOffset}`,
+    label: `加载更多${remainingLabel}`,
+    isFolder: false,
+    isLeaf: true,
+    folderPath: clean,
+    children: [],
+    isLoadMoreSentinel: true,
+    sentinelFolderPath: clean,
+    sentinelNextOffset: nextOffset,
+    sentinelRemaining: remaining,
+    sentinelLoading: false
+  }
+}
+
+export function buildPaginatedKbTreeNodes(
+  docs: KbDocument[],
+  parentFolderPath: string,
+  pagination?: { hasMore?: boolean; nextOffset?: number; total?: number }
+): KbTreeNode[] {
+  const nodes = buildImmediateKbTreeNodes(docs, parentFolderPath)
+  if (pagination?.hasMore) {
+    const nextOffset = pagination.nextOffset ?? docs.length
+    const total = pagination.total ?? nextOffset
+    const remaining = Math.max(0, total - docs.length)
+    nodes.push(createLoadMoreSentinelNode(parentFolderPath, nextOffset, remaining))
+  }
+  return nodes
 }
 
 export function extractImmediateFiles(docs: KbDocument[], folderPath: string): KbDocument[] {

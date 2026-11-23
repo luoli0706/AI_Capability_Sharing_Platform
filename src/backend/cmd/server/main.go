@@ -223,6 +223,7 @@ func main() {
 	protected.POST("/kb/:id/files", kbHandler.CreateMarkdownFile)
 	protected.POST("/kb/:id/documents", kbHandler.UploadDocument)
 	protected.GET("/kb/:id/documents", kbHandler.ListDocuments)
+	protected.GET("/kb/:id/documents/:docId/meta", kbHandler.GetDocumentMeta)
 	protected.GET("/kb/:id/documents/:docId/content", kbHandler.GetDocumentContent)
 	protected.GET("/kb/:id/documents/:docId/raw", kbHandler.GetDocumentRaw)
 	protected.PUT("/kb/:id/documents/:docId/content", kbHandler.UpdateDocumentContent)

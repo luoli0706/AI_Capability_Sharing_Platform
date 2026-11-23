@@ -343,21 +343,37 @@ export interface AssetVersion {
 
 export type KbParseStatus = 'pending' | 'processing' | 'completed' | 'failed'
 
+export interface KbUserSummary {
+  id: number
+  username: string
+  nickname: string
+  avatar: string
+}
+
 export interface KbDocument {
   id: number
-  kb_asset_id: number
+  kb_asset_id?: number
   file_name: string
-  file_ext: string
+  file_ext?: string
   file_size: number
   folder_path: string
   is_folder: boolean
-  parse_status: KbParseStatus
+  parse_status?: KbParseStatus
   error_msg?: string
-  chunk_count: number
-  uploader_id: number
-  uploader?: UserBrief
-  created_at: string
+  chunk_count?: number
+  uploader_id?: number
+  uploader?: UserBrief | KbUserSummary
+  created_at?: string
   updated_at?: string
+}
+
+export interface KbDocumentListResponse {
+  list: KbDocument[]
+  items?: KbDocument[]
+  users?: Record<number, KbUserSummary>
+  total?: number
+  has_more?: boolean
+  next_offset?: number
 }
 
 export interface KbContentResult {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
+import { ElMessage, type ElTree, type FormInstance, type FormRules } from 'element-plus'
 import {
   ArrowLeft,
   ArrowRight,
@@ -11,6 +11,7 @@ import {
   Download,
   Folder,
   Key,
+  Loading,
   Picture,
   Promotion,
   Share,
@@ -21,20 +22,21 @@ import ShareAssetDialog from '@/components/ShareAssetDialog.vue'
 import { downloadAgentConfig, downloadSkillPackage, getAssetDetail, subscribeAsset } from '@/api/asset'
 import { createApproval } from '@/api/approval'
 import { invokeAgent, invokeKBQuery, invokeMCP, invokeSkill } from '@/api/invoke'
-import { getDocumentContent, getDocumentRawBlob, getDocuments } from '@/api/kb'
+import { getDocumentContent, getDocumentRawBlob } from '@/api/kb'
+import { useKbTreeCacheStore } from '@/stores/kbTreeCache'
 import type { AssetItem, KbContentResult, KbDocument } from '@/types/api'
 import {
   formatDateTime,
   formatFileSize,
   getAssetStatusMeta,
   getAssetTypeMeta,
-  getVisibilityLabel,
-  normalizeList
+  getVisibilityLabel
 } from '@/utils/format'
 import {
   buildImmediateKbTreeNodes,
+  buildPaginatedKbTreeNodes,
   confirmAndDownloadKb,
-  extractImmediateFiles,
+  createLoadMoreSentinelNode,
   isImageFile,
   isMarkdownFile,
   isTextFile,
@@ -135,6 +137,9 @@ function initDefaultPayload(asset: AssetItem) {
   }
 }
 
+const kbTreeCache = useKbTreeCacheStore()
+const kbTreeRef = ref<InstanceType<typeof ElTree> | null>(null)
+const kbTreeBoxRef = ref<HTMLElement | null>(null)
 const loadingKbTree = ref(false)
 const kbTreeRefreshSeed = ref(0)
 const kbTreeKey = computed(() => `${detail.value?.id || 0}-${kbTreeRefreshSeed.value}`)
@@ -143,8 +148,10 @@ const kbTreeProps = {
   children: 'children',
   isLeaf: 'isLeaf'
 }
-const folderFilesCache = ref<Record<string, KbDocument[]>>({})
 const kbRootEmpty = ref(false)
+const kbSentinelNodeByEl = new WeakMap<Element, KbTreeNode>()
+const kbLoadingSentinelKeys = new Set<string>()
+let kbSentinelObserver: IntersectionObserver | null = null
 const kbPreviewDoc = ref<KbContentResult | null>(null)
 const kbImageUrlMap = ref<Record<number, string>>({})
 const sameFolderImages = ref<KbDocument[]>([])
@@ -186,10 +193,91 @@ function resetKbPreviewState() {
 }
 
 function resetKbTreeState() {
-  folderFilesCache.value = {}
   kbRootEmpty.value = false
   kbTreeRefreshSeed.value++
   resetKbPreviewState()
+}
+
+function ensureKbSentinelObserver() {
+  if (kbSentinelObserver || typeof IntersectionObserver === 'undefined') return
+  kbSentinelObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue
+        const nodeData = kbSentinelNodeByEl.get(entry.target)
+        if (nodeData && !nodeData.sentinelLoading) {
+          void handleLoadMoreKbSentinel(nodeData)
+        }
+      }
+    },
+    {
+      root: kbTreeBoxRef.value,
+      rootMargin: '80px',
+      threshold: 0.01
+    }
+  )
+}
+
+function observeKbSentinelEl(el: HTMLElement | null, data: KbTreeNode) {
+  if (!el) return
+  ensureKbSentinelObserver()
+  kbSentinelNodeByEl.set(el, data)
+  kbSentinelObserver?.observe(el)
+}
+
+async function handleLoadMoreKbSentinel(sentinel: KbTreeNode) {
+  if (!detail.value || detail.value.asset_type !== 'kb') return
+  if (!sentinel.isLoadMoreSentinel || sentinel.sentinelLoading) return
+  if (kbLoadingSentinelKeys.has(sentinel.key)) return
+
+  const kbId = detail.value.id
+  const folderPath = sentinel.sentinelFolderPath ?? sentinel.folderPath ?? ''
+  const nextOffset = sentinel.sentinelNextOffset ?? 0
+
+  kbLoadingSentinelKeys.add(sentinel.key)
+  sentinel.sentinelLoading = true
+  try {
+    const entry = await kbTreeCache.fetchFolderPage(kbId, folderPath, { offset: nextOffset })
+    const tree = kbTreeRef.value
+    if (!tree || detail.value?.id !== kbId) return
+
+    const sentinelNode = tree.getNode(sentinel.key)
+    if (sentinelNode) {
+      tree.remove(sentinelNode)
+    }
+
+    const parentNode = folderPath
+      ? tree.getNode(`folder:${folderPath}`)
+      : (tree.store as { root?: unknown } | undefined)?.root
+    const existingKeys = new Set<string>()
+    const childNodes = (parentNode as { childNodes?: Array<{ data?: KbTreeNode }> } | undefined)?.childNodes
+    if (Array.isArray(childNodes)) {
+      for (const cn of childNodes) {
+        if (cn.data?.key) existingKeys.add(cn.data.key)
+      }
+    }
+
+    type TreeAppendParent = Parameters<NonNullable<typeof tree>['append']>[1]
+    const appendTarget = (
+      folderPath ? `folder:${folderPath}` : (tree.store as { root?: unknown } | undefined)?.root
+    ) as TreeAppendParent | undefined
+    const allNodes = buildImmediateKbTreeNodes(entry.items, folderPath)
+    for (const n of allNodes) {
+      if (!existingKeys.has(n.key) && appendTarget) {
+        tree.append(n, appendTarget)
+      }
+    }
+
+    if (entry.hasMore && appendTarget) {
+      const remaining = Math.max(0, entry.total - entry.items.length)
+      const nextSentinel = createLoadMoreSentinelNode(folderPath, entry.nextOffset, remaining)
+      tree.append(nextSentinel, appendTarget)
+    }
+  } catch {
+    sentinel.sentinelLoading = false
+  } finally {
+    kbLoadingSentinelKeys.delete(sentinel.key)
+  }
 }
 
 async function loadKbTreeNode(
@@ -207,11 +295,12 @@ async function loadKbTreeNode(
     kbRootEmpty.value = false
   }
   try {
-    const res = await getDocuments(kbId, { lazy: true, folder_path: folderPath })
-    const items = normalizeList(res).items
-    const files = extractImmediateFiles(items, folderPath)
-    folderFilesCache.value = { ...folderFilesCache.value, [folderPath]: files }
-    const nodes = buildImmediateKbTreeNodes(items, folderPath)
+    const entry = await kbTreeCache.fetchFolderPage(kbId, folderPath)
+    const nodes = buildPaginatedKbTreeNodes(entry.items, folderPath, {
+      hasMore: entry.hasMore,
+      nextOffset: entry.nextOffset,
+      total: entry.total
+    })
     if (node.level === 0) {
       kbRootEmpty.value = nodes.length === 0
     }
@@ -253,20 +342,20 @@ function handleKbLightboxSwitch(index: number) {
 }
 
 async function handleKbNodeClick(node: KbTreeNode) {
+  if (node.isLoadMoreSentinel) {
+    void handleLoadMoreKbSentinel(node)
+    return
+  }
   if (node.isFolder || !node.doc || !detail.value) return
   const doc = node.doc
   resetKbPreviewState()
   if (isImageFile(doc.file_name)) {
     const cleanFolder = (doc.folder_path || '').replace(/^\/+|\/+$/g, '')
-    let folderDocs = folderFilesCache.value[cleanFolder]
-    if (!folderDocs) {
-      try {
-        const res = await getDocuments(detail.value.id, { lazy: true, folder_path: cleanFolder })
-        folderDocs = extractImmediateFiles(normalizeList(res).items, cleanFolder)
-        folderFilesCache.value = { ...folderFilesCache.value, [cleanFolder]: folderDocs }
-      } catch {
-        folderDocs = [doc]
-      }
+    let folderDocs: KbDocument[]
+    try {
+      folderDocs = await kbTreeCache.fetchExtGroupIndex(detail.value.id, cleanFolder, 'image')
+    } catch {
+      folderDocs = [doc]
     }
     const imgs = folderDocs
       .filter((d) => !d.is_folder && isImageFile(d.file_name))
@@ -302,6 +391,8 @@ async function handleKbNodeClick(node: KbTreeNode) {
 }
 
 onBeforeUnmount(() => {
+  kbSentinelObserver?.disconnect()
+  kbSentinelObserver = null
   revokeAllKbImageUrls()
 })
 
@@ -872,13 +963,14 @@ async function handleRunInvoke() {
               </el-descriptions>
 
               <div class="code-block-label">目录与文件浏览（点击文件可在线预览或下载）</div>
-              <div v-loading="loadingKbTree" class="kb-tree-box">
+              <div ref="kbTreeBoxRef" v-loading="loadingKbTree" class="kb-tree-box">
                 <el-empty
                   v-if="kbRootEmpty"
                   description="该知识库暂无文件"
                   :image-size="48"
                 />
                 <el-tree
+                  ref="kbTreeRef"
                   v-show="!kbRootEmpty"
                   :key="kbTreeKey"
                   lazy
@@ -890,7 +982,16 @@ async function handleRunInvoke() {
                   @node-click="handleKbNodeClick"
                 >
                   <template #default="{ data }">
-                    <div class="kb-tree-node">
+                    <div
+                      v-if="data.isLoadMoreSentinel"
+                      :ref="(el) => observeKbSentinelEl(el as HTMLElement | null, data)"
+                      class="kb-tree-sentinel"
+                      @click.stop="handleLoadMoreKbSentinel(data)"
+                    >
+                      <el-icon v-if="data.sentinelLoading" class="is-loading"><Loading /></el-icon>
+                      <span>{{ data.sentinelLoading ? '正在加载更多...' : data.label }}</span>
+                    </div>
+                    <div v-else class="kb-tree-node">
                       <span class="kb-node-left">
                         <el-icon :size="15" :color="data.isFolder ? '#D97706' : isImageFile(data.label) ? '#059669' : '#4F46E5'">
                           <Folder v-if="data.isFolder" />
@@ -1307,6 +1408,22 @@ async function handleRunInvoke() {
   gap: 8px;
   padding-right: 6px;
   min-width: 0;
+}
+
+.kb-tree-sentinel {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--ascp-primary, #4f46e5);
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: background-color 0.15s ease;
+}
+
+.kb-tree-sentinel:hover {
+  background-color: rgba(79, 70, 229, 0.08);
 }
 
 .kb-node-left {
