@@ -7,9 +7,8 @@ import {
   List,
   Notebook
 } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
 import { getDocumentContent, getReadingProgress, saveReadingProgress } from '@/api/kb'
-import type { KbContentResult, KbDocument } from '@/types/api'
+import type { KbContentResult, KbDocument, KbReadingProgress } from '@/types/api'
 
 type ReaderTheme = 'sepia' | 'light' | 'dark'
 
@@ -64,6 +63,74 @@ let pendingSavePayload: {
   total_pages: number
   refDomainId?: number
 } | null = null
+
+const chapterCache = new Map<number, { contentRes: KbContentResult; progress?: KbReadingProgress }>()
+const prefetchPromises = new Map<number, Promise<void>>()
+
+function pruneChapterCache(centerIdx: number) {
+  if (chapterCache.size <= 5) return
+  if (centerIdx >= 0) {
+    const idxById = new Map<number, number>()
+    props.chapters.forEach((c, i) => idxById.set(c.id, i))
+    for (const key of chapterCache.keys()) {
+      const idx = idxById.get(key)
+      if (idx === undefined || Math.abs(idx - centerIdx) > 2) {
+        chapterCache.delete(key)
+      }
+    }
+  }
+  while (chapterCache.size > 5) {
+    const oldestKey = chapterCache.keys().next().value
+    if (oldestKey === undefined) break
+    chapterCache.delete(oldestKey)
+  }
+}
+
+function prefetchChapter(docId: number): Promise<void> {
+  if (!props.kbId || !props.visible) return Promise.resolve()
+  const existing = chapterCache.get(docId)
+  if (existing && existing.progress !== undefined) {
+    return Promise.resolve()
+  }
+  const inFlight = prefetchPromises.get(docId)
+  if (inFlight) return inFlight
+
+  const targetKbId = props.kbId
+  const targetRefDomainId = props.refDomainId
+
+  const promise = (async () => {
+    try {
+      const [contentRes, progress] = await Promise.all([
+        existing?.contentRes
+          ? Promise.resolve(existing.contentRes)
+          : getDocumentContent(targetKbId, docId, targetRefDomainId),
+        getReadingProgress(targetKbId, docId, targetRefDomainId).catch(() => undefined)
+      ])
+      if (!props.visible || props.kbId !== targetKbId) return
+      chapterCache.set(docId, { contentRes, progress })
+    } catch {
+      // Ignore background prefetch errors
+    } finally {
+      prefetchPromises.delete(docId)
+    }
+  })()
+
+  prefetchPromises.set(docId, promise)
+  return promise
+}
+
+function prefetchAdjacentChapters(centerIdx: number) {
+  if (centerIdx < 0) return
+  const nextDoc = props.chapters[centerIdx + 1]
+  if (nextDoc) {
+    void prefetchChapter(nextDoc.id)
+  }
+  const prevDoc = props.chapters[centerIdx - 1]
+  if (prevDoc) {
+    void prefetchChapter(prevDoc.id)
+  }
+  pruneChapterCache(centerIdx)
+}
 
 const THEME_LABELS: Array<{ value: ReaderTheme; label: string }> = [
   { value: 'sepia', label: '护眼米黄' },
@@ -200,44 +267,86 @@ async function recomputePagination(preserveRatio = false) {
   }
 }
 
+function applyChapterInitialPage(progress?: KbReadingProgress, targetEndPage?: boolean) {
+  if (progress && progress.total_pages > 0 && progress.current_page > 1) {
+    const targetPage = Math.min(Math.max(1, progress.current_page), totalPages.value)
+    currentPage.value = targetPage
+    restoredHint.value = `已自动跳转至上次阅读进度：第 ${targetPage}/${totalPages.value} 页`
+  } else if (targetEndPage) {
+    currentPage.value = totalPages.value
+  } else {
+    currentPage.value = 1
+  }
+}
+
 async function restoreProgressForDoc(docId: number, seq: number) {
-  restoredHint.value = ''
   try {
     const progress = await getReadingProgress(props.kbId, docId, props.refDomainId)
     if (seq !== sessionSeq || !props.visible || currentDocId.value !== docId) return
+    const cached = chapterCache.get(docId)
+    if (cached) {
+      cached.progress = progress
+    }
     if (progress && progress.total_pages > 0 && progress.current_page > 1) {
       const targetPage = Math.min(Math.max(1, progress.current_page), totalPages.value)
       currentPage.value = targetPage
-      const hint = `已自动跳转至上次阅读进度：第 ${targetPage}/${totalPages.value} 页`
-      restoredHint.value = hint
-      ElMessage.info(hint)
+      restoredHint.value = `已自动跳转至上次阅读进度：第 ${targetPage}/${totalPages.value} 页`
     }
   } catch {
     // Ignore if no progress yet or API unavailable
   }
 }
 
-async function openChapter(doc: KbDocument) {
+async function openChapter(doc: KbDocument, opts?: { targetEndPage?: boolean }) {
   if (doc.id === currentDocId.value && currentContent.value) {
     drawerOpen.value = false
     return
   }
-  await flushPendingSave()
+  void flushPendingSave()
   const seq = ++sessionSeq
-  loadingChapter.value = true
   restoredHint.value = ''
+
+  const cached = chapterCache.get(doc.id)
+  if (cached) {
+    loadingChapter.value = false
+    currentDocId.value = doc.id
+    currentFileName.value = cached.contentRes.file_name
+    currentContent.value = cached.contentRes.content
+    drawerOpen.value = false
+    emit('chapter-changed', doc)
+    pages.value = paginateText()
+    applyChapterInitialPage(cached.progress, opts?.targetEndPage)
+    if (pageViewportRef.value) {
+      pageViewportRef.value.scrollTop = 0
+    }
+    if (cached.progress === undefined) {
+      void restoreProgressForDoc(doc.id, seq)
+    }
+    prefetchAdjacentChapters(currentChapterIndex.value)
+    return
+  }
+
+  loadingChapter.value = true
   try {
-    const contentRes = await getDocumentContent(props.kbId, doc.id, props.refDomainId)
+    const [contentRes, progress] = await Promise.all([
+      getDocumentContent(props.kbId, doc.id, props.refDomainId),
+      getReadingProgress(props.kbId, doc.id, props.refDomainId).catch(() => undefined)
+    ])
     if (seq !== sessionSeq || !props.visible) return
+    chapterCache.set(doc.id, { contentRes, progress })
     currentDocId.value = doc.id
     currentFileName.value = contentRes.file_name
     currentContent.value = contentRes.content
-    currentPage.value = 1
     drawerOpen.value = false
     emit('chapter-changed', doc)
-    await recomputePagination(false)
+    await nextTick()
     if (seq !== sessionSeq || !props.visible) return
-    await restoreProgressForDoc(doc.id, seq)
+    pages.value = paginateText()
+    applyChapterInitialPage(progress, opts?.targetEndPage)
+    if (pageViewportRef.value) {
+      pageViewportRef.value.scrollTop = 0
+    }
+    prefetchAdjacentChapters(currentChapterIndex.value)
   } catch {
     // Handled by interceptor
   } finally {
@@ -261,7 +370,7 @@ function prevPage() {
   if (currentPage.value > 1) {
     goToPage(currentPage.value - 1)
   } else if (hasPrevChapter.value) {
-    void openChapter(props.chapters[currentChapterIndex.value - 1])
+    void openChapter(props.chapters[currentChapterIndex.value - 1], { targetEndPage: true })
   }
 }
 
@@ -323,6 +432,14 @@ function handleResize() {
 }
 
 watch(
+  () => props.kbId,
+  () => {
+    chapterCache.clear()
+    prefetchPromises.clear()
+  }
+)
+
+watch(
   () => props.visible,
   async (val) => {
     if (val) {
@@ -332,8 +449,11 @@ watch(
       currentContent.value = props.initialDoc.content
       currentPage.value = 1
       drawerOpen.value = false
+      restoredHint.value = ''
+      chapterCache.set(props.initialDoc.id, { contentRes: props.initialDoc })
       await recomputePagination(false)
       if (seq !== sessionSeq || !props.visible) return
+      prefetchAdjacentChapters(currentChapterIndex.value)
       await restoreProgressForDoc(props.initialDoc.id, seq)
     } else {
       await flushPendingSave()
@@ -351,6 +471,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleReaderKeydown)
   window.removeEventListener('resize', handleResize)
   if (resizeTimer) clearTimeout(resizeTimer)
+  chapterCache.clear()
+  prefetchPromises.clear()
   void flushPendingSave()
 })
 </script>
@@ -422,10 +544,13 @@ onBeforeUnmount(() => {
         <!-- Paginated Page Card -->
         <main v-loading="loadingChapter" class="novel-page-stage">
           <div ref="pageViewportRef" class="novel-page-card">
-            <div
-              class="novel-page-text"
-              :style="{ fontSize: `${fontSize}px` }"
-            >{{ currentPageText }}</div>
+            <Transition name="novel-page-fade" mode="out-in">
+              <div
+                :key="`${currentDocId}-${currentPage}`"
+                class="novel-page-text"
+                :style="{ fontSize: `${fontSize}px` }"
+              >{{ currentPageText }}</div>
+            </Transition>
           </div>
 
           <!-- Hidden measurement box for exact line-safe pagination -->
@@ -687,6 +812,16 @@ onBeforeUnmount(() => {
   white-space: pre-wrap;
   word-break: break-word;
   letter-spacing: 0.02em;
+}
+
+.novel-page-fade-enter-active,
+.novel-page-fade-leave-active {
+  transition: opacity 0.12s ease;
+}
+
+.novel-page-fade-enter-from,
+.novel-page-fade-leave-to {
+  opacity: 0;
 }
 
 .novel-measure-box {

@@ -266,6 +266,7 @@ const movingNode = ref(false)
 const novelReaderOpen = ref(false)
 const novelChapters = ref<KbDocument[]>([])
 const loadingNovelChapters = ref(false)
+const pendingNovelSyncDoc = ref<KbDocument | null>(null)
 
 const isPreviewTxt = computed(() =>
   Boolean(previewDoc.value && isTxtFile(previewDoc.value.file_name))
@@ -1875,6 +1876,7 @@ async function copyPreviewText() {
 
 async function openNovelReader() {
   if (!selectedKbId.value || !previewDoc.value) return
+  pendingNovelSyncDoc.value = null
   const cleanFolder = (previewDoc.value.folder_path || '').replace(/^\/+|\/+$/g, '')
   loadingNovelChapters.value = true
   try {
@@ -1905,8 +1907,29 @@ async function openNovelReader() {
 }
 
 function handleNovelChapterChanged(doc: KbDocument) {
-  void openFileDoc(doc)
+  pendingNovelSyncDoc.value = doc
+  selectedFileNode.value = {
+    key: `file-${doc.id}`,
+    label: doc.file_name,
+    isFolder: false,
+    isLeaf: true,
+    folderPath: doc.folder_path || '',
+    fileSize: doc.file_size,
+    doc,
+    children: []
+  }
+  kbTreeRef.value?.setCurrentKey(`file-${doc.id}`)
 }
+
+watch(novelReaderOpen, (isOpen) => {
+  if (!isOpen && pendingNovelSyncDoc.value) {
+    const targetDoc = pendingNovelSyncDoc.value
+    pendingNovelSyncDoc.value = null
+    if (targetDoc.id !== previewDoc.value?.id) {
+      void openFileDoc(targetDoc)
+    }
+  }
+})
 
 function handleKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape' && contextMenu.visible) {
