@@ -137,3 +137,45 @@ func (h *KBInteractionHandler) DeleteComment(c echo.Context) error {
 	}
 	return response.Success(c, map[string]interface{}{"ok": true})
 }
+
+func (h *KBInteractionHandler) GetReadingProgress(c echo.Context) error {
+	kbID, ok := parseUintParam(c, "id")
+	if !ok {
+		return nil
+	}
+	docID, ok := parseUintParam(c, "docId")
+	if !ok {
+		return nil
+	}
+	userID := middleware.GetUserID(c)
+	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
+	refDomainID := parseOptionalUintQuery(c, "ref_domain_id")
+	res, err := h.interactionSvc.GetReadingProgress(userID, isSuperAdmin, kbID, docID, refDomainID)
+	if err != nil {
+		return service.HandleError(c, err)
+	}
+	return response.Success(c, res)
+}
+
+func (h *KBInteractionHandler) SaveReadingProgress(c echo.Context) error {
+	kbID, ok := parseUintParam(c, "id")
+	if !ok {
+		return nil
+	}
+	docID, ok := parseUintParam(c, "docId")
+	if !ok {
+		return nil
+	}
+	var req model.UpdateReadingProgressRequest
+	if !bindAndValidate(c, &req) {
+		return nil
+	}
+	userID := middleware.GetUserID(c)
+	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
+	refDomainID := parseOptionalUintQuery(c, "ref_domain_id")
+	res, err := h.interactionSvc.SaveReadingProgress(userID, isSuperAdmin, kbID, docID, refDomainID, req)
+	if err != nil {
+		return service.HandleError(c, err)
+	}
+	return response.Success(c, res)
+}

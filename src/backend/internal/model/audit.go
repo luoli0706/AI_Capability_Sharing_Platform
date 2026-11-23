@@ -18,6 +18,7 @@ const (
 	AuditActionKBFileUpload   = "kb.file_upload"
 	AuditActionKBFileMove     = "kb.file_move"
 	AuditActionKBFileCopy     = "kb.file_copy"
+	AuditActionKBFileRename   = "kb.file_rename"
 	AuditActionKBFileDelete   = "kb.file_delete"
 
 	AuditActionDomainCreate       = "domain.create"

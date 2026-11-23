@@ -674,3 +674,9 @@ export interface KbCommentItem {
   created_at: string
 }
 
+export interface KbReadingProgress {
+  current_page: number
+  total_pages: number
+  updated_at: string | null
+}
+

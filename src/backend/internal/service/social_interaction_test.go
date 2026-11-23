@@ -237,13 +237,14 @@ func (m *mockMessageRepo) ListContacts(userID uint64) ([]model.ContactUserItem, 
 }
 
 type mockKBInteractionRepo struct {
-	nextID    uint64
-	likes     []model.KBDocumentLike
-	favorites []model.KBDocumentFavorite
-	comments  []model.KBDocumentComment
-	docs      map[uint64]model.KBDocument
-	assets    map[uint64]model.AIAsset
-	domains   map[uint64]model.BizDomain
+	nextID           uint64
+	likes            []model.KBDocumentLike
+	favorites        []model.KBDocumentFavorite
+	comments         []model.KBDocumentComment
+	readingProgress  []model.KBReadingProgress
+	docs             map[uint64]model.KBDocument
+	assets           map[uint64]model.AIAsset
+	domains          map[uint64]model.BizDomain
 }
 
 func newMockKBInteractionRepo() *mockKBInteractionRepo {
@@ -400,6 +401,43 @@ func (m *mockKBInteractionRepo) DeleteComment(commentID uint64) error {
 	return nil
 }
 
+func (m *mockKBInteractionRepo) GetReadingProgress(docID, userID uint64) (*model.KBReadingProgress, error) {
+	for _, rp := range m.readingProgress {
+		if rp.DocID == docID && rp.UserID == userID {
+			cp := rp
+			return &cp, nil
+		}
+	}
+	return nil, gorm.ErrRecordNotFound
+}
+
+func (m *mockKBInteractionRepo) UpsertReadingProgress(kbAssetID, docID, userID uint64, currentPage, totalPages int) (*model.KBReadingProgress, error) {
+	now := time.Now()
+	for i := range m.readingProgress {
+		if m.readingProgress[i].DocID == docID && m.readingProgress[i].UserID == userID {
+			m.readingProgress[i].KBAssetID = kbAssetID
+			m.readingProgress[i].CurrentPage = currentPage
+			m.readingProgress[i].TotalPages = totalPages
+			m.readingProgress[i].UpdatedAt = now
+			cp := m.readingProgress[i]
+			return &cp, nil
+		}
+	}
+	rec := model.KBReadingProgress{
+		ID:          m.nextID,
+		KBAssetID:   kbAssetID,
+		DocID:       docID,
+		UserID:      userID,
+		CurrentPage: currentPage,
+		TotalPages:  totalPages,
+		UpdatedAt:   now,
+	}
+	m.nextID++
+	m.readingProgress = append(m.readingProgress, rec)
+	cp := rec
+	return &cp, nil
+}
+
 func (m *mockKBInteractionRepo) DeleteByDocIDs(docIDs []uint64) error {
 	set := make(map[uint64]bool, len(docIDs))
 	for _, id := range docIDs {
@@ -428,6 +466,14 @@ func (m *mockKBInteractionRepo) DeleteByDocIDs(docIDs []uint64) error {
 		}
 	}
 	m.comments = comments
+
+	var progress []model.KBReadingProgress
+	for _, rp := range m.readingProgress {
+		if !set[rp.DocID] {
+			progress = append(progress, rp)
+		}
+	}
+	m.readingProgress = progress
 	return nil
 }
 
@@ -1090,5 +1136,102 @@ func TestAssetService_CheckAssetAccess(t *testing.T) {
 	res, err = assetSvc.CheckAssetAccess(1, false, 60, 9999, 0)
 	if err != nil || res.Accessible || res.Reason != "文档不存在或已被删除" {
 		t.Fatalf("expected accessible=false for missing doc, got %+v err=%v", res, err)
+	}
+}
+
+func TestKBReadingProgress_PerUserAndCrossRef(t *testing.T) {
+	kbRepo := newMockFileKBRepo()
+	kbRepo.docs[100] = &model.KBDocument{
+		ID:        100,
+		KBAssetID: 20,
+		FileName:  "novel.txt",
+		FileExt:   ".txt",
+		IsFolder:  false,
+	}
+	kbRepo.docs[200] = &model.KBDocument{
+		ID:         200,
+		KBAssetID:  20,
+		FileName:   "chapters",
+		FolderPath: "chapters",
+		IsFolder:   true,
+	}
+
+	assetRepo := &mockP1AssetRepo{
+		assets: map[uint64]*model.AIAsset{
+			20: {ID: 20, Name: "Novel KB", AssetType: model.AssetTypeKB, DomainID: 10, OwnerID: 1, Visibility: model.VisibilityDomain, Status: model.AssetStatusPublished},
+		},
+	}
+	domainRepo := &mockP1DomainRepo{
+		members: map[uint64]map[uint64]string{
+			10: {1: model.DomainRoleOwner, 2: model.DomainRoleMember},
+			11: {3: model.DomainRoleMember},
+		},
+	}
+	crossRefRepo := newMockCrossRefRepo(nil)
+	crossRefRepo.refs[1] = &model.DomainCrossRef{
+		ID:             1,
+		TargetDomainID: 11,
+		SourceDomainID: 10,
+		RefType:        model.CrossRefTypeKBFile,
+		SourceAssetID:  20,
+		SourceDocID:    100,
+		Status:         model.CrossRefStatusActive,
+	}
+	interRepo := newMockKBInteractionRepo()
+	interSvc := NewKBInteractionService(interRepo, kbRepo, assetRepo, domainRepo, nil, nil, nil)
+	interSvc.SetCrossRefRepo(crossRefRepo)
+
+	// 1. Default reading progress when not yet saved
+	rp, err := interSvc.GetReadingProgress(2, false, 20, 100, 0)
+	if err != nil {
+		t.Fatalf("GetReadingProgress default failed: %v", err)
+	}
+	if rp.CurrentPage != 1 || rp.TotalPages != 0 || rp.UpdatedAt != nil {
+		t.Fatalf("unexpected default reading progress: %+v", rp)
+	}
+
+	// 2. Save reading progress for user 2 (clamps current_page > total_pages)
+	saved, err := interSvc.SaveReadingProgress(2, false, 20, 100, 0, model.UpdateReadingProgressRequest{
+		CurrentPage: 15,
+		TotalPages:  10,
+	})
+	if err != nil {
+		t.Fatalf("SaveReadingProgress failed: %v", err)
+	}
+	if saved.CurrentPage != 10 || saved.TotalPages != 10 || saved.UpdatedAt == nil {
+		t.Fatalf("unexpected saved reading progress: %+v", saved)
+	}
+
+	// 3. Isolated per user: user 1 still sees default
+	rpUser1, err := interSvc.GetReadingProgress(1, false, 20, 100, 0)
+	if err != nil {
+		t.Fatalf("GetReadingProgress user 1 failed: %v", err)
+	}
+	if rpUser1.CurrentPage != 1 || rpUser1.TotalPages != 0 {
+		t.Fatalf("expected user 1 isolated progress, got %+v", rpUser1)
+	}
+
+	// 4. Cross-ref read-only user 3 can save & fetch with ref_domain_id=11, but fails without ref_domain_id
+	if _, err := interSvc.GetReadingProgress(3, false, 20, 100, 0); err == nil {
+		t.Fatal("expected forbidden for user 3 without ref_domain_id")
+	} else {
+		assertAppErrStatus(t, err, http.StatusForbidden)
+	}
+	if _, err := interSvc.SaveReadingProgress(3, false, 20, 100, 11, model.UpdateReadingProgressRequest{
+		CurrentPage: 4,
+		TotalPages:  10,
+	}); err != nil {
+		t.Fatalf("expected cross-ref SaveReadingProgress to succeed: %v", err)
+	}
+	rpUser3, err := interSvc.GetReadingProgress(3, false, 20, 100, 11)
+	if err != nil || rpUser3.CurrentPage != 4 || rpUser3.TotalPages != 10 {
+		t.Fatalf("unexpected cross-ref GetReadingProgress: %+v err=%v", rpUser3, err)
+	}
+
+	// 5. Folder is rejected
+	if _, err := interSvc.GetReadingProgress(2, false, 20, 200, 0); err == nil {
+		t.Fatal("expected bad request on folder reading progress")
+	} else {
+		assertAppErrStatus(t, err, http.StatusBadRequest)
 	}
 }

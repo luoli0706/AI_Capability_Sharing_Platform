@@ -87,6 +87,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&model.KBDocumentLike{},
 		&model.KBDocumentFavorite{},
 		&model.KBDocumentComment{},
+		&model.KBReadingProgress{},
 		&model.AssetPermission{},
 		&model.ApprovalRequest{},
 		&model.ApprovalRecord{},

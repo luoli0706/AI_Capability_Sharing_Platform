@@ -215,6 +215,10 @@ type CopyKBDocumentRequest struct {
 	NewName          string `json:"new_name" validate:"max=255"`
 }
 
+type RenameKBDocumentRequest struct {
+	NewName string `json:"new_name" validate:"required,max=255"`
+}
+
 type CreateKBFileRequest struct {
 	FolderPath string `json:"folder_path" validate:"max=512"`
 	FileName   string `json:"file_name" validate:"required,max=255"`

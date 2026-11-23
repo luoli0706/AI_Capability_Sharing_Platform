@@ -351,3 +351,27 @@ func (h *KBHandler) CopyDocument(c echo.Context) error {
 	}
 	return response.Success(c, doc)
 }
+
+func (h *KBHandler) RenameDocument(c echo.Context) error {
+	kbID, ok := parseUintParam(c, "id")
+	if !ok {
+		return nil
+	}
+	docID, ok := parseUintParam(c, "docId")
+	if !ok {
+		return nil
+	}
+
+	var req model.RenameKBDocumentRequest
+	if !bindAndValidate(c, &req) {
+		return nil
+	}
+
+	userID := middleware.GetUserID(c)
+	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
+	doc, err := h.kbSvc.RenameDocument(userID, isSuperAdmin, kbID, docID, req.NewName)
+	if err != nil {
+		return service.HandleError(c, err)
+	}
+	return response.Success(c, doc)
+}

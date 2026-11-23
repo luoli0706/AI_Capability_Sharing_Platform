@@ -88,3 +88,31 @@ type KBCommentItem struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
+
+// KBReadingProgress records a user's reading progress on a KB document.
+type KBReadingProgress struct {
+	ID          uint64    `gorm:"primaryKey;autoIncrement" json:"id"`
+	KBAssetID   uint64    `gorm:"index;not null" json:"kb_asset_id"`
+	DocID       uint64    `gorm:"uniqueIndex:idx_kb_reading_progress_user_doc;not null" json:"doc_id"`
+	UserID      uint64    `gorm:"uniqueIndex:idx_kb_reading_progress_user_doc;not null" json:"user_id"`
+	CurrentPage int       `gorm:"not null;default:1" json:"current_page"`
+	TotalPages  int       `gorm:"not null;default:1" json:"total_pages"`
+	UpdatedAt   time.Time `gorm:"autoUpdateTime" json:"updated_at"`
+}
+
+func (KBReadingProgress) TableName() string {
+	return "kb_reading_progress"
+}
+
+// UpdateReadingProgressRequest represents PUT /kb/:id/documents/:docId/reading-progress payload.
+type UpdateReadingProgressRequest struct {
+	CurrentPage int `json:"current_page" validate:"required,gte=1"`
+	TotalPages  int `json:"total_pages" validate:"required,gte=1"`
+}
+
+// ReadingProgressResponse represents GET/PUT /kb/:id/documents/:docId/reading-progress response.
+type ReadingProgressResponse struct {
+	CurrentPage int        `json:"current_page"`
+	TotalPages  int        `json:"total_pages"`
+	UpdatedAt   *time.Time `json:"updated_at"`
+}

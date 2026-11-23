@@ -7,6 +7,7 @@ import type {
   KbDocument,
   KbDocumentInteractions,
   KbDownloadPreview,
+  KbReadingProgress,
   PaginatedData,
   UserBrief
 } from '@/types/api'
@@ -280,4 +281,38 @@ export function deleteDocumentComment(
   return apiDelete<null>(`/kb/${kbAssetId}/documents/${docId}/comments/${commentId}`, {
     params: withRefDomainId(undefined, refDomainId)
   })
+}
+
+export function renameDocument(
+  kbAssetId: number,
+  docId: number,
+  newName: string
+): Promise<KbDocument> {
+  return apiPut<KbDocument, { new_name: string }>(
+    `/kb/${kbAssetId}/documents/${docId}/rename`,
+    { new_name: newName }
+  )
+}
+
+export function getReadingProgress(
+  kbAssetId: number,
+  docId: number,
+  refDomainId?: number
+): Promise<KbReadingProgress> {
+  return apiGet<KbReadingProgress>(`/kb/${kbAssetId}/documents/${docId}/reading-progress`, {
+    params: withRefDomainId(undefined, refDomainId)
+  })
+}
+
+export function saveReadingProgress(
+  kbAssetId: number,
+  docId: number,
+  data: { current_page: number; total_pages: number },
+  refDomainId?: number
+): Promise<KbReadingProgress> {
+  return apiPut<KbReadingProgress, { current_page: number; total_pages: number }>(
+    `/kb/${kbAssetId}/documents/${docId}/reading-progress`,
+    data,
+    { params: withRefDomainId(undefined, refDomainId) }
+  )
 }

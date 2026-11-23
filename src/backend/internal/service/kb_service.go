@@ -91,6 +91,7 @@ type KBService interface {
 	DownloadKB(userID uint64, isSuperAdmin bool, kbID uint64, scope string, docID uint64, folderPath string, refDomainID uint64) (filename, contentType string, data []byte, err error)
 	MoveDocument(userID uint64, isSuperAdmin bool, kbID, docID uint64, targetFolderPath string) (*model.KBDocument, error)
 	CopyDocument(userID uint64, isSuperAdmin bool, kbID, docID uint64, targetFolderPath, newName string) (*model.KBDocument, error)
+	RenameDocument(userID uint64, isSuperAdmin bool, kbID, docID uint64, newName string) (*model.KBDocument, error)
 	EncryptExistingPlainFiles(ctx context.Context) (int, error)
 	SetAuditRepos(auditRepo repository.AuditLogRepository, userRepo repository.UserRepository)
 	SetCrossRefRepo(crossRefRepo repository.CrossRefRepository)
@@ -861,6 +862,96 @@ func (s *kbService) MoveDocument(userID uint64, isSuperAdmin bool, kbID, docID u
 		recordAudit(s.auditRepo, s.userRepo, userID, detail.DomainID, detail.DomainName, detail.ID, detail.AssetCode, detail.Name, detail.AssetType, model.AuditActionKBFileMove, newPath, fmt.Sprintf("移动 %s -> %s", oldPath, newPath))
 	}
 
+	return doc, nil
+}
+
+func validateRenameTarget(raw string) (string, error) {
+	name := strings.TrimSpace(raw)
+	if name == "" || name == "." || name == ".." {
+		return "", NewBadRequest("invalid new_name")
+	}
+	if strings.ContainsAny(name, "/\\") {
+		return "", NewBadRequest("new_name cannot contain path separators")
+	}
+	if len(name) > 255 {
+		return "", NewBadRequest("new_name exceeds 255 characters")
+	}
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return "", NewBadRequest("new_name cannot contain control characters")
+		}
+	}
+	return name, nil
+}
+
+func (s *kbService) RenameDocument(userID uint64, isSuperAdmin bool, kbID, docID uint64, newName string) (*model.KBDocument, error) {
+	detail, err := s.ensureKBEditPermission(userID, isSuperAdmin, kbID)
+	if err != nil {
+		return nil, err
+	}
+	trimmed, err := validateRenameTarget(newName)
+	if err != nil {
+		return nil, err
+	}
+	doc, err := s.kbRepo.FindDocumentByID(kbID, docID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, NewNotFound("document not found")
+		}
+		return nil, err
+	}
+
+	if !doc.IsFolder {
+		if trimmed == doc.FileName {
+			return doc, nil
+		}
+		exists, err := s.kbRepo.FileExistsInFolder(kbID, doc.FolderPath, trimmed, doc.ID)
+		if err != nil {
+			return nil, err
+		}
+		if exists {
+			return nil, NewConflict("a file with the same name already exists in this folder")
+		}
+		newExt := strings.ToLower(filepath.Ext(trimmed))
+		if err := s.kbRepo.RenameFile(kbID, doc.ID, trimmed, newExt); err != nil {
+			return nil, err
+		}
+		oldRelPath := relativeDocPath(*doc)
+		doc.FileName = trimmed
+		doc.FileExt = newExt
+		newRelPath := relativeDocPath(*doc)
+		recordAudit(s.auditRepo, s.userRepo, userID, detail.DomainID, detail.DomainName, detail.ID, detail.AssetCode, detail.Name, detail.AssetType, model.AuditActionKBFileRename, newRelPath, fmt.Sprintf("重命名 %s -> %s", oldRelPath, newRelPath))
+		return doc, nil
+	}
+
+	oldPath := strings.Trim(doc.FolderPath, "/")
+	if oldPath == "" {
+		oldPath = doc.FileName
+	}
+	parentPath := ""
+	if idx := strings.LastIndex(oldPath, "/"); idx >= 0 {
+		parentPath = oldPath[:idx]
+	}
+	newPath := trimmed
+	if parentPath != "" {
+		newPath = parentPath + "/" + trimmed
+	}
+	if newPath == oldPath {
+		return doc, nil
+	}
+	exists, err := s.kbRepo.FolderExists(kbID, newPath, doc.ID)
+	if err != nil {
+		return nil, err
+	}
+	if exists {
+		return nil, NewConflict("a folder with the same name already exists")
+	}
+	if err := s.kbRepo.RenameFolder(kbID, doc.ID, oldPath, trimmed, newPath); err != nil {
+		return nil, err
+	}
+	doc.FileName = trimmed
+	doc.FolderPath = newPath
+	recordAudit(s.auditRepo, s.userRepo, userID, detail.DomainID, detail.DomainName, detail.ID, detail.AssetCode, detail.Name, detail.AssetType, model.AuditActionKBFileRename, newPath, fmt.Sprintf("重命名目录 %s -> %s", oldPath, newPath))
 	return doc, nil
 }
 

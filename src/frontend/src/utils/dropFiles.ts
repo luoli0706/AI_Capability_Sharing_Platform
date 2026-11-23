@@ -102,7 +102,8 @@ export async function extractFilesFromDrop(e: DragEvent): Promise<File[]> {
   if (!dt) return []
 
   const items = dt.items ? Array.from(dt.items) : []
-  // 必须在任何 await 之前同步收集 webkitGetAsEntry 与 fallback File
+  // 必须在任何 await 之前同步收集 webkitGetAsEntry、dt.files 与 fallback File
+  const dtFilesSnapshot = dt.files ? Array.from(dt.files) : []
   const entries: DropEntry[] = []
   const fallbackFiles: File[] = []
 
@@ -121,11 +122,14 @@ export async function extractFilesFromDrop(e: DragEvent): Promise<File[]> {
 
   if (entries.length > 0) {
     const traversed = await Promise.all(entries.map((entry) => traverseEntry(entry, '')))
-    return [...traversed.flat(), ...fallbackFiles]
+    const entryFiles = [...traversed.flat(), ...fallbackFiles]
+    if (entryFiles.length > 0) {
+      return entryFiles
+    }
   }
 
-  if (dt.files && dt.files.length > 0) {
-    return Array.from(dt.files).map((f) =>
+  if (dtFilesSnapshot.length > 0) {
+    return dtFilesSnapshot.map((f) =>
       attachRelativePath(f, (f as Partial<FileWithRelativePath>).webkitRelativePath || f.name)
     )
   }

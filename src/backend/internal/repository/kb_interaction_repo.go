@@ -20,6 +20,8 @@ type KBInteractionRepository interface {
 	CreateComment(comment *model.KBDocumentComment) error
 	FindCommentByID(kbAssetID, docID, commentID uint64) (*model.KBDocumentComment, error)
 	DeleteComment(commentID uint64) error
+	GetReadingProgress(docID, userID uint64) (*model.KBReadingProgress, error)
+	UpsertReadingProgress(kbAssetID, docID, userID uint64, currentPage, totalPages int) (*model.KBReadingProgress, error)
 	DeleteByDocIDs(docIDs []uint64) error
 }
 
@@ -174,6 +176,31 @@ func (r *kbInteractionRepository) DeleteComment(commentID uint64) error {
 	return r.db.Delete(&model.KBDocumentComment{}, commentID).Error
 }
 
+func (r *kbInteractionRepository) GetReadingProgress(docID, userID uint64) (*model.KBReadingProgress, error) {
+	var rec model.KBReadingProgress
+	if err := r.db.Where("doc_id = ? AND user_id = ?", docID, userID).First(&rec).Error; err != nil {
+		return nil, err
+	}
+	return &rec, nil
+}
+
+func (r *kbInteractionRepository) UpsertReadingProgress(kbAssetID, docID, userID uint64, currentPage, totalPages int) (*model.KBReadingProgress, error) {
+	rec := model.KBReadingProgress{
+		KBAssetID:   kbAssetID,
+		DocID:       docID,
+		UserID:      userID,
+		CurrentPage: currentPage,
+		TotalPages:  totalPages,
+	}
+	if err := r.db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "doc_id"}, {Name: "user_id"}},
+		DoUpdates: clause.AssignmentColumns([]string{"kb_asset_id", "current_page", "total_pages", "updated_at"}),
+	}).Create(&rec).Error; err != nil {
+		return nil, err
+	}
+	return r.GetReadingProgress(docID, userID)
+}
+
 func (r *kbInteractionRepository) DeleteByDocIDs(docIDs []uint64) error {
 	if len(docIDs) == 0 {
 		return nil
@@ -183,6 +210,9 @@ func (r *kbInteractionRepository) DeleteByDocIDs(docIDs []uint64) error {
 			return err
 		}
 		if err := tx.Where("doc_id IN ?", docIDs).Delete(&model.KBDocumentFavorite{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("doc_id IN ?", docIDs).Delete(&model.KBReadingProgress{}).Error; err != nil {
 			return err
 		}
 		return tx.Where("doc_id IN ?", docIDs).Delete(&model.KBDocumentComment{}).Error

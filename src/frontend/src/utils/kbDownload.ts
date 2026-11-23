@@ -13,6 +13,10 @@ export function isMarkdownFile(fileName: string): boolean {
   return /\.(md|markdown)$/i.test(fileName)
 }
 
+export function isTxtFile(fileName: string): boolean {
+  return /\.txt$/i.test(fileName)
+}
+
 export function isTextFile(fileName: string): boolean {
   return (
     isMarkdownFile(fileName) ||

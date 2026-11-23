@@ -14,13 +14,16 @@ import {
   DocumentAdd,
   DocumentCopy,
   Download,
+  EditPen,
   Folder,
   FolderAdd,
   FolderOpened,
+  Notebook,
   Picture,
   Pointer,
   Refresh,
   RefreshRight,
+  Right,
   Search,
   Share,
   Star,
@@ -34,6 +37,7 @@ import { getAssets } from '@/api/asset'
 import { getDomainCrossRefs } from '@/api/crossRef'
 import { getMyFavorites } from '@/api/user'
 import CrossRefSection from '@/components/CrossRefSection.vue'
+import NovelReaderModal from '@/components/NovelReaderModal.vue'
 import ShareAssetDialog from '@/components/ShareAssetDialog.vue'
 import { extractFilesFromDrop, getFileRelativePath, isFileDragEvent } from '@/utils/dropFiles'
 import {
@@ -49,6 +53,7 @@ import {
   getDocuments,
   listDocumentComments,
   moveDocument,
+  renameDocument,
   searchKB,
   toggleDocumentFavorite,
   toggleDocumentLike,
@@ -79,6 +84,7 @@ import {
   isImageFile,
   isMarkdownFile,
   isTextFile,
+  isTxtFile,
   MAX_KB_FILE_SIZE,
   type KbTreeNode
 } from '@/utils/kbDownload'
@@ -228,6 +234,40 @@ const previewMode = ref<'rendered' | 'edit' | 'split' | 'raw'>('rendered')
 const editFileName = ref('')
 const editContent = ref('')
 const savingEdit = ref(false)
+
+// Tree Context Menu & Move Modal
+const contextMenu = reactive<{
+  visible: boolean
+  x: number
+  y: number
+  node: KbTreeNode | null
+}>({
+  visible: false,
+  x: 0,
+  y: 0,
+  node: null
+})
+const moveDialogOpen = ref(false)
+const moveTargetNode = ref<KbTreeNode | null>(null)
+const moveTargetPath = ref('')
+const movingNode = ref(false)
+
+// Novel Reading Mode (.txt only)
+const novelReaderOpen = ref(false)
+const novelChapters = ref<KbDocument[]>([])
+const loadingNovelChapters = ref(false)
+
+const isPreviewTxt = computed(() =>
+  Boolean(previewDoc.value && isTxtFile(previewDoc.value.file_name))
+)
+const txtStats = computed(() => {
+  const content = previewDoc.value?.content || ''
+  if (!content) return { chars: 0, lines: 0 }
+  return {
+    chars: content.length,
+    lines: content.split(/\r?\n/).length
+  }
+})
 
 const imagePreviewUrl = computed(() =>
   imageDoc.value ? imageUrlMap.value[imageDoc.value.id] || '' : ''
@@ -754,6 +794,10 @@ async function uploadFileList(files: File[], preserveRelativePath = false) {
 
   uploading.value = true
   let uploadedCount = 0
+  let failedCount = 0
+  const baseFolder = (selectedFolderPath.value || '').replace(/^\/+|\/+$/g, '')
+  const affectedFolders = new Set<string>([baseFolder])
+
   try {
     for (const file of files) {
       if (file.size > MAX_KB_FILE_SIZE) {
@@ -762,20 +806,33 @@ async function uploadFileList(files: File[], preserveRelativePath = false) {
       }
       const relPath = getFileRelativePath(file)
       const useRelPath = preserveRelativePath || relPath.includes('/')
-      await uploadDocument(
-        selectedKbId.value,
-        file,
-        selectedFolderPath.value || undefined,
-        useRelPath ? relPath : undefined
-      )
-      uploadedCount++
+      try {
+        const created = await uploadDocument(
+          selectedKbId.value,
+          file,
+          baseFolder || undefined,
+          useRelPath ? relPath : undefined
+        )
+        uploadedCount++
+        if (created?.folder_path !== undefined) {
+          affectedFolders.add((created.folder_path || '').replace(/^\/+|\/+$/g, ''))
+        }
+      } catch {
+        failedCount++
+      }
     }
-    if (uploadedCount > 0) {
+
+    if (uploadedCount > 0 && failedCount === 0) {
       ElMessage.success(`成功上传 ${uploadedCount} 个文件`)
-      await refreshFolderInPlace(selectedFolderPath.value || '')
+    } else if (uploadedCount > 0 && failedCount > 0) {
+      ElMessage.warning(`成功上传 ${uploadedCount} 个文件，${failedCount} 个失败`)
+    } else if (failedCount > 0) {
+      ElMessage.error(`${failedCount} 个文件上传失败`)
     }
-  } catch {
-    // Handled by interceptor
+
+    if (uploadedCount > 0) {
+      await refreshAfterMutation(Array.from(affectedFolders))
+    }
   } finally {
     uploading.value = false
   }
@@ -795,28 +852,47 @@ async function handleFolderSelected(event: Event) {
   await uploadFileList(files, true)
 }
 
+function resetKbDragDepth() {
+  kbDragDepth.value = 0
+}
+
 function handleKbDragEnter(e: DragEvent) {
-  if (isReadOnlyKb.value || !isFileDragEvent(e) || !selectedKbId.value) return
+  if (!isFileDragEvent(e)) return
   e.preventDefault()
+  e.stopPropagation()
+  if (isReadOnlyKb.value || !selectedKbId.value) return
   kbDragDepth.value++
 }
 
 function handleKbDragOver(e: DragEvent) {
-  if (isReadOnlyKb.value || !isFileDragEvent(e) || !selectedKbId.value) return
+  if (!isFileDragEvent(e)) return
   e.preventDefault()
+  e.stopPropagation()
+  if (isReadOnlyKb.value || !selectedKbId.value) {
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'none'
+    return
+  }
   if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
 }
 
 function handleKbDragLeave(e: DragEvent) {
-  if (isReadOnlyKb.value || !isFileDragEvent(e)) return
+  if (!isFileDragEvent(e)) return
+  e.stopPropagation()
+  const currentTarget = e.currentTarget as HTMLElement | null
+  const related = e.relatedTarget as Node | null
+  if (related === null || (currentTarget && !currentTarget.contains(related))) {
+    kbDragDepth.value = 0
+    return
+  }
   kbDragDepth.value = Math.max(0, kbDragDepth.value - 1)
 }
 
 async function handleKbDrop(e: DragEvent) {
-  if (isReadOnlyKb.value || !isFileDragEvent(e)) return
+  if (!isFileDragEvent(e)) return
   e.preventDefault()
+  e.stopPropagation()
   kbDragDepth.value = 0
-  if (!selectedKbId.value) return
+  if (isReadOnlyKb.value || !selectedKbId.value) return
   const files = await extractFilesFromDrop(e)
   if (files.length === 0) return
   await uploadFileList(files, false)
@@ -1504,7 +1580,198 @@ async function handlePaste(targetFolder?: string) {
   }
 }
 
+function closeContextMenu() {
+  contextMenu.visible = false
+  contextMenu.node = null
+}
+
+function handleNodeContextMenu(e: MouseEvent, data: KbTreeNode) {
+  e.preventDefault()
+  e.stopPropagation()
+  const menuW = 200
+  const menuH = data.isFolder ? 330 : 280
+  const x = Math.max(8, Math.min(e.clientX, window.innerWidth - menuW - 8))
+  const y = Math.max(8, Math.min(e.clientY, window.innerHeight - menuH - 8))
+  contextMenu.x = x
+  contextMenu.y = y
+  contextMenu.node = data
+  contextMenu.visible = true
+}
+
+function isContextFolderExpanded(node: KbTreeNode | null): boolean {
+  if (!node || !node.isFolder) return false
+  return Boolean(kbTreeRef.value?.getNode(node.key)?.expanded)
+}
+
+function toggleFolderExpanded(node: KbTreeNode) {
+  const treeNode = kbTreeRef.value?.getNode(node.key)
+  if (!treeNode) return
+  if (treeNode.expanded) {
+    treeNode.collapse()
+    handleNodeCollapse(node)
+  } else {
+    treeNode.expand(undefined, true)
+    handleNodeExpand(node)
+  }
+}
+
+async function handleRenameNode(node: KbTreeNode) {
+  if (!selectedKbId.value || !node.doc || isReadOnlyKb.value) return
+  try {
+    const { value } = await ElMessageBox.prompt('请输入新的名称', '重命名', {
+      confirmButtonText: '确认',
+      cancelButtonText: '取消',
+      inputValue: node.label,
+      inputValidator: (val) => {
+        const trimmed = (val || '').trim()
+        if (!trimmed) return '名称不能为空'
+        if (trimmed.includes('/') || trimmed.includes('\\')) {
+          return '名称不能包含 / 或 \\'
+        }
+        return true
+      }
+    })
+    const newName = value.trim()
+    if (newName === node.label) return
+
+    const renamed = await renameDocument(selectedKbId.value, node.doc.id, newName)
+    ElMessage.success(`已重命名为「${renamed.file_name}」`)
+
+    if (node.isFolder) {
+      const oldFolder = (node.folderPath || '').replace(/^\/+|\/+$/g, '')
+      const parentFolder = oldFolder.includes('/')
+        ? oldFolder.slice(0, oldFolder.lastIndexOf('/'))
+        : ''
+      const newFolder = (renamed.folder_path || (parentFolder ? `${parentFolder}/${renamed.file_name}` : renamed.file_name)).replace(/^\/+|\/+$/g, '')
+      if (selectedFolderPath.value === oldFolder || selectedFolderPath.value.startsWith(`${oldFolder}/`)) {
+        selectedFolderPath.value = selectedFolderPath.value.replace(oldFolder, newFolder)
+      }
+      if (previewDoc.value && (previewDoc.value.folder_path === oldFolder || previewDoc.value.folder_path.startsWith(`${oldFolder}/`))) {
+        previewDoc.value = {
+          ...previewDoc.value,
+          folder_path: previewDoc.value.folder_path.replace(oldFolder, newFolder)
+        }
+      }
+      await refreshAfterMutation([parentFolder])
+    } else {
+      const parentFolder = (node.doc.folder_path || '').replace(/^\/+|\/+$/g, '')
+      if (previewDoc.value?.id === node.doc.id) {
+        previewDoc.value = {
+          ...previewDoc.value,
+          file_name: renamed.file_name
+        }
+        editFileName.value = renamed.file_name
+      }
+      if (selectedFileNode.value?.doc?.id === node.doc.id) {
+        selectedFileNode.value = {
+          ...selectedFileNode.value,
+          label: renamed.file_name,
+          doc: renamed
+        }
+      }
+      if (imageDoc.value?.id === node.doc.id) {
+        imageDoc.value = renamed
+      }
+      if (binaryDoc.value?.id === node.doc.id) {
+        binaryDoc.value = renamed
+      }
+      await refreshAfterMutation([parentFolder])
+    }
+  } catch {
+    // Cancelled or handled by interceptor
+  }
+}
+
+function openMoveDialog(node: KbTreeNode) {
+  if (node.isFolder || !node.doc || isReadOnlyKb.value) return
+  moveTargetNode.value = node
+  moveTargetPath.value = (node.doc.folder_path || '').replace(/^\/+|\/+$/g, '')
+  moveDialogOpen.value = true
+}
+
+async function handleConfirmMove() {
+  const node = moveTargetNode.value
+  if (!selectedKbId.value || !node?.doc) return
+  const sourceFolderPath = (node.doc.folder_path || '').replace(/^\/+|\/+$/g, '')
+  const targetFolderPath = moveTargetPath.value.trim().replace(/^\/+|\/+$/g, '')
+  movingNode.value = true
+  try {
+    await moveDocument(selectedKbId.value, node.doc.id, targetFolderPath)
+    node.doc.folder_path = targetFolderPath
+    if (selectedFileNode.value?.doc?.id === node.doc.id) {
+      selectedFileNode.value.folderPath = targetFolderPath
+    }
+    if (previewDoc.value?.id === node.doc.id) {
+      previewDoc.value = { ...previewDoc.value, folder_path: targetFolderPath }
+    }
+    ElMessage.success(
+      targetFolderPath
+        ? `已移动「${node.label}」至 ${targetFolderPath}`
+        : `已移动「${node.label}」至根目录`
+    )
+    moveDialogOpen.value = false
+    await refreshAfterMutation([sourceFolderPath, targetFolderPath])
+  } catch {
+    // Handled by interceptor
+  } finally {
+    movingNode.value = false
+  }
+}
+
+async function copyPreviewText() {
+  if (!previewDoc.value) return
+  try {
+    await navigator.clipboard.writeText(previewDoc.value.content || '')
+    ElMessage.success('已复制全文到剪贴板')
+  } catch {
+    ElMessage.warning('复制失败，请手动全选复制')
+  }
+}
+
+async function openNovelReader() {
+  if (!selectedKbId.value || !previewDoc.value) return
+  const cleanFolder = (previewDoc.value.folder_path || '').replace(/^\/+|\/+$/g, '')
+  loadingNovelChapters.value = true
+  try {
+    let folderDocs = folderFilesCache.value[cleanFolder]
+    if (!folderDocs) {
+      const res = await getDocuments(
+        selectedKbId.value,
+        { lazy: true, folder_path: cleanFolder },
+        activeRefDomainId.value
+      )
+      folderDocs = extractImmediateFiles(normalizeList(res).items, cleanFolder)
+      folderFilesCache.value = { ...folderFilesCache.value, [cleanFolder]: folderDocs }
+    }
+    const chapters = folderDocs
+      .filter((d) => !d.is_folder && isTxtFile(d.file_name))
+      .sort((a, b) => a.file_name.localeCompare(b.file_name, 'zh-CN', { numeric: true }))
+    novelChapters.value =
+      chapters.length > 0
+        ? chapters
+        : currentSelectedDoc.value
+          ? [currentSelectedDoc.value]
+          : []
+    novelReaderOpen.value = true
+  } catch {
+    if (currentSelectedDoc.value) {
+      novelChapters.value = [currentSelectedDoc.value]
+      novelReaderOpen.value = true
+    }
+  } finally {
+    loadingNovelChapters.value = false
+  }
+}
+
+function handleNovelChapterChanged(doc: KbDocument) {
+  void openFileDoc(doc)
+}
+
 function handleKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape' && contextMenu.visible) {
+    closeContextMenu()
+    return
+  }
   if (lightboxOpen.value) {
     if (e.key === 'Escape') {
       e.preventDefault()
@@ -1686,12 +1953,18 @@ onMounted(() => {
   fetchKbs()
   void loadMyFavorites()
   window.addEventListener('keydown', handleKeydown)
+  window.addEventListener('click', closeContextMenu)
+  window.addEventListener('scroll', closeContextMenu, true)
+  window.addEventListener('dragend', resetKbDragDepth)
 })
 
 onBeforeUnmount(() => {
   stopPolling()
   revokeAllImageUrls()
   window.removeEventListener('keydown', handleKeydown)
+  window.removeEventListener('click', closeContextMenu)
+  window.removeEventListener('scroll', closeContextMenu, true)
+  window.removeEventListener('dragend', resetKbDragDepth)
   window.removeEventListener('mousemove', handleLightboxMouseMove)
   window.removeEventListener('mouseup', handleLightboxMouseUp)
 })
@@ -1891,23 +2164,24 @@ onUnmounted(() => {
       </div>
 
       <!-- Split Tree + Preview/Search Workspace -->
-      <div class="kb-columns">
-        <!-- Left: Folder & File Tree (supports desktop file/folder drag & drop) -->
-        <div
-          class="surface-card kb-panel tree-panel"
-          :class="{ 'is-file-dragover': kbDragDepth > 0 }"
-          @dragenter="handleKbDragEnter"
-          @dragover="handleKbDragOver"
-          @dragleave="handleKbDragLeave"
-          @drop="handleKbDrop"
-        >
-          <div v-if="kbDragDepth > 0" class="kb-drop-overlay">
-            <el-icon :size="32"><Upload /></el-icon>
-            <div class="kb-drop-title">释放鼠标即可上传文件或文件夹</div>
-            <div class="kb-drop-sub mono-text">
-              目标目录：{{ selectedFolderPath ? `/${selectedFolderPath}` : '/ (根目录)' }}
-            </div>
+      <div
+        class="kb-columns"
+        :class="{ 'is-file-dragover': kbDragDepth > 0 }"
+        @dragenter.capture="handleKbDragEnter"
+        @dragover.capture="handleKbDragOver"
+        @dragleave.capture="handleKbDragLeave"
+        @drop.capture="handleKbDrop"
+      >
+        <div v-if="kbDragDepth > 0" class="kb-drop-overlay">
+          <el-icon :size="36"><Upload /></el-icon>
+          <div class="kb-drop-title">释放鼠标即可上传文件或文件夹</div>
+          <div class="kb-drop-sub mono-text">
+            目标目录：{{ selectedFolderPath ? `/${selectedFolderPath}` : '/ (根目录)' }}
           </div>
+        </div>
+
+        <!-- Left: Folder & File Tree (supports desktop file/folder drag & drop) -->
+        <div class="surface-card kb-panel tree-panel">
 
           <div class="panel-header">
             <h3 class="panel-title">{{ isCrossFilesMode ? '跨域引用文件' : '目录与文件' }}</h3>
@@ -1981,6 +2255,7 @@ onUnmounted(() => {
               :allow-drop="allowDrop"
               :expand-on-click-node="false"
               @node-click="handleNodeClick"
+              @node-contextmenu="handleNodeContextMenu"
               @node-expand="handleNodeExpand"
               @node-collapse="handleNodeCollapse"
               @node-drop="handleNodeDrop"
@@ -2263,6 +2538,34 @@ onUnmounted(() => {
                     </span>
                   </div>
                   <div class="preview-controls">
+                    <el-tag
+                      v-if="isPreviewTxt"
+                      size="small"
+                      type="info"
+                      effect="plain"
+                      class="tabular-nums"
+                    >
+                      {{ txtStats.chars.toLocaleString() }} 字 · {{ txtStats.lines }} 行
+                    </el-tag>
+                    <el-button
+                      v-if="isPreviewTxt"
+                      size="small"
+                      plain
+                      :icon="DocumentCopy"
+                      @click="copyPreviewText"
+                    >
+                      复制全文
+                    </el-button>
+                    <el-button
+                      v-if="isPreviewTxt"
+                      type="primary"
+                      size="small"
+                      :icon="Notebook"
+                      :loading="loadingNovelChapters"
+                      @click="openNovelReader"
+                    >
+                      小说阅读模式
+                    </el-button>
                     <el-radio-group v-model="previewMode" size="small">
                       <el-radio-button value="rendered">渲染预览</el-radio-button>
                       <el-radio-button v-if="!isReadOnlyKb" value="edit">在线编辑</el-radio-button>
@@ -2333,6 +2636,7 @@ onUnmounted(() => {
                   </div>
                   <div class="markdown-body editor-split-preview" v-html="liveRenderedHtml" />
                 </div>
+                <div v-else-if="isPreviewTxt" class="txt-reader-view">{{ previewDoc.content }}</div>
                 <pre v-else class="raw-markdown mono-text">{{ previewDoc.content }}</pre>
               </div>
 
@@ -2559,6 +2863,222 @@ onUnmounted(() => {
         </el-button>
       </template>
     </el-dialog>
+
+    <!-- Move File Dialog -->
+    <el-dialog v-model="moveDialogOpen" title="移动文件" width="420px" destroy-on-close>
+      <el-form label-position="top" @submit.prevent="handleConfirmMove">
+        <el-form-item label="当前文件">
+          <el-input :model-value="moveTargetNode?.label || ''" disabled class="mono-text" />
+        </el-form-item>
+        <el-form-item label="目标文件夹路径（留空表示根目录）">
+          <el-input
+            v-model="moveTargetPath"
+            placeholder="例如：docs/architecture（留空则移至根目录）"
+            class="mono-text"
+            clearable
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="moveDialogOpen = false">取消</el-button>
+        <el-button type="primary" :loading="movingNode" @click="handleConfirmMove">
+          确认移动
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- Tree Floating Context Menu -->
+    <teleport to="body">
+      <div
+        v-if="contextMenu.visible && contextMenu.node"
+        class="kb-context-menu"
+        :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
+        @click.stop
+        @contextmenu.prevent
+      >
+        <!-- File Node Actions -->
+        <template v-if="!contextMenu.node.isFolder && contextMenu.node.doc">
+          <button
+            type="button"
+            class="kb-ctx-item"
+            @click="openFileDoc(contextMenu.node.doc); closeContextMenu()"
+          >
+            <el-icon><Document /></el-icon>
+            <span>打开预览</span>
+          </button>
+          <button
+            type="button"
+            class="kb-ctx-item"
+            @click="handleDownloadFile(contextMenu.node.doc.id, contextMenu.node.doc.file_name); closeContextMenu()"
+          >
+            <el-icon><Download /></el-icon>
+            <span>下载</span>
+          </button>
+          <button
+            type="button"
+            class="kb-ctx-item"
+            @click="handleToggleFolderFavorite(contextMenu.node.doc); closeContextMenu()"
+          >
+            <el-icon>
+              <StarFilled v-if="favoritedDocIds.has(contextMenu.node.doc.id)" />
+              <Star v-else />
+            </el-icon>
+            <span>{{ favoritedDocIds.has(contextMenu.node.doc.id) ? '取消收藏' : '收藏' }}</span>
+          </button>
+          <button
+            type="button"
+            class="kb-ctx-item"
+            @click="openShareDialogForNode(contextMenu.node); closeContextMenu()"
+          >
+            <el-icon><Share /></el-icon>
+            <span>分享</span>
+          </button>
+
+          <template v-if="!isReadOnlyKb">
+            <div class="kb-ctx-divider" />
+            <button
+              type="button"
+              class="kb-ctx-item"
+              @click="setClipboard(contextMenu.node); closeContextMenu()"
+            >
+              <el-icon><CopyDocument /></el-icon>
+              <span>复制</span>
+            </button>
+            <button
+              type="button"
+              class="kb-ctx-item"
+              @click="openMoveDialog(contextMenu.node); closeContextMenu()"
+            >
+              <el-icon><Right /></el-icon>
+              <span>移动到...</span>
+            </button>
+            <button
+              type="button"
+              class="kb-ctx-item"
+              @click="handleRenameNode(contextMenu.node); closeContextMenu()"
+            >
+              <el-icon><EditPen /></el-icon>
+              <span>重命名</span>
+            </button>
+            <button
+              type="button"
+              class="kb-ctx-item is-danger"
+              @click="handleDeleteNode(contextMenu.node); closeContextMenu()"
+            >
+              <el-icon><Delete /></el-icon>
+              <span>删除</span>
+            </button>
+          </template>
+        </template>
+
+        <!-- Folder Node Actions -->
+        <template v-else-if="contextMenu.node.isFolder">
+          <button
+            type="button"
+            class="kb-ctx-item"
+            @click="toggleFolderExpanded(contextMenu.node); closeContextMenu()"
+          >
+            <el-icon><FolderOpened /></el-icon>
+            <span>{{ isContextFolderExpanded(contextMenu.node) ? '收起' : '展开' }}</span>
+          </button>
+          <button
+            type="button"
+            class="kb-ctx-item"
+            @click="handleDownloadFolder(contextMenu.node.folderPath, contextMenu.node.label); closeContextMenu()"
+          >
+            <el-icon><Download /></el-icon>
+            <span>下载文件夹</span>
+          </button>
+          <button
+            v-if="contextMenu.node.doc"
+            type="button"
+            class="kb-ctx-item"
+            @click="handleToggleFolderFavorite(contextMenu.node.doc); closeContextMenu()"
+          >
+            <el-icon>
+              <StarFilled v-if="favoritedDocIds.has(contextMenu.node.doc.id)" />
+              <Star v-else />
+            </el-icon>
+            <span>{{ favoritedDocIds.has(contextMenu.node.doc.id) ? '取消收藏' : '收藏' }}</span>
+          </button>
+          <button
+            v-if="contextMenu.node.doc"
+            type="button"
+            class="kb-ctx-item"
+            @click="openShareDialogForNode(contextMenu.node); closeContextMenu()"
+          >
+            <el-icon><Share /></el-icon>
+            <span>分享</span>
+          </button>
+
+          <template v-if="!isReadOnlyKb">
+            <div class="kb-ctx-divider" />
+            <button
+              type="button"
+              class="kb-ctx-item"
+              @click="selectedFolderPath = contextMenu.node.folderPath; openCreateFolderModal(); closeContextMenu()"
+            >
+              <el-icon><FolderAdd /></el-icon>
+              <span>在此新建文件夹</span>
+            </button>
+            <button
+              type="button"
+              class="kb-ctx-item"
+              @click="selectedFolderPath = contextMenu.node.folderPath; openCreateFileModal(); closeContextMenu()"
+            >
+              <el-icon><DocumentAdd /></el-icon>
+              <span>在此新建 Markdown</span>
+            </button>
+            <button
+              type="button"
+              class="kb-ctx-item"
+              @click="triggerFileUpload(contextMenu.node.folderPath); closeContextMenu()"
+            >
+              <el-icon><Upload /></el-icon>
+              <span>在此上传文件</span>
+            </button>
+            <button
+              type="button"
+              class="kb-ctx-item"
+              :disabled="!clipboardFile"
+              @click="handlePaste(contextMenu.node.folderPath); closeContextMenu()"
+            >
+              <el-icon><DocumentCopy /></el-icon>
+              <span>粘贴</span>
+            </button>
+            <button
+              v-if="contextMenu.node.doc"
+              type="button"
+              class="kb-ctx-item"
+              @click="handleRenameNode(contextMenu.node); closeContextMenu()"
+            >
+              <el-icon><EditPen /></el-icon>
+              <span>重命名</span>
+            </button>
+            <button
+              v-if="contextMenu.node.doc"
+              type="button"
+              class="kb-ctx-item is-danger"
+              @click="handleDeleteNode(contextMenu.node); closeContextMenu()"
+            >
+              <el-icon><Delete /></el-icon>
+              <span>删除</span>
+            </button>
+          </template>
+        </template>
+      </div>
+    </teleport>
+
+    <!-- Novel Reading Mode (.txt only) -->
+    <NovelReaderModal
+      v-if="novelReaderOpen && selectedKbId && previewDoc"
+      v-model:visible="novelReaderOpen"
+      :kb-id="selectedKbId"
+      :initial-doc="previewDoc"
+      :chapters="novelChapters"
+      :ref-domain-id="activeRefDomainId"
+      @chapter-changed="handleNovelChapterChanged"
+    />
 
     <!-- Cross-Domain References Section -->
     <CrossRefSection :domain-id="domainId" default-ref-type="kb_file" />
@@ -2855,10 +3375,17 @@ onUnmounted(() => {
 }
 
 .kb-columns {
+  position: relative;
   display: grid;
   grid-template-columns: 380px 1fr;
   gap: 18px;
   align-items: start;
+  border-radius: 12px;
+  transition: box-shadow 0.2s ease;
+}
+
+.kb-columns.is-file-dragover {
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.16);
 }
 
 .kb-panel {
@@ -2870,18 +3397,13 @@ onUnmounted(() => {
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
-.tree-panel.is-file-dragover {
-  border-color: var(--ascp-primary);
-  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.14);
-}
-
 .kb-drop-overlay {
   position: absolute;
-  inset: 8px;
-  z-index: 20;
-  border-radius: 10px;
+  inset: 0;
+  z-index: 40;
+  border-radius: 12px;
   border: 2px dashed var(--ascp-primary);
-  background: rgba(238, 242, 255, 0.92);
+  background: rgba(238, 242, 255, 0.9);
   color: var(--ascp-primary);
   display: flex;
   flex-direction: column;
@@ -3036,6 +3558,79 @@ onUnmounted(() => {
   word-break: break-word;
   max-height: 540px;
   overflow-y: auto;
+}
+
+.txt-reader-view {
+  max-width: 78ch;
+  width: 100%;
+  margin: 0 auto;
+  padding: 24px 28px;
+  background: #fafaf9;
+  color: #1e293b;
+  border: 1px solid var(--ascp-border);
+  border-radius: 10px;
+  font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-size: 15px;
+  line-height: 1.85;
+  letter-spacing: 0.015em;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 540px;
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+
+.kb-context-menu {
+  position: fixed;
+  z-index: 2200;
+  min-width: 184px;
+  padding: 6px;
+  background: #ffffff;
+  border: 1px solid var(--ascp-border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.14);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.kb-ctx-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ascp-text-primary);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.kb-ctx-item:hover:not(:disabled) {
+  background: #f1f5f9;
+}
+
+.kb-ctx-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.kb-ctx-item.is-danger {
+  color: #dc2626;
+}
+
+.kb-ctx-item.is-danger:hover:not(:disabled) {
+  background: #fef2f2;
+}
+
+.kb-ctx-divider {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--ascp-border);
 }
 
 .preview-placeholder {

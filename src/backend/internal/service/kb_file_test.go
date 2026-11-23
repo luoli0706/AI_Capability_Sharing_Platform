@@ -118,6 +118,43 @@ func (m *mockFileKBRepo) FileExistsInFolder(kbAssetID uint64, folderPath, fileNa
 	}
 	return false, nil
 }
+func (m *mockFileKBRepo) FolderExists(kbAssetID uint64, folderPath string, excludeDocID uint64) (bool, error) {
+	for _, d := range m.docs {
+		if d.KBAssetID == kbAssetID && d.IsFolder && d.FolderPath == folderPath && d.ID != excludeDocID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+func (m *mockFileKBRepo) RenameFile(kbAssetID, docID uint64, newName, newExt string) error {
+	if d, ok := m.docs[docID]; ok && d.KBAssetID == kbAssetID && !d.IsFolder {
+		d.FileName = newName
+		d.FileExt = newExt
+		return nil
+	}
+	return gorm.ErrRecordNotFound
+}
+func (m *mockFileKBRepo) RenameFolder(kbAssetID, folderDocID uint64, oldPath, newName, newPath string) error {
+	folder, ok := m.docs[folderDocID]
+	if !ok || folder.KBAssetID != kbAssetID || !folder.IsFolder {
+		return gorm.ErrRecordNotFound
+	}
+	folder.FileName = newName
+	folder.FolderPath = newPath
+	oldPrefix := oldPath + "/"
+	newPrefix := newPath + "/"
+	for _, d := range m.docs {
+		if d.KBAssetID != kbAssetID || d.ID == folderDocID {
+			continue
+		}
+		if d.FolderPath == oldPath {
+			d.FolderPath = newPath
+		} else if strings.HasPrefix(d.FolderPath, oldPrefix) {
+			d.FolderPath = newPrefix + strings.TrimPrefix(d.FolderPath, oldPrefix)
+		}
+	}
+	return nil
+}
 func (m *mockFileKBRepo) MoveDocument(kbAssetID, docID uint64, targetFolder string) error {
 	if d, ok := m.docs[docID]; ok && d.KBAssetID == kbAssetID {
 		d.FolderPath = targetFolder
@@ -724,5 +761,92 @@ func TestListDocumentsLazy(t *testing.T) {
 	// 4. Non-member cannot access domain-visibility KB
 	if _, err := kbSvc.ListDocumentsLazy(99, false, 1, "", 0); err == nil {
 		t.Fatal("expected forbidden error for non-member on domain KB")
+	}
+}
+
+func TestRenameDocument_FileAndFolder(t *testing.T) {
+	kbRepo := newMockFileKBRepo()
+	assetRepo := &mockP1AssetRepo{
+		assets: map[uint64]*model.AIAsset{
+			1: {ID: 1, AssetCode: "kb-rename", Name: "Rename KB", AssetType: model.AssetTypeKB, DomainID: 5, OwnerID: 10, Visibility: model.VisibilityDomain, Status: model.AssetStatusPublished},
+		},
+	}
+	domainRepo := &mockP1DomainRepo{
+		members: map[uint64]map[uint64]string{
+			5: {
+				10: model.DomainRoleOwner,
+				20: model.DomainRoleMember,
+			},
+		},
+	}
+	kbSvc := NewKBService(kbRepo, assetRepo, domainRepo, nil, nil, t.TempDir(), "test-storage-secret")
+
+	// Seed folders and files
+	_ = kbRepo.CreateDocument(&model.KBDocument{ID: 1, KBAssetID: 1, IsFolder: true, FolderPath: "guides", FileName: "guides"})
+	_ = kbRepo.CreateDocument(&model.KBDocument{ID: 2, KBAssetID: 1, IsFolder: true, FolderPath: "guides/api", FileName: "api"})
+	_ = kbRepo.CreateDocument(&model.KBDocument{ID: 3, KBAssetID: 1, IsFolder: false, FolderPath: "guides", FileName: "intro.md", FileExt: ".md", FilePath: "/tmp/orig-1.md"})
+	_ = kbRepo.CreateDocument(&model.KBDocument{ID: 4, KBAssetID: 1, IsFolder: false, FolderPath: "guides", FileName: "other.txt", FileExt: ".txt", FilePath: "/tmp/orig-2.txt"})
+	_ = kbRepo.CreateDocument(&model.KBDocument{ID: 5, KBAssetID: 1, IsFolder: false, FolderPath: "guides/api", FileName: "auth.md", FileExt: ".md", FilePath: "/tmp/orig-3.md"})
+	_ = kbRepo.CreateDocument(&model.KBDocument{ID: 6, KBAssetID: 1, IsFolder: true, FolderPath: "notes", FileName: "notes"})
+
+	// 1. Non-admin member cannot rename (403)
+	if _, err := kbSvc.RenameDocument(20, false, 1, 3, "renamed.md"); err == nil {
+		t.Fatal("expected forbidden error for plain member")
+	} else {
+		assertAppErrStatus(t, err, http.StatusForbidden)
+	}
+
+	// 2. Invalid name with '/' -> 400
+	if _, err := kbSvc.RenameDocument(10, false, 1, 3, "bad/name.md"); err == nil {
+		t.Fatal("expected bad request for slash in name")
+	} else {
+		assertAppErrStatus(t, err, http.StatusBadRequest)
+	}
+
+	// 3. Duplicate file name in same folder -> 409
+	if _, err := kbSvc.RenameDocument(10, false, 1, 3, "other.txt"); err == nil {
+		t.Fatal("expected conflict for duplicate file name")
+	} else {
+		assertAppErrStatus(t, err, http.StatusConflict)
+	}
+
+	// 4. Successful file rename updates file_name and file_ext while keeping file_path unchanged
+	renamedFile, err := kbSvc.RenameDocument(10, false, 1, 3, "  getting-started.txt  ")
+	if err != nil {
+		t.Fatalf("RenameDocument file failed: %v", err)
+	}
+	if renamedFile.FileName != "getting-started.txt" || renamedFile.FileExt != ".txt" {
+		t.Fatalf("unexpected renamed file metadata: %+v", renamedFile)
+	}
+	if renamedFile.FilePath != "/tmp/orig-1.md" {
+		t.Fatalf("expected physical FilePath unchanged, got %s", renamedFile.FilePath)
+	}
+
+	// 5. Duplicate folder name -> 409
+	if _, err := kbSvc.RenameDocument(10, false, 1, 1, "notes"); err == nil {
+		t.Fatal("expected conflict for duplicate folder name")
+	} else {
+		assertAppErrStatus(t, err, http.StatusConflict)
+	}
+
+	// 6. Successful folder rename cascades folder_path prefix to nested subfolders and files
+	renamedFolder, err := kbSvc.RenameDocument(10, false, 1, 1, "docs")
+	if err != nil {
+		t.Fatalf("RenameDocument folder failed: %v", err)
+	}
+	if renamedFolder.FileName != "docs" || renamedFolder.FolderPath != "docs" {
+		t.Fatalf("unexpected renamed folder: %+v", renamedFolder)
+	}
+	if kbRepo.docs[2].FolderPath != "docs/api" || kbRepo.docs[2].FileName != "api" {
+		t.Fatalf("expected nested subfolder updated to docs/api, got %+v", kbRepo.docs[2])
+	}
+	if kbRepo.docs[3].FolderPath != "docs" {
+		t.Fatalf("expected direct child file folder_path=docs, got %s", kbRepo.docs[3].FolderPath)
+	}
+	if kbRepo.docs[5].FolderPath != "docs/api" {
+		t.Fatalf("expected nested child file folder_path=docs/api, got %s", kbRepo.docs[5].FolderPath)
+	}
+	if kbRepo.docs[6].FolderPath != "notes" {
+		t.Fatalf("expected sibling folder notes untouched, got %s", kbRepo.docs[6].FolderPath)
 	}
 }

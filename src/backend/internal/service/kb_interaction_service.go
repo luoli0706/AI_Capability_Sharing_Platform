@@ -24,6 +24,8 @@ type KBInteractionService interface {
 	ListComments(userID uint64, isSuperAdmin bool, kbID, docID, refDomainID uint64) ([]model.KBCommentItem, error)
 	CreateComment(userID uint64, isSuperAdmin bool, kbID, docID uint64, req model.CreateKBCommentRequest, refDomainID uint64) (*model.KBCommentItem, error)
 	DeleteComment(userID uint64, isSuperAdmin bool, kbID, docID, commentID, refDomainID uint64) error
+	GetReadingProgress(userID uint64, isSuperAdmin bool, kbID, docID, refDomainID uint64) (*model.ReadingProgressResponse, error)
+	SaveReadingProgress(userID uint64, isSuperAdmin bool, kbID, docID, refDomainID uint64, req model.UpdateReadingProgressRequest) (*model.ReadingProgressResponse, error)
 }
 
 type kbInteractionService struct {
@@ -268,6 +270,56 @@ func (s *kbInteractionService) DeleteComment(userID uint64, isSuperAdmin bool, k
 	}
 
 	return s.interactionRepo.DeleteComment(comment.ID)
+}
+
+func (s *kbInteractionService) GetReadingProgress(userID uint64, isSuperAdmin bool, kbID, docID, refDomainID uint64) (*model.ReadingProgressResponse, error) {
+	if _, _, err := s.ensureKBDocViewAccess(userID, isSuperAdmin, kbID, docID, refDomainID, false); err != nil {
+		return nil, err
+	}
+	rec, err := s.interactionRepo.GetReadingProgress(docID, userID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return &model.ReadingProgressResponse{
+				CurrentPage: 1,
+				TotalPages:  0,
+				UpdatedAt:   nil,
+			}, nil
+		}
+		return nil, err
+	}
+	updatedAt := rec.UpdatedAt
+	return &model.ReadingProgressResponse{
+		CurrentPage: rec.CurrentPage,
+		TotalPages:  rec.TotalPages,
+		UpdatedAt:   &updatedAt,
+	}, nil
+}
+
+func (s *kbInteractionService) SaveReadingProgress(userID uint64, isSuperAdmin bool, kbID, docID, refDomainID uint64, req model.UpdateReadingProgressRequest) (*model.ReadingProgressResponse, error) {
+	if _, _, err := s.ensureKBDocViewAccess(userID, isSuperAdmin, kbID, docID, refDomainID, false); err != nil {
+		return nil, err
+	}
+	totalPages := req.TotalPages
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	currentPage := req.CurrentPage
+	if currentPage < 1 {
+		currentPage = 1
+	}
+	if currentPage > totalPages {
+		currentPage = totalPages
+	}
+	rec, err := s.interactionRepo.UpsertReadingProgress(kbID, docID, userID, currentPage, totalPages)
+	if err != nil {
+		return nil, err
+	}
+	updatedAt := rec.UpdatedAt
+	return &model.ReadingProgressResponse{
+		CurrentPage: rec.CurrentPage,
+		TotalPages:  rec.TotalPages,
+		UpdatedAt:   &updatedAt,
+	}, nil
 }
 
 func (s *kbInteractionService) ensureKBDocViewAccess(userID uint64, isSuperAdmin bool, kbID, docID, refDomainID uint64, allowFolder bool) (*model.AssetDetail, *model.KBDocument, error) {
