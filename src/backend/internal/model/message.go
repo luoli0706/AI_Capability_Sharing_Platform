@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 const (
 	MessageTypeText      = "text"
@@ -64,11 +67,32 @@ type AssetCardPayload struct {
 	Note        string `json:"note,omitempty"`
 }
 
+// FlexiblePayload accepts either a JSON string or a JSON object/value when unmarshaling.
+type FlexiblePayload string
+
+// UnmarshalJSON decodes a JSON string directly or preserves raw JSON object/array text.
+func (p *FlexiblePayload) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || string(data) == "null" {
+		*p = ""
+		return nil
+	}
+	if data[0] == '"' {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		*p = FlexiblePayload(s)
+		return nil
+	}
+	*p = FlexiblePayload(string(data))
+	return nil
+}
+
 // SendMessageRequest represents POST /api/v1/messages/conversations/:id/messages payload.
 type SendMessageRequest struct {
-	Content string `json:"content"`
-	MsgType string `json:"msg_type"`
-	Payload string `json:"payload"`
+	Content string          `json:"content"`
+	MsgType string          `json:"msg_type"`
+	Payload FlexiblePayload `json:"payload"`
 }
 
 // ShareAssetCardRequest represents POST /api/v1/messages/share-card payload.

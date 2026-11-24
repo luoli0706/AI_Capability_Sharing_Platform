@@ -238,7 +238,8 @@ watch(
       note.value = ''
       void fetchContacts()
     }
-  }
+  },
+  { immediate: true }
 )
 </script>
 

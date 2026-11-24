@@ -685,7 +685,7 @@ export interface UserMessageItem {
 export interface SendMessagePayload {
   content?: string
   msg_type?: 'text' | 'asset_card' | string
-  payload?: AssetCardPayload | Record<string, unknown>
+  payload?: string | AssetCardPayload | Record<string, unknown>
 }
 
 export interface KbDocumentInteractions {

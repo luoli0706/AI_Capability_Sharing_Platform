@@ -39,8 +39,15 @@ export function sendMessage(
   conversationId: number,
   payload: string | SendMessagePayload
 ): Promise<UserMessageItem> {
-  const body: SendMessagePayload = typeof payload === 'string' ? { content: payload } : payload
-  return apiPost<UserMessageItem, SendMessagePayload>(
+  const rawBody: SendMessagePayload = typeof payload === 'string' ? { content: payload } : payload
+  const body = {
+    ...rawBody,
+    payload:
+      rawBody.payload !== undefined && rawBody.payload !== null && typeof rawBody.payload !== 'string'
+        ? JSON.stringify(rawBody.payload)
+        : rawBody.payload
+  }
+  return apiPost<UserMessageItem, typeof body>(
     `/messages/conversations/${conversationId}/messages`,
     body
   )
