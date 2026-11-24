@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -50,7 +51,7 @@ func (m *mockFileKBRepo) EnsureFolderHierarchy(kbAssetID, uploaderID uint64, fol
 func (m *mockFileKBRepo) ListDocuments(kbAssetID uint64) ([]model.KBDocument, error) {
 	var out []model.KBDocument
 	for _, d := range m.docs {
-		if d.KBAssetID == kbAssetID {
+		if d.KBAssetID == kbAssetID && !d.DeletedAt.Valid {
 			out = append(out, *d)
 		}
 	}
@@ -143,8 +144,15 @@ func (m *mockFileKBRepo) GetFolderSummary(kbAssetID uint64, parentFolder string,
 	return int64(len(all)), maxT, nil
 }
 func (m *mockFileKBRepo) FindDocumentByID(kbAssetID, docID uint64) (*model.KBDocument, error) {
-	if d, ok := m.docs[docID]; ok && d.KBAssetID == kbAssetID {
+	if d, ok := m.docs[docID]; ok && d.KBAssetID == kbAssetID && !d.DeletedAt.Valid {
 		return d, nil
+	}
+	return nil, gorm.ErrRecordNotFound
+}
+func (m *mockFileKBRepo) FindDeletedDocumentByID(kbAssetID, docID uint64) (*model.KBDocument, error) {
+	if d, ok := m.docs[docID]; ok && d.KBAssetID == kbAssetID && d.DeletedAt.Valid {
+		cp := *d
+		return &cp, nil
 	}
 	return nil, gorm.ErrRecordNotFound
 }
@@ -171,7 +179,7 @@ func (m *mockFileKBRepo) ListMatchingFiles(kbAssetID uint64, scope string, docID
 }
 func (m *mockFileKBRepo) FileExistsInFolder(kbAssetID uint64, folderPath, fileName string, excludeDocID uint64) (bool, error) {
 	for _, d := range m.docs {
-		if d.KBAssetID == kbAssetID && !d.IsFolder && d.FolderPath == folderPath && d.FileName == fileName && d.ID != excludeDocID {
+		if d.KBAssetID == kbAssetID && !d.DeletedAt.Valid && !d.IsFolder && d.FolderPath == folderPath && d.FileName == fileName && d.ID != excludeDocID {
 			return true, nil
 		}
 	}
@@ -179,7 +187,7 @@ func (m *mockFileKBRepo) FileExistsInFolder(kbAssetID uint64, folderPath, fileNa
 }
 func (m *mockFileKBRepo) FolderExists(kbAssetID uint64, folderPath string, excludeDocID uint64) (bool, error) {
 	for _, d := range m.docs {
-		if d.KBAssetID == kbAssetID && d.IsFolder && d.FolderPath == folderPath && d.ID != excludeDocID {
+		if d.KBAssetID == kbAssetID && !d.DeletedAt.Valid && d.IsFolder && d.FolderPath == folderPath && d.ID != excludeDocID {
 			return true, nil
 		}
 	}
@@ -242,11 +250,52 @@ func (m *mockFileKBRepo) ListChunks(kbAssetID, docID uint64, page, pageSize int)
 	return nil, 0, nil
 }
 func (m *mockFileKBRepo) DeleteDocument(kbAssetID, docID uint64) error {
-	delete(m.docs, docID)
+	if d, ok := m.docs[docID]; ok && d.KBAssetID == kbAssetID && !d.DeletedAt.Valid {
+		d.DeletedAt = gorm.DeletedAt{Time: time.Now(), Valid: true}
+	}
 	return nil
 }
 func (m *mockFileKBRepo) DeleteFolderRecursive(kbAssetID uint64, folderPath string) ([]string, error) {
-	return nil, nil
+	now := time.Now()
+	var paths []string
+	for _, d := range m.docs {
+		if d.KBAssetID != kbAssetID || d.DeletedAt.Valid {
+			continue
+		}
+		if d.FolderPath == folderPath || strings.HasPrefix(d.FolderPath, folderPath+"/") {
+			d.DeletedAt = gorm.DeletedAt{Time: now, Valid: true}
+			if !d.IsFolder && d.FilePath != "" {
+				paths = append(paths, d.FilePath)
+			}
+		}
+	}
+	return paths, nil
+}
+func (m *mockFileKBRepo) RestoreDocument(kbAssetID, docID uint64) error {
+	if d, ok := m.docs[docID]; ok && d.KBAssetID == kbAssetID && d.DeletedAt.Valid {
+		d.DeletedAt = gorm.DeletedAt{}
+		return nil
+	}
+	return gorm.ErrRecordNotFound
+}
+func (m *mockFileKBRepo) RestoreFolderRecursive(kbAssetID, folderDocID uint64, folderPath string, deletedAt time.Time) error {
+	folder, ok := m.docs[folderDocID]
+	if !ok || folder.KBAssetID != kbAssetID || !folder.DeletedAt.Valid {
+		return gorm.ErrRecordNotFound
+	}
+	folder.DeletedAt = gorm.DeletedAt{}
+	winStart := deletedAt.Add(-2 * time.Second)
+	winEnd := deletedAt.Add(2 * time.Second)
+	for _, d := range m.docs {
+		if d.KBAssetID != kbAssetID || d.ID == folderDocID || !d.DeletedAt.Valid {
+			continue
+		}
+		if (d.FolderPath == folderPath || strings.HasPrefix(d.FolderPath, folderPath+"/")) &&
+			!d.DeletedAt.Time.Before(winStart) && !d.DeletedAt.Time.After(winEnd) {
+			d.DeletedAt = gorm.DeletedAt{}
+		}
+	}
+	return nil
 }
 func (m *mockFileKBRepo) SearchChunks(kbAssetID uint64, query string, topK int) ([]model.KBSearchHit, error) {
 	return nil, nil
@@ -1071,5 +1120,270 @@ func TestKBService_ListDocumentsLazyPagedAndMeta(t *testing.T) {
 		t.Fatal("expected not found error for missing doc")
 	} else {
 		assertAppErrStatus(t, err, http.StatusNotFound)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestKBBilibiliPreview(t *testing.T) {
+	tmpDir := t.TempDir()
+	kbRepo := newMockFileKBRepo()
+	assetRepo := &mockP1AssetRepo{
+		assets: map[uint64]*model.AIAsset{
+			1: {ID: 1, AssetCode: "kb-bili", Name: "Bili KB", AssetType: model.AssetTypeKB, DomainID: 5, OwnerID: 10},
+		},
+	}
+	domainRepo := &mockP1DomainRepo{
+		members: map[uint64]map[uint64]string{
+			5: {10: model.DomainRoleOwner},
+		},
+	}
+
+	kbSvc := NewKBService(kbRepo, assetRepo, domainRepo, nil, nil, tmpDir, "test-storage-secret")
+	svcImpl := kbSvc.(*kbService)
+
+	// Create .bili file with BV ID in filename (doc1), .bili file with BV ID in content (doc2), and invalid file (doc3)
+	doc1, err := kbSvc.CreateMarkdownFile(10, false, 1, model.CreateKBFileRequest{
+		FileName: "BV1xx411c7mD.bili",
+		Content:  "https://www.bilibili.com/video/BV1xx411c7mD",
+	})
+	if err != nil {
+		t.Fatalf("CreateMarkdownFile .bili failed: %v", err)
+	}
+	doc2, err := kbSvc.CreateMarkdownFile(10, false, 1, model.CreateKBFileRequest{
+		FileName: "tutorial-video.bili",
+		Content:  "watch: https://www.bilibili.com/video/BV1ab411c7XY?p=1",
+	})
+	if err != nil {
+		t.Fatalf("CreateMarkdownFile tutorial-video.bili failed: %v", err)
+	}
+	doc3, err := kbSvc.CreateMarkdownFile(10, false, 1, model.CreateKBFileRequest{
+		FileName: "notes.md",
+		Content:  "# Just markdown",
+	})
+	if err != nil {
+		t.Fatalf("CreateMarkdownFile notes.md failed: %v", err)
+	}
+
+	// 1. Valid 200 OK video
+	svcImpl.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Header.Get("Referer") != "https://www.bilibili.com" {
+				t.Fatalf("expected Referer header, got %q", req.Header.Get("Referer"))
+			}
+			body := `<html><head><title>Go Concurrency_哔哩哔哩_bilibili</title><meta property="og:title" content="Go Concurrency Tutorial"><meta property="og:image" content="//i0.hdslb.com/bfs/archive/cover.jpg"></head><body>ok</body></html>`
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(body)),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+
+	prev1, err := kbSvc.GetBilibiliPreview(10, false, 1, doc1.ID, 0)
+	if err != nil {
+		t.Fatalf("GetBilibiliPreview doc1 failed: %v", err)
+	}
+	if !prev1.Available || prev1.StatusCode != 200 || prev1.BVID != "BV1xx411c7mD" || prev1.Title != "Go Concurrency Tutorial" || prev1.Cover != "https://i0.hdslb.com/bfs/archive/cover.jpg" || !strings.Contains(prev1.EmbedURL, "bvid=BV1xx411c7mD") {
+		t.Fatalf("unexpected prev1: %+v", prev1)
+	}
+
+	// 2. Fallback to .bili content + deleted video marker on HTTP 200
+	svcImpl.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`<html><body>啊叻？视频不见了</body></html>`)),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+	prev2, err := kbSvc.GetBilibiliPreview(10, false, 1, doc2.ID, 0)
+	if err != nil {
+		t.Fatalf("GetBilibiliPreview doc2 failed: %v", err)
+	}
+	if prev2.Available || prev2.StatusCode != http.StatusNotFound || prev2.BVID != "BV1ab411c7XY" {
+		t.Fatalf("expected unavailable deleted video preview, got %+v", prev2)
+	}
+
+	// 3. HTTP 404 status
+	svcImpl.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Body:       io.NopCloser(strings.NewReader("not found")),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+	prev404, err := kbSvc.GetBilibiliPreview(10, false, 1, doc1.ID, 0)
+	if err != nil || prev404.Available || prev404.StatusCode != 404 {
+		t.Fatalf("expected 404 unavailable preview, got %+v err=%v", prev404, err)
+	}
+
+	// 4. Invalid filename without BV ID -> 400
+	if _, err := kbSvc.GetBilibiliPreview(10, false, 1, doc3.ID, 0); err == nil {
+		t.Fatal("expected 400 BadRequest for file without BV ID")
+	} else {
+		assertAppErrStatus(t, err, http.StatusBadRequest)
+	}
+}
+
+func TestKBMoveFolder(t *testing.T) {
+	tmpDir := t.TempDir()
+	kbRepo := newMockFileKBRepo()
+	_ = kbRepo.CreateDocument(&model.KBDocument{KBAssetID: 1, FolderPath: "src", IsFolder: true, FileName: "src"})                   // ID 1
+	_ = kbRepo.CreateDocument(&model.KBDocument{KBAssetID: 1, FolderPath: "src/sub", IsFolder: true, FileName: "sub"})               // ID 2
+	_ = kbRepo.CreateDocument(&model.KBDocument{KBAssetID: 1, FolderPath: "src/sub", IsFolder: false, FileName: "a.md"})             // ID 3
+	_ = kbRepo.CreateDocument(&model.KBDocument{KBAssetID: 1, FolderPath: "dest", IsFolder: true, FileName: "dest"})                 // ID 4
+	_ = kbRepo.CreateDocument(&model.KBDocument{KBAssetID: 1, FolderPath: "conflict-parent", IsFolder: true, FileName: "conflict-parent"}) // ID 5
+	_ = kbRepo.CreateDocument(&model.KBDocument{KBAssetID: 1, FolderPath: "conflict-parent/src", IsFolder: true, FileName: "src"})   // ID 6
+
+	assetRepo := &mockP1AssetRepo{
+		assets: map[uint64]*model.AIAsset{
+			1: {ID: 1, AssetCode: "kb-mv", Name: "Move KB", AssetType: model.AssetTypeKB, DomainID: 5, OwnerID: 10},
+		},
+	}
+	domainRepo := &mockP1DomainRepo{
+		members: map[uint64]map[uint64]string{
+			5: {10: model.DomainRoleOwner},
+		},
+	}
+	kbSvc := NewKBService(kbRepo, assetRepo, domainRepo, nil, nil, tmpDir, "test-storage-secret")
+
+	// 1. Prevent moving folder into itself or subfolder -> 400
+	if _, err := kbSvc.MoveDocument(10, false, 1, 1, "src"); err == nil {
+		t.Fatal("expected 400 when moving folder into itself")
+	} else {
+		assertAppErrStatus(t, err, http.StatusBadRequest)
+	}
+	if _, err := kbSvc.MoveDocument(10, false, 1, 1, "src/sub"); err == nil {
+		t.Fatal("expected 400 when moving folder into its subfolder")
+	} else {
+		assertAppErrStatus(t, err, http.StatusBadRequest)
+	}
+
+	// 2. Conflict when target already has folder with same name -> 409
+	if _, err := kbSvc.MoveDocument(10, false, 1, 1, "conflict-parent"); err == nil {
+		t.Fatal("expected 409 when target folder already contains same-named folder")
+	} else {
+		assertAppErrStatus(t, err, http.StatusConflict)
+	}
+
+	// 3. Valid move into "dest" -> cascades to "dest/src", "dest/src/sub", and file "a.md"
+	moved, err := kbSvc.MoveDocument(10, false, 1, 1, "dest")
+	if err != nil {
+		t.Fatalf("MoveDocument folder into dest failed: %v", err)
+	}
+	if moved.FolderPath != "dest/src" {
+		t.Fatalf("expected folder_path 'dest/src', got %q", moved.FolderPath)
+	}
+	if kbRepo.docs[2].FolderPath != "dest/src/sub" || kbRepo.docs[3].FolderPath != "dest/src/sub" {
+		t.Fatalf("expected cascaded descendant paths 'dest/src/sub', got sub=%q file=%q", kbRepo.docs[2].FolderPath, kbRepo.docs[3].FolderPath)
+	}
+
+	// 4. Valid move back to root ("") -> cascades back to "src"
+	movedRoot, err := kbSvc.MoveDocument(10, false, 1, 1, "")
+	if err != nil {
+		t.Fatalf("MoveDocument folder to root failed: %v", err)
+	}
+	if movedRoot.FolderPath != "src" || kbRepo.docs[2].FolderPath != "src/sub" || kbRepo.docs[3].FolderPath != "src/sub" {
+		t.Fatalf("expected root cascaded paths, got root=%q sub=%q file=%q", movedRoot.FolderPath, kbRepo.docs[2].FolderPath, kbRepo.docs[3].FolderPath)
+	}
+}
+
+func TestKBDeleteAndRestoreDocument(t *testing.T) {
+	tmpDir := t.TempDir()
+	kbRepo := newMockFileKBRepo()
+	assetRepo := &mockP1AssetRepo{
+		assets: map[uint64]*model.AIAsset{
+			1: {ID: 1, AssetCode: "kb-del", Name: "Delete KB", AssetType: model.AssetTypeKB, DomainID: 5, OwnerID: 10},
+		},
+	}
+	domainRepo := &mockP1DomainRepo{
+		members: map[uint64]map[uint64]string{
+			5: {10: model.DomainRoleOwner},
+		},
+	}
+	kbSvc := NewKBService(kbRepo, assetRepo, domainRepo, nil, nil, tmpDir, "test-storage-secret")
+
+	// 1. Single file delete preserves disk file and restore brings it back
+	fileDoc, err := kbSvc.CreateMarkdownFile(10, false, 1, model.CreateKBFileRequest{
+		FileName: "undo-me.md",
+		Content:  "# Undo Test",
+	})
+	if err != nil {
+		t.Fatalf("CreateMarkdownFile failed: %v", err)
+	}
+	if err := kbSvc.DeleteDocument(10, false, 1, fileDoc.ID); err != nil {
+		t.Fatalf("DeleteDocument file failed: %v", err)
+	}
+	if _, err := os.Stat(fileDoc.FilePath); err != nil {
+		t.Fatalf("expected physical file preserved on disk after soft-delete, got %v", err)
+	}
+	restoredFile, err := kbSvc.RestoreDocument(10, false, 1, fileDoc.ID)
+	if err != nil {
+		t.Fatalf("RestoreDocument file failed: %v", err)
+	}
+	if restoredFile.FileName != "undo-me.md" || restoredFile.DeletedAt.Valid {
+		t.Fatalf("unexpected restored file: %+v", restoredFile)
+	}
+
+	// 2. Restore file conflict -> 409 when active file with same name exists
+	if err := kbSvc.DeleteDocument(10, false, 1, fileDoc.ID); err != nil {
+		t.Fatalf("DeleteDocument file 2nd time failed: %v", err)
+	}
+	if _, err := kbSvc.CreateMarkdownFile(10, false, 1, model.CreateKBFileRequest{
+		FileName: "undo-me.md",
+		Content:  "# Replacement",
+	}); err != nil {
+		t.Fatalf("CreateMarkdownFile replacement failed: %v", err)
+	}
+	if _, err := kbSvc.RestoreDocument(10, false, 1, fileDoc.ID); err == nil {
+		t.Fatal("expected 409 conflict restoring file when active duplicate exists")
+	} else {
+		assertAppErrStatus(t, err, http.StatusConflict)
+	}
+
+	// 3. Folder delete + restore: descendants deleted together are restored, earlier-deleted sibling NOT resurrected
+	_ = kbRepo.CreateDocument(&model.KBDocument{KBAssetID: 1, FolderPath: "proj", IsFolder: true, FileName: "proj"})
+	projFolderID := kbRepo.nextID - 1
+	_ = kbRepo.CreateDocument(&model.KBDocument{KBAssetID: 1, FolderPath: "proj", IsFolder: false, FileName: "keep.md"})
+	keepFileID := kbRepo.nextID - 1
+	_ = kbRepo.CreateDocument(&model.KBDocument{
+		KBAssetID:  1,
+		FolderPath: "proj",
+		IsFolder:   false,
+		FileName:   "old-deleted.md",
+		DeletedAt:  gorm.DeletedAt{Time: time.Now().Add(-10 * time.Second), Valid: true},
+	})
+	oldDeletedID := kbRepo.nextID - 1
+
+	if err := kbSvc.DeleteDocument(10, false, 1, projFolderID); err != nil {
+		t.Fatalf("DeleteDocument folder failed: %v", err)
+	}
+	if _, err := kbSvc.RestoreDocument(10, false, 1, projFolderID); err != nil {
+		t.Fatalf("RestoreDocument folder failed: %v", err)
+	}
+	if kbRepo.docs[projFolderID].DeletedAt.Valid || kbRepo.docs[keepFileID].DeletedAt.Valid {
+		t.Fatal("expected folder and sibling file to be restored")
+	}
+	if !kbRepo.docs[oldDeletedID].DeletedAt.Valid {
+		t.Fatal("expected earlier-deleted file NOT to be resurrected on folder restore")
+	}
+
+	// 4. Folder restore conflict -> 409
+	if err := kbSvc.DeleteDocument(10, false, 1, projFolderID); err != nil {
+		t.Fatalf("DeleteDocument folder 2nd time failed: %v", err)
+	}
+	_ = kbRepo.CreateDocument(&model.KBDocument{KBAssetID: 1, FolderPath: "proj", IsFolder: true, FileName: "proj"})
+	if _, err := kbSvc.RestoreDocument(10, false, 1, projFolderID); err == nil {
+		t.Fatal("expected 409 conflict restoring folder when active folder exists")
+	} else {
+		assertAppErrStatus(t, err, http.StatusConflict)
 	}
 }

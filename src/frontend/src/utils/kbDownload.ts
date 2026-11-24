@@ -24,6 +24,15 @@ export function isTextFile(fileName: string): boolean {
   )
 }
 
+export function extractBilibiliBvid(fileName: string): string | null {
+  const trimmed = fileName.trim()
+  if (!trimmed) return null
+  const lastDot = trimmed.lastIndexOf('.')
+  const baseName = lastDot > 0 ? trimmed.slice(0, lastDot) : trimmed
+  const match = baseName.match(/^(BV[0-9A-Za-z]{10})$/)
+  return match ? match[1] : null
+}
+
 const SCOPE_LABELS: Record<KbDownloadParams['scope'], string> = {
   file: '单个文件',
   folder: '文件夹（递归包含子目录与文件）',

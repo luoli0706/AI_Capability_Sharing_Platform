@@ -387,6 +387,17 @@ export interface KbContentResult {
   payload?: string
 }
 
+export interface KbBilibiliPreview {
+  available: boolean
+  status_code: number
+  bvid: string
+  title: string
+  cover: string
+  embed_url: string
+  watch_url: string
+  message: string
+}
+
 export interface KbDownloadPreview {
   scope: 'file' | 'folder' | 'all'
   target: string

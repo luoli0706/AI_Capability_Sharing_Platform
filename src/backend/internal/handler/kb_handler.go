@@ -217,6 +217,26 @@ func (h *KBHandler) GetDocumentRaw(c echo.Context) error {
 	return c.Blob(http.StatusOK, mimeType, data)
 }
 
+func (h *KBHandler) GetBilibiliPreview(c echo.Context) error {
+	kbID, ok := parseUintParam(c, "id")
+	if !ok {
+		return nil
+	}
+	docID, ok := parseUintParam(c, "docId")
+	if !ok {
+		return nil
+	}
+
+	userID := middleware.GetUserID(c)
+	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
+	refDomainID := parseOptionalUintQuery(c, "ref_domain_id")
+	preview, err := h.kbSvc.GetBilibiliPreview(userID, isSuperAdmin, kbID, docID, refDomainID)
+	if err != nil {
+		return service.HandleError(c, err)
+	}
+	return response.Success(c, preview)
+}
+
 func (h *KBHandler) UpdateDocumentContent(c echo.Context) error {
 	kbID, ok := parseUintParam(c, "id")
 	if !ok {
@@ -283,6 +303,25 @@ func (h *KBHandler) DeleteDocument(c echo.Context) error {
 		return service.HandleError(c, err)
 	}
 	return response.Success(c, nil)
+}
+
+func (h *KBHandler) RestoreDocument(c echo.Context) error {
+	kbID, ok := parseUintParam(c, "id")
+	if !ok {
+		return nil
+	}
+	docID, ok := parseUintParam(c, "docId")
+	if !ok {
+		return nil
+	}
+
+	userID := middleware.GetUserID(c)
+	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
+	doc, err := h.kbSvc.RestoreDocument(userID, isSuperAdmin, kbID, docID)
+	if err != nil {
+		return service.HandleError(c, err)
+	}
+	return response.Success(c, doc)
 }
 
 func (h *KBHandler) Search(c echo.Context) error {

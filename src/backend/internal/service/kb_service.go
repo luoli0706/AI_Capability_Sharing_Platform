@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"io/fs"
 	"mime"
@@ -17,8 +18,10 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"ascp-backend/internal/model"
 	"ascp-backend/internal/pkg/chunker"
@@ -34,12 +37,14 @@ var allowedKBExts = map[string]bool{
 	".txt":      true,
 	".md":       true,
 	".markdown": true,
+	".bili":     true,
 }
 
 var textKBExts = map[string]bool{
 	".md":       true,
 	".markdown": true,
 	".txt":      true,
+	".bili":     true,
 	".json":     true,
 	".yaml":     true,
 	".yml":      true,
@@ -71,6 +76,7 @@ var kbMIMETypes = map[string]string{
 	".md":       "text/markdown; charset=utf-8",
 	".markdown": "text/markdown; charset=utf-8",
 	".txt":      "text/plain; charset=utf-8",
+	".bili":     "text/plain; charset=utf-8",
 	".json":     "application/json; charset=utf-8",
 	".pdf":      "application/pdf",
 }
@@ -86,9 +92,11 @@ type KBService interface {
 	GetDocumentMeta(userID uint64, isSuperAdmin bool, kbID, docID, refDomainID uint64) (*model.KBDocumentListItem, error)
 	GetDocumentContent(userID uint64, isSuperAdmin bool, kbID, docID uint64, obf bool, refDomainID uint64) (map[string]interface{}, error)
 	GetDocumentRaw(userID uint64, isSuperAdmin bool, kbID, docID uint64, obf bool, refDomainID uint64) (fileName, mimeType string, isSVG bool, data []byte, err error)
+	GetBilibiliPreview(userID uint64, isSuperAdmin bool, kbID, docID, refDomainID uint64) (*model.KBBilibiliPreview, error)
 	UpdateMarkdownContent(userID uint64, isSuperAdmin bool, kbID, docID uint64, req model.UpdateKBFileRequest) (*model.KBDocument, error)
 	ListChunks(userID uint64, isSuperAdmin bool, kbID, docID uint64, page, pageSize int, refDomainID uint64) ([]model.KBChunk, int64, error)
 	DeleteDocument(userID uint64, isSuperAdmin bool, kbID, docID uint64) error
+	RestoreDocument(userID uint64, isSuperAdmin bool, kbID, docID uint64) (*model.KBDocument, error)
 	Search(userID uint64, isSuperAdmin bool, kbID uint64, req model.KBSearchRequest, refDomainID uint64) ([]model.KBSearchHit, error)
 	GetDownloadPreview(userID uint64, isSuperAdmin bool, kbID uint64, scope string, docID uint64, folderPath string, refDomainID uint64) (*model.KBDownloadPreview, error)
 	DownloadKB(userID uint64, isSuperAdmin bool, kbID uint64, scope string, docID uint64, folderPath string, refDomainID uint64) (filename, contentType string, data []byte, err error)
@@ -113,6 +121,7 @@ type kbService struct {
 	userRepo        repository.UserRepository
 	uploadDir       string
 	storageSecret   string
+	httpClient      *http.Client
 }
 
 func (s *kbService) SetAuditRepos(auditRepo repository.AuditLogRepository, userRepo repository.UserRepository) {
@@ -148,6 +157,7 @@ func NewKBService(
 		orgRepo:       orgRepo,
 		uploadDir:     uploadDir,
 		storageSecret: storageSecret,
+		httpClient:    &http.Client{Timeout: 8 * time.Second},
 	}
 }
 
@@ -899,6 +909,144 @@ func (s *kbService) GetDocumentRaw(userID uint64, isSuperAdmin bool, kbID, docID
 	return doc.FileName, mimeType, isSVG, raw, nil
 }
 
+var (
+	biliExactBVIDRe   = regexp.MustCompile(`^BV[0-9A-Za-z]{10}$`)
+	biliSearchBVIDRe  = regexp.MustCompile(`BV[0-9A-Za-z]{10}`)
+	biliHTMLTitleRe   = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
+	biliMetaTagRe     = regexp.MustCompile(`(?is)<meta\s+[^>]*>`)
+	biliMetaPropRe    = regexp.MustCompile(`(?is)(?:property|name)\s*=\s*["']([^"']+)["']`)
+	biliMetaContentRe = regexp.MustCompile(`(?is)content\s*=\s*["']([^"']*)["']`)
+)
+
+func (s *kbService) GetBilibiliPreview(userID uint64, isSuperAdmin bool, kbID, docID, refDomainID uint64) (*model.KBBilibiliPreview, error) {
+	if _, err := s.ensureKBViewPermission(userID, isSuperAdmin, kbID, refDomainID, docID); err != nil {
+		return nil, err
+	}
+	doc, err := s.kbRepo.FindDocumentByID(kbID, docID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, NewNotFound("document not found")
+		}
+		return nil, err
+	}
+	if doc.IsFolder {
+		return nil, NewBadRequest("cannot preview bilibili link of a folder")
+	}
+
+	ext := strings.ToLower(doc.FileExt)
+	if ext == "" {
+		ext = strings.ToLower(filepath.Ext(doc.FileName))
+	}
+	baseName := strings.TrimSuffix(doc.FileName, filepath.Ext(doc.FileName))
+	bvid := ""
+	if biliExactBVIDRe.MatchString(baseName) {
+		bvid = baseName
+	} else if ext == ".bili" && doc.FilePath != "" {
+		if raw, readErr := s.readAndDecryptFile(doc.FilePath); readErr == nil {
+			bvid = biliSearchBVIDRe.FindString(string(raw))
+		}
+	}
+	if bvid == "" {
+		return nil, NewBadRequest("no valid Bilibili BV ID found")
+	}
+
+	watchURL := "https://www.bilibili.com/video/" + bvid
+	client := s.httpClient
+	if client == nil {
+		client = &http.Client{Timeout: 8 * time.Second}
+	}
+	req, err := http.NewRequest(http.MethodGet, watchURL, nil)
+	if err != nil {
+		return &model.KBBilibiliPreview{
+			Available: false,
+			BVID:      bvid,
+			WatchURL:  watchURL,
+			Message:   err.Error(),
+		}, nil
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+	req.Header.Set("Referer", "https://www.bilibili.com")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return &model.KBBilibiliPreview{
+			Available: false,
+			BVID:      bvid,
+			WatchURL:  watchURL,
+			Message:   err.Error(),
+		}, nil
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
+	bodyStr := string(bodyBytes)
+
+	if resp.StatusCode != http.StatusOK {
+		return &model.KBBilibiliPreview{
+			Available:  false,
+			StatusCode: resp.StatusCode,
+			BVID:       bvid,
+			WatchURL:   watchURL,
+			Message:    fmt.Sprintf("bilibili returned status %d", resp.StatusCode),
+		}, nil
+	}
+
+	if strings.Contains(bodyStr, "啊叻？视频不见了") || strings.Contains(bodyStr, "视频去哪了呢") {
+		return &model.KBBilibiliPreview{
+			Available:  false,
+			StatusCode: http.StatusNotFound,
+			BVID:       bvid,
+			WatchURL:   watchURL,
+			Message:    "video not found or deleted",
+		}, nil
+	}
+
+	title, cover := parseBilibiliHTMLMeta(bodyStr)
+	return &model.KBBilibiliPreview{
+		Available:  true,
+		StatusCode: http.StatusOK,
+		BVID:       bvid,
+		Title:      title,
+		Cover:      cover,
+		EmbedURL:   "https://player.bilibili.com/player.html?bvid=" + bvid + "&page=1&as_wide=1&high_quality=1&danmaku=0",
+		WatchURL:   watchURL,
+	}, nil
+}
+
+func parseBilibiliHTMLMeta(htmlStr string) (title, cover string) {
+	for _, tag := range biliMetaTagRe.FindAllString(htmlStr, -1) {
+		propMatch := biliMetaPropRe.FindStringSubmatch(tag)
+		contentMatch := biliMetaContentRe.FindStringSubmatch(tag)
+		if len(propMatch) < 2 || len(contentMatch) < 2 {
+			continue
+		}
+		prop := strings.ToLower(strings.TrimSpace(propMatch[1]))
+		content := strings.TrimSpace(html.UnescapeString(contentMatch[1]))
+		switch prop {
+		case "og:title":
+			if title == "" {
+				title = content
+			}
+		case "og:image":
+			if cover == "" {
+				if strings.HasPrefix(content, "//") {
+					cover = "https:" + content
+				} else {
+					cover = content
+				}
+			}
+		}
+	}
+	if title == "" {
+		if m := biliHTMLTitleRe.FindStringSubmatch(htmlStr); len(m) >= 2 {
+			title = strings.TrimSpace(html.UnescapeString(m[1]))
+		}
+	}
+	title = strings.TrimSuffix(title, "_哔哩哔哩_bilibili")
+	title = strings.TrimSpace(title)
+	return title, cover
+}
+
 func (s *kbService) ListChunks(userID uint64, isSuperAdmin bool, kbID, docID uint64, page, pageSize int, refDomainID uint64) ([]model.KBChunk, int64, error) {
 	if _, err := s.ensureKBViewPermission(userID, isSuperAdmin, kbID, refDomainID, docID); err != nil {
 		return nil, 0, err
@@ -949,14 +1097,12 @@ func (s *kbService) DeleteDocument(userID uint64, isSuperAdmin bool, kbID, docID
 		if err != nil {
 			return err
 		}
+		_ = paths
 		if s.crossRefRepo != nil && len(folderDocIDs) > 0 {
 			_ = s.crossRefRepo.DeleteByKBDocIDs(folderDocIDs)
 		}
 		if s.interactionRepo != nil && len(folderDocIDs) > 0 {
 			_ = s.interactionRepo.DeleteByDocIDs(folderDocIDs)
-		}
-		for _, p := range paths {
-			_ = os.Remove(p)
 		}
 		recordAudit(s.auditRepo, s.userRepo, userID, detail.DomainID, detail.DomainName, detail.ID, detail.AssetCode, detail.Name, detail.AssetType, model.AuditActionKBFileDelete, doc.FolderPath, "删除目录 "+doc.FolderPath)
 		return nil
@@ -971,11 +1117,69 @@ func (s *kbService) DeleteDocument(userID uint64, isSuperAdmin bool, kbID, docID
 	if s.interactionRepo != nil {
 		_ = s.interactionRepo.DeleteByDocIDs([]uint64{docID})
 	}
-	if doc.FilePath != "" {
-		_ = os.Remove(doc.FilePath)
-	}
 	recordAudit(s.auditRepo, s.userRepo, userID, detail.DomainID, detail.DomainName, detail.ID, detail.AssetCode, detail.Name, detail.AssetType, model.AuditActionKBFileDelete, relativeDocPath(*doc), "删除文档 "+relativeDocPath(*doc))
 	return nil
+}
+
+func (s *kbService) RestoreDocument(userID uint64, isSuperAdmin bool, kbID, docID uint64) (*model.KBDocument, error) {
+	detail, err := s.ensureKBEditPermission(userID, isSuperAdmin, kbID)
+	if err != nil {
+		return nil, err
+	}
+	doc, err := s.kbRepo.FindDeletedDocumentByID(kbID, docID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, NewNotFound("deleted document not found")
+		}
+		return nil, err
+	}
+
+	if doc.IsFolder {
+		folderPath := strings.Trim(doc.FolderPath, "/")
+		if folderPath == "" {
+			folderPath = doc.FileName
+		}
+		exists, err := s.kbRepo.FolderExists(kbID, folderPath, doc.ID)
+		if err != nil {
+			return nil, err
+		}
+		if exists {
+			return nil, NewConflict("a folder with the same name already exists")
+		}
+		if idx := strings.LastIndex(folderPath, "/"); idx >= 0 {
+			parentPath := folderPath[:idx]
+			if parentPath != "" {
+				if _, err := s.kbRepo.EnsureFolderHierarchy(kbID, userID, parentPath); err != nil {
+					return nil, err
+				}
+			}
+		}
+		if err := s.kbRepo.RestoreFolderRecursive(kbID, doc.ID, folderPath, doc.DeletedAt.Time); err != nil {
+			return nil, err
+		}
+		doc.DeletedAt = gorm.DeletedAt{}
+		recordAudit(s.auditRepo, s.userRepo, userID, detail.DomainID, detail.DomainName, detail.ID, detail.AssetCode, detail.Name, detail.AssetType, model.AuditActionKBFileRestore, folderPath, "恢复目录 "+folderPath)
+		return doc, nil
+	}
+
+	exists, err := s.kbRepo.FileExistsInFolder(kbID, doc.FolderPath, doc.FileName, doc.ID)
+	if err != nil {
+		return nil, err
+	}
+	if exists {
+		return nil, NewConflict("a file with the same name already exists in this folder")
+	}
+	if doc.FolderPath != "" {
+		if _, err := s.kbRepo.EnsureFolderHierarchy(kbID, userID, doc.FolderPath); err != nil {
+			return nil, err
+		}
+	}
+	if err := s.kbRepo.RestoreDocument(kbID, doc.ID); err != nil {
+		return nil, err
+	}
+	doc.DeletedAt = gorm.DeletedAt{}
+	recordAudit(s.auditRepo, s.userRepo, userID, detail.DomainID, detail.DomainName, detail.ID, detail.AssetCode, detail.Name, detail.AssetType, model.AuditActionKBFileRestore, relativeDocPath(*doc), "恢复文档 "+relativeDocPath(*doc))
+	return doc, nil
 }
 
 func (s *kbService) MoveDocument(userID uint64, isSuperAdmin bool, kbID, docID uint64, targetFolderPath string) (*model.KBDocument, error) {
@@ -990,13 +1194,44 @@ func (s *kbService) MoveDocument(userID uint64, isSuperAdmin bool, kbID, docID u
 		}
 		return nil, err
 	}
-	if doc.IsFolder {
-		return nil, NewBadRequest("only files can be moved")
-	}
-
 	targetFolder, err := NormalizeFolderPath(targetFolderPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if doc.IsFolder {
+		oldPath := strings.Trim(doc.FolderPath, "/")
+		if oldPath == "" {
+			oldPath = doc.FileName
+		}
+		if targetFolder == oldPath || strings.HasPrefix(targetFolder, oldPath+"/") {
+			return nil, NewBadRequest("cannot move folder into itself or its subfolder")
+		}
+		newPath := doc.FileName
+		if targetFolder != "" {
+			newPath = targetFolder + "/" + doc.FileName
+		}
+		if newPath == oldPath {
+			return doc, nil
+		}
+		if targetFolder != "" {
+			if _, err := s.kbRepo.EnsureFolderHierarchy(kbID, userID, targetFolder); err != nil {
+				return nil, err
+			}
+		}
+		exists, err := s.kbRepo.FolderExists(kbID, newPath, doc.ID)
+		if err != nil {
+			return nil, err
+		}
+		if exists {
+			return nil, NewConflict("a folder with the same name already exists in the target folder")
+		}
+		if err := s.kbRepo.RenameFolder(kbID, doc.ID, oldPath, doc.FileName, newPath); err != nil {
+			return nil, err
+		}
+		doc.FolderPath = newPath
+		recordAudit(s.auditRepo, s.userRepo, userID, detail.DomainID, detail.DomainName, detail.ID, detail.AssetCode, detail.Name, detail.AssetType, model.AuditActionKBFileMove, newPath, fmt.Sprintf("移动目录 %s -> %s", oldPath, newPath))
+		return doc, nil
 	}
 
 	if doc.FolderPath != targetFolder {

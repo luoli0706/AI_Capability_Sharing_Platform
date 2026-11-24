@@ -20,6 +20,7 @@ const (
 	AuditActionKBFileCopy     = "kb.file_copy"
 	AuditActionKBFileRename   = "kb.file_rename"
 	AuditActionKBFileDelete   = "kb.file_delete"
+	AuditActionKBFileRestore  = "kb.file_restore"
 
 	AuditActionDomainCreate       = "domain.create"
 	AuditActionDomainUpdate       = "domain.update"

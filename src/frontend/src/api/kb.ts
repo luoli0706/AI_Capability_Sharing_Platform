@@ -1,6 +1,7 @@
 import request, { apiDelete, apiGet, apiPost, apiPut } from './request'
 import { deobfuscateBase64ToText, deobfuscateBytes } from '@/utils/obfuscate'
 import type {
+  KbBilibiliPreview,
   KbChunk,
   KbCommentItem,
   KbContentResult,
@@ -170,6 +171,20 @@ export function getDocumentChunks(
 
 export function deleteDocument(kbId: number, docId: number): Promise<null> {
   return apiDelete<null>(`/kb/${kbId}/documents/${docId}`)
+}
+
+export function restoreDocument(kbAssetId: number, docId: number): Promise<KbDocument> {
+  return apiPost<KbDocument>(`/kb/${kbAssetId}/documents/${docId}/restore`)
+}
+
+export function getBilibiliPreview(
+  kbAssetId: number,
+  docId: number,
+  refDomainId?: number
+): Promise<KbBilibiliPreview> {
+  return apiGet<KbBilibiliPreview>(`/kb/${kbAssetId}/documents/${docId}/bilibili`, {
+    params: withRefDomainId(undefined, refDomainId)
+  })
 }
 
 export function moveDocument(

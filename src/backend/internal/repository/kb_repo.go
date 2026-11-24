@@ -19,6 +19,7 @@ type KBRepository interface {
 	ListDocumentsByParentPaged(kbAssetID uint64, parentFolder string, offset, limit int, extGroup string) ([]model.KBDocument, int64, error)
 	GetFolderSummary(kbAssetID uint64, parentFolder string, extGroup string) (int64, time.Time, error)
 	FindDocumentByID(kbAssetID, docID uint64) (*model.KBDocument, error)
+	FindDeletedDocumentByID(kbAssetID, docID uint64) (*model.KBDocument, error)
 	ListMatchingFiles(kbAssetID uint64, scope string, docID uint64, folderPath string) ([]model.KBDocument, error)
 	FileExistsInFolder(kbAssetID uint64, folderPath, fileName string, excludeDocID uint64) (bool, error)
 	FolderExists(kbAssetID uint64, folderPath string, excludeDocID uint64) (bool, error)
@@ -31,6 +32,8 @@ type KBRepository interface {
 	ListChunks(kbAssetID, docID uint64, page, pageSize int) ([]model.KBChunk, int64, error)
 	DeleteDocument(kbAssetID, docID uint64) error
 	DeleteFolderRecursive(kbAssetID uint64, folderPath string) ([]string, error)
+	RestoreDocument(kbAssetID, docID uint64) error
+	RestoreFolderRecursive(kbAssetID, folderDocID uint64, folderPath string, deletedAt time.Time) error
 	SearchChunks(kbAssetID uint64, query string, topK int) ([]model.KBSearchHit, error)
 }
 
@@ -394,6 +397,44 @@ func (r *kbRepository) DeleteFolderRecursive(kbAssetID uint64, folderPath string
 		return recalculateKBCounts(tx, kbAssetID)
 	})
 	return filePaths, err
+}
+
+func (r *kbRepository) FindDeletedDocumentByID(kbAssetID, docID uint64) (*model.KBDocument, error) {
+	var doc model.KBDocument
+	if err := r.db.Unscoped().Where("id = ? AND kb_asset_id = ? AND deleted_at IS NOT NULL", docID, kbAssetID).First(&doc).Error; err != nil {
+		return nil, err
+	}
+	return &doc, nil
+}
+
+func (r *kbRepository) RestoreDocument(kbAssetID, docID uint64) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Unscoped().Model(&model.KBDocument{}).
+			Where("id = ? AND kb_asset_id = ? AND deleted_at IS NOT NULL", docID, kbAssetID).
+			Update("deleted_at", nil).Error; err != nil {
+			return err
+		}
+		return recalculateKBCounts(tx, kbAssetID)
+	})
+}
+
+func (r *kbRepository) RestoreFolderRecursive(kbAssetID, folderDocID uint64, folderPath string, deletedAt time.Time) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Unscoped().Model(&model.KBDocument{}).
+			Where("id = ? AND kb_asset_id = ? AND deleted_at IS NOT NULL", folderDocID, kbAssetID).
+			Update("deleted_at", nil).Error; err != nil {
+			return err
+		}
+		winStart := deletedAt.Add(-2 * time.Second)
+		winEnd := deletedAt.Add(2 * time.Second)
+		if err := tx.Unscoped().Model(&model.KBDocument{}).
+			Where("kb_asset_id = ? AND id <> ? AND (folder_path = ? OR folder_path LIKE ?) AND deleted_at IS NOT NULL AND deleted_at >= ? AND deleted_at <= ?",
+				kbAssetID, folderDocID, folderPath, folderPath+"/%", winStart, winEnd).
+			Update("deleted_at", nil).Error; err != nil {
+			return err
+		}
+		return recalculateKBCounts(tx, kbAssetID)
+	})
 }
 
 func recalculateKBCounts(tx *gorm.DB, kbAssetID uint64) error {

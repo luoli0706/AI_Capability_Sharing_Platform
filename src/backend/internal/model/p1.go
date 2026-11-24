@@ -271,6 +271,17 @@ type KBPreviewFile struct {
 	Size int64  `json:"size"`
 }
 
+type KBBilibiliPreview struct {
+	Available  bool   `json:"available"`
+	StatusCode int    `json:"status_code"`
+	BVID       string `json:"bvid"`
+	Title      string `json:"title"`
+	Cover      string `json:"cover"`
+	EmbedURL   string `json:"embed_url"`
+	WatchURL   string `json:"watch_url"`
+	Message    string `json:"message"`
+}
+
 type KBDownloadPreview struct {
 	Scope      string          `json:"scope"`
 	Target     string          `json:"target"`

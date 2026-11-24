@@ -23,6 +23,7 @@ import {
   Picture,
   Pointer,
   Refresh,
+  RefreshLeft,
   RefreshRight,
   Right,
   Search,
@@ -30,6 +31,7 @@ import {
   Star,
   StarFilled,
   Upload,
+  VideoPlay,
   ZoomIn,
   ZoomOut
 } from '@element-plus/icons-vue'
@@ -48,6 +50,7 @@ import {
   createKbFolder,
   deleteDocument,
   deleteDocumentComment,
+  getBilibiliPreview,
   getDocumentContent,
   getDocumentInteractions,
   getDocumentMeta,
@@ -55,6 +58,7 @@ import {
   listDocumentComments,
   moveDocument,
   renameDocument,
+  restoreDocument,
   searchKB,
   toggleDocumentFavorite,
   toggleDocumentLike,
@@ -66,6 +70,7 @@ import { useKbTreeCacheStore } from '@/stores/kbTreeCache'
 import type {
   AssetItem,
   DomainCrossRefItem,
+  KbBilibiliPreview,
   KbChunk,
   KbCommentItem,
   KbContentResult,
@@ -85,6 +90,7 @@ import {
   buildPaginatedKbTreeNodes,
   confirmAndDownloadKb,
   createLoadMoreSentinelNode,
+  extractBilibiliBvid,
   extractImmediateFiles,
   isImageFile,
   isMarkdownFile,
@@ -223,13 +229,22 @@ const createFolderOpen = ref(false)
 const newFolderName = ref('')
 const creatingFolder = ref(false)
 
-// Create Markdown File Modal
+// Create Markdown / Bilibili File Modal
 const createFileOpen = ref(false)
+const createFileMode = ref<'markdown' | 'bilibili'>('markdown')
+const createBiliInput = ref('')
 const creatingFile = ref(false)
 const createFileForm = reactive({
   file_name: '',
   content: ''
 })
+
+function extractBvidFromInput(raw: string): string | null {
+  const match = raw.trim().match(/(BV[0-9A-Za-z]{10})/)
+  return match ? match[1] : null
+}
+
+const extractedCreateBvid = computed(() => extractBvidFromInput(createBiliInput.value))
 
 // Right Pane Tabs & Preview / Editor
 const rightTab = ref<'preview' | 'search'>('preview')
@@ -240,10 +255,77 @@ const sameFolderImages = ref<KbDocument[]>([])
 const loadingImageBlob = ref(false)
 const imageDoc = ref<KbDocument | null>(null)
 const binaryDoc = ref<KbDocument | null>(null)
+const bilibiliDoc = ref<KbDocument | null>(null)
+const bilibiliPreview = ref<KbBilibiliPreview | null>(null)
 const previewMode = ref<'rendered' | 'edit' | 'split' | 'raw'>('rendered')
 const editFileName = ref('')
 const editContent = ref('')
 const savingEdit = ref(false)
+
+// Undo Stack (max 20 items, cleared when switching KBs)
+type KbUndoAction =
+  | {
+      type: 'rename'
+      kbId: number
+      docId: number
+      oldName: string
+      newName: string
+      parentFolder: string
+    }
+  | {
+      type: 'move'
+      kbId: number
+      docId: number
+      isFolder: boolean
+      name: string
+      oldParentFolder: string
+      newParentFolder: string
+    }
+  | {
+      type: 'create'
+      kbId: number
+      docId: number
+      name: string
+      parentFolder: string
+    }
+  | {
+      type: 'delete'
+      kbId: number
+      docId: number
+      isFolder: boolean
+      name: string
+      parentFolder: string
+    }
+
+const undoStack = ref<KbUndoAction[]>([])
+const undoing = ref(false)
+
+function pushUndoAction(action: KbUndoAction) {
+  undoStack.value = [...undoStack.value.slice(-19), action]
+}
+
+const currentKbUndoStack = computed(() =>
+  selectedKbId.value ? undoStack.value.filter((a) => a.kbId === selectedKbId.value) : []
+)
+
+const latestUndoLabel = computed(() => {
+  const latest = currentKbUndoStack.value[currentKbUndoStack.value.length - 1]
+  if (!latest) return ''
+  switch (latest.type) {
+    case 'rename':
+      return `重命名「${latest.newName}」`
+    case 'move':
+      return `移动「${latest.name}」`
+    case 'create':
+      return `新建「${latest.name}」`
+    case 'delete':
+      return `删除「${latest.name}」`
+  }
+})
+
+watch(selectedKbId, () => {
+  undoStack.value = []
+})
 
 // Tree Context Menu & Move Modal
 const contextMenu = reactive<{
@@ -344,6 +426,8 @@ function resetPreviewState() {
   previewDoc.value = null
   imageDoc.value = null
   binaryDoc.value = null
+  bilibiliDoc.value = null
+  bilibiliPreview.value = null
 }
 
 const renderedHtml = computed(() =>
@@ -859,11 +943,19 @@ async function handleCreateFolder() {
   }
   creatingFolder.value = true
   try {
-    await createKbFolder(selectedKbId.value, clean)
+    const created = await createKbFolder(selectedKbId.value, clean)
     ElMessage.success('文件夹已创建')
     createFolderOpen.value = false
     selectedFolderPath.value = clean
     const parentPath = clean.includes('/') ? clean.slice(0, clean.lastIndexOf('/')) : ''
+    const folderName = clean.includes('/') ? clean.slice(clean.lastIndexOf('/') + 1) : clean
+    pushUndoAction({
+      type: 'create',
+      kbId: selectedKbId.value,
+      docId: created.id,
+      name: folderName,
+      parentFolder: parentPath
+    })
     await refreshFolderInPlace(parentPath)
     await expandFolderPathInTree(clean)
   } catch {
@@ -873,14 +965,49 @@ async function handleCreateFolder() {
   }
 }
 
-function openCreateFileModal() {
+function openCreateFileModal(mode: 'markdown' | 'bilibili' = 'markdown') {
+  createFileMode.value = mode
   createFileForm.file_name = ''
   createFileForm.content = ''
+  createBiliInput.value = ''
   createFileOpen.value = true
 }
 
 async function handleCreateFile() {
   if (!selectedKbId.value) return
+  if (createFileMode.value === 'bilibili') {
+    const bvid = extractBvidFromInput(createBiliInput.value)
+    if (!bvid) {
+      ElMessage.warning('请输入有效的 BV 号或 B 站视频链接（如 BV1xx411c7mD）')
+      return
+    }
+    const parentFolder = (selectedFolderPath.value || '').replace(/^\/+|\/+$/g, '')
+    creatingFile.value = true
+    try {
+      const created = await createKbFile(selectedKbId.value, {
+        folder_path: parentFolder || undefined,
+        file_name: `${bvid}.bili`,
+        content: createBiliInput.value.trim() || bvid
+      })
+      pushUndoAction({
+        type: 'create',
+        kbId: selectedKbId.value,
+        docId: created.id,
+        name: created.file_name,
+        parentFolder
+      })
+      ElMessage.success(`已新建 B 站视频「${created.file_name}」`)
+      createFileOpen.value = false
+      await refreshFolderInPlace(parentFolder)
+      await openFileDoc(created)
+    } catch {
+      // Handled by interceptor
+    } finally {
+      creatingFile.value = false
+    }
+    return
+  }
+
   let fileName = createFileForm.file_name.trim()
   if (!fileName) {
     ElMessage.warning('请输入 Markdown 文件名，例如 guide.md')
@@ -890,16 +1017,24 @@ async function handleCreateFile() {
     fileName = `${fileName}.md`
   }
 
+  const parentFolder = (selectedFolderPath.value || '').replace(/^\/+|\/+$/g, '')
   creatingFile.value = true
   try {
     const created = await createKbFile(selectedKbId.value, {
-      folder_path: selectedFolderPath.value || undefined,
+      folder_path: parentFolder || undefined,
       file_name: fileName,
       content: createFileForm.content
     })
+    pushUndoAction({
+      type: 'create',
+      kbId: selectedKbId.value,
+      docId: created.id,
+      name: created.file_name,
+      parentFolder
+    })
     ElMessage.success(`已新建文档「${created.file_name}」`)
     createFileOpen.value = false
-    await refreshFolderInPlace(selectedFolderPath.value || '')
+    await refreshFolderInPlace(parentFolder)
     await loadPreviewDoc(created.id, 'split')
   } catch {
     // Handled by interceptor
@@ -1569,6 +1704,36 @@ async function openFileDoc(doc: KbDocument, overrideKbId?: number) {
     return
   }
 
+  const bvid = extractBilibiliBvid(doc.file_name)
+  if (bvid) {
+    loadingPreview.value = true
+    try {
+      const preview = await getBilibiliPreview(kbId, doc.id, refDomId)
+      if (isStale()) return
+      bilibiliDoc.value = doc
+      bilibiliPreview.value = preview
+    } catch {
+      if (!isStale()) {
+        bilibiliDoc.value = doc
+        bilibiliPreview.value = {
+          available: false,
+          status_code: 0,
+          bvid,
+          title: doc.file_name,
+          cover: '',
+          embed_url: '',
+          watch_url: `https://www.bilibili.com/video/${bvid}`,
+          message: '获取 B 站视频信息失败'
+        }
+      }
+    } finally {
+      if (requestSeq === previewRequestSeq) {
+        loadingPreview.value = false
+      }
+    }
+    return
+  }
+
   loadingPreview.value = true
   try {
     if (isTextFile(doc.file_name)) {
@@ -1655,16 +1820,33 @@ async function handleNodeClick(node: KbTreeNode) {
 }
 
 function allowDrag(draggingNode: { data: KbTreeNode }): boolean {
-  if (isReadOnlyKb.value) return false
-  if (draggingNode.data.isLoadMoreSentinel) return false
-  return !draggingNode.data.isFolder && Boolean(draggingNode.data.doc)
+  if (isReadOnlyKb.value || draggingNode.data.isLoadMoreSentinel) return false
+  return Boolean(draggingNode.data.doc)
 }
 
 function allowDrop(
-  _draggingNode: { data: KbTreeNode },
+  draggingNode: { data: KbTreeNode },
   dropNode: { data: KbTreeNode; level: number },
   type: 'prev' | 'inner' | 'next'
 ): boolean {
+  if (dropNode.data.isLoadMoreSentinel) return false
+  if (draggingNode.data.isFolder) {
+    const draggingPath = (
+      draggingNode.data.folderPath ||
+      draggingNode.data.doc?.folder_path ||
+      ''
+    ).replace(/^\/+|\/+$/g, '')
+    if (!draggingPath) return false
+    if (type === 'inner') {
+      if (!dropNode.data.isFolder) return false
+      const targetPath = (dropNode.data.folderPath || '').replace(/^\/+|\/+$/g, '')
+      if (draggingPath === targetPath || targetPath.startsWith(`${draggingPath}/`)) {
+        return false
+      }
+      return true
+    }
+    return dropNode.level === 1
+  }
   if (type === 'inner') {
     return dropNode.data.isFolder
   }
@@ -1678,20 +1860,44 @@ async function handleNodeDrop(
 ) {
   const doc = draggingNode.data.doc
   if (!doc || !selectedKbId.value) return
-  const sourceFolderPath = (doc.folder_path || '').replace(/^\/+|\/+$/g, '')
-  const targetFolderPath = (dropType === 'inner' ? dropNode.data.folderPath : '').replace(/^\/+|\/+$/g, '')
+  const rawFolderPath = (doc.folder_path || draggingNode.data.folderPath || '').replace(
+    /^\/+|\/+$/g,
+    ''
+  )
+  const sourceParentFolder = doc.is_folder
+    ? rawFolderPath.includes('/')
+      ? rawFolderPath.slice(0, rawFolderPath.lastIndexOf('/'))
+      : ''
+    : rawFolderPath
+  const targetFolderPath = (dropType === 'inner' ? dropNode.data.folderPath : '').replace(
+    /^\/+|\/+$/g,
+    ''
+  )
+  if (sourceParentFolder === targetFolderPath) {
+    await refreshAfterMutation([sourceParentFolder])
+    return
+  }
   try {
-    await moveDocument(selectedKbId.value, doc.id, targetFolderPath)
-    doc.folder_path = targetFolderPath
+    const moved = await moveDocument(selectedKbId.value, doc.id, targetFolderPath)
+    doc.folder_path = moved?.folder_path ?? targetFolderPath
     if (selectedFileNode.value?.doc?.id === doc.id) {
-      selectedFileNode.value.folderPath = targetFolderPath
+      selectedFileNode.value.folderPath = doc.folder_path
     }
+    pushUndoAction({
+      type: 'move',
+      kbId: selectedKbId.value,
+      docId: doc.id,
+      isFolder: Boolean(doc.is_folder),
+      name: doc.file_name,
+      oldParentFolder: sourceParentFolder,
+      newParentFolder: targetFolderPath
+    })
     ElMessage.success(
       targetFolderPath ? `已移动「${doc.file_name}」至 ${targetFolderPath}` : `已移动「${doc.file_name}」至根目录`
     )
-    await refreshAfterMutation([sourceFolderPath, targetFolderPath])
+    await refreshAfterMutation([sourceParentFolder, targetFolderPath])
   } catch {
-    await refreshAfterMutation([sourceFolderPath, targetFolderPath])
+    await refreshAfterMutation([sourceParentFolder, targetFolderPath])
   }
 }
 
@@ -1708,17 +1914,25 @@ function setClipboard(node: KbTreeNode) {
 async function handlePaste(targetFolder?: string) {
   if (!clipboardFile.value || !selectedKbId.value) return
   const targetPath = typeof targetFolder === 'string' ? targetFolder : selectedFolderPath.value
+  const cleanTarget = (targetPath || '').replace(/^\/+|\/+$/g, '')
   pasting.value = true
   try {
-    await copyDocument(
+    const copied = await copyDocument(
       clipboardFile.value.kbId,
       clipboardFile.value.docId,
       targetPath || ''
     )
+    pushUndoAction({
+      type: 'create',
+      kbId: selectedKbId.value,
+      docId: copied.id,
+      name: copied.file_name,
+      parentFolder: cleanTarget
+    })
     ElMessage.success(
       targetPath ? `已粘贴至目录 ${targetPath}` : '已粘贴至根目录'
     )
-    await refreshFolderInPlace((targetPath || '').replace(/^\/+|\/+$/g, ''))
+    await refreshFolderInPlace(cleanTarget)
   } catch {
     // Handled by interceptor
   } finally {
@@ -1779,6 +1993,7 @@ async function handleRenameNode(node: KbTreeNode) {
     })
     const newName = value.trim()
     if (newName === node.label) return
+    const oldName = node.label
 
     const renamed = await renameDocument(selectedKbId.value, node.doc.id, newName)
     ElMessage.success(`已重命名为「${renamed.file_name}」`)
@@ -1789,6 +2004,14 @@ async function handleRenameNode(node: KbTreeNode) {
         ? oldFolder.slice(0, oldFolder.lastIndexOf('/'))
         : ''
       const newFolder = (renamed.folder_path || (parentFolder ? `${parentFolder}/${renamed.file_name}` : renamed.file_name)).replace(/^\/+|\/+$/g, '')
+      pushUndoAction({
+        type: 'rename',
+        kbId: selectedKbId.value,
+        docId: node.doc.id,
+        oldName,
+        newName: renamed.file_name,
+        parentFolder
+      })
       if (selectedFolderPath.value === oldFolder || selectedFolderPath.value.startsWith(`${oldFolder}/`)) {
         selectedFolderPath.value = selectedFolderPath.value.replace(oldFolder, newFolder)
       }
@@ -1801,6 +2024,14 @@ async function handleRenameNode(node: KbTreeNode) {
       await refreshAfterMutation([parentFolder])
     } else {
       const parentFolder = (node.doc.folder_path || '').replace(/^\/+|\/+$/g, '')
+      pushUndoAction({
+        type: 'rename',
+        kbId: selectedKbId.value,
+        docId: node.doc.id,
+        oldName,
+        newName: renamed.file_name,
+        parentFolder
+      })
       if (previewDoc.value?.id === node.doc.id) {
         previewDoc.value = {
           ...previewDoc.value,
@@ -1820,6 +2051,9 @@ async function handleRenameNode(node: KbTreeNode) {
       }
       if (binaryDoc.value?.id === node.doc.id) {
         binaryDoc.value = renamed
+      }
+      if (bilibiliDoc.value?.id === node.doc.id) {
+        bilibiliDoc.value = renamed
       }
       await refreshAfterMutation([parentFolder])
     }
@@ -1850,6 +2084,15 @@ async function handleConfirmMove() {
     if (previewDoc.value?.id === node.doc.id) {
       previewDoc.value = { ...previewDoc.value, folder_path: targetFolderPath }
     }
+    pushUndoAction({
+      type: 'move',
+      kbId: selectedKbId.value,
+      docId: node.doc.id,
+      isFolder: Boolean(node.doc.is_folder),
+      name: node.doc.file_name,
+      oldParentFolder: sourceFolderPath,
+      newParentFolder: targetFolderPath
+    })
     ElMessage.success(
       targetFolderPath
         ? `已移动「${node.label}」至 ${targetFolderPath}`
@@ -1994,6 +2237,84 @@ function handleKeydown(e: KeyboardEvent) {
   } else if (key === 'v' && clipboardFile.value) {
     e.preventDefault()
     handlePaste()
+  } else if (
+    key === 'z' &&
+    !e.shiftKey &&
+    !novelReaderOpen.value &&
+    !createFolderOpen.value &&
+    !createFileOpen.value &&
+    !moveDialogOpen.value &&
+    !lightboxOpen.value &&
+    currentKbUndoStack.value.length > 0
+  ) {
+    e.preventDefault()
+    void handleUndo()
+  }
+}
+
+async function handleUndo() {
+  if (isReadOnlyKb.value || !selectedKbId.value || undoing.value) return
+  const kbId = selectedKbId.value
+  let idx = -1
+  for (let i = undoStack.value.length - 1; i >= 0; i--) {
+    if (undoStack.value[i].kbId === kbId) {
+      idx = i
+      break
+    }
+  }
+  if (idx === -1) return
+  const action = undoStack.value[idx]
+  undoStack.value = [
+    ...undoStack.value.slice(0, idx),
+    ...undoStack.value.slice(idx + 1)
+  ]
+  undoing.value = true
+  try {
+    if (action.type === 'rename') {
+      await renameDocument(kbId, action.docId, action.oldName)
+      if (previewDoc.value?.id === action.docId) {
+        previewDoc.value = { ...previewDoc.value, file_name: action.oldName }
+        editFileName.value = action.oldName
+      }
+      if (selectedFileNode.value?.doc?.id === action.docId && selectedFileNode.value.doc) {
+        selectedFileNode.value = {
+          ...selectedFileNode.value,
+          label: action.oldName,
+          doc: { ...selectedFileNode.value.doc, file_name: action.oldName }
+        }
+      }
+      if (bilibiliDoc.value?.id === action.docId) {
+        bilibiliDoc.value = { ...bilibiliDoc.value, file_name: action.oldName }
+      }
+      await refreshAfterMutation([action.parentFolder])
+      ElMessage.success(`已撤销：重命名「${action.newName}」`)
+    } else if (action.type === 'move') {
+      await moveDocument(kbId, action.docId, action.oldParentFolder)
+      if (selectedFileNode.value?.doc?.id === action.docId) {
+        selectedFileNode.value.folderPath = action.oldParentFolder
+      }
+      if (previewDoc.value?.id === action.docId) {
+        previewDoc.value = { ...previewDoc.value, folder_path: action.oldParentFolder }
+      }
+      await refreshAfterMutation([action.newParentFolder, action.oldParentFolder])
+      ElMessage.success(`已撤销：移动「${action.name}」`)
+    } else if (action.type === 'create') {
+      await deleteDocument(kbId, action.docId)
+      if (currentSelectedDoc.value?.id === action.docId) {
+        resetPreviewState()
+        selectedFileNode.value = null
+      }
+      await refreshAfterMutation([action.parentFolder])
+      ElMessage.success(`已撤销：新建「${action.name}」`)
+    } else if (action.type === 'delete') {
+      await restoreDocument(kbId, action.docId)
+      await refreshAfterMutation([action.parentFolder])
+      ElMessage.success(`已撤销：删除「${action.name}」`)
+    }
+  } catch {
+    // Handled by interceptor
+  } finally {
+    undoing.value = false
   }
 }
 
@@ -2034,6 +2355,14 @@ async function handleDeleteNode(node: KbTreeNode) {
         selectedFileNode.value = null
       }
     }
+    pushUndoAction({
+      type: 'delete',
+      kbId: selectedKbId.value,
+      docId: node.doc.id,
+      isFolder: node.isFolder,
+      name: node.label,
+      parentFolder
+    })
     await refreshFolderInPlace(parentFolder)
   } catch {
     // Cancelled or failed
@@ -2239,8 +2568,11 @@ onUnmounted(() => {
 
           <div class="toolbar-actions">
             <template v-if="!isReadOnlyKb">
-              <el-button type="primary" :icon="DocumentAdd" @click="openCreateFileModal">
+              <el-button type="primary" :icon="DocumentAdd" @click="openCreateFileModal('markdown')">
                 新建 Markdown
+              </el-button>
+              <el-button :icon="VideoPlay" @click="openCreateFileModal('bilibili')">
+                新建 B站视频
               </el-button>
               <el-button :icon="FolderAdd" @click="openCreateFolderModal">新建文件夹</el-button>
               <el-button
@@ -2537,7 +2869,7 @@ onUnmounted(() => {
                 <el-skeleton :rows="6" animated />
               </div>
 
-              <template v-else-if="currentSelectedDoc && (imageDoc || binaryDoc || previewDoc)">
+              <template v-else-if="currentSelectedDoc && (imageDoc || binaryDoc || previewDoc || bilibiliDoc)">
                 <!-- Uploader & Interactions Bar -->
                 <div class="doc-social-bar">
                   <div class="doc-uploader-info">
@@ -2699,6 +3031,70 @@ onUnmounted(() => {
                 >
                   下载文件
                 </el-button>
+              </div>
+
+              <div v-else-if="bilibiliDoc && bilibiliPreview" class="preview-container">
+                <div class="preview-header">
+                  <div class="preview-meta">
+                    <div class="bili-title-row">
+                      <el-tag size="small" type="danger" effect="light" class="mono-text">
+                        {{ bilibiliPreview.bvid }}
+                      </el-tag>
+                      <span class="preview-filename">
+                        {{ bilibiliPreview.title || bilibiliDoc.file_name }}
+                      </span>
+                    </div>
+                    <span class="preview-sub mono-text">
+                      {{ bilibiliDoc.folder_path || '/' }} · {{ bilibiliDoc.file_name }}
+                    </span>
+                  </div>
+                  <div class="preview-controls">
+                    <el-button
+                      tag="a"
+                      :href="bilibiliPreview.watch_url"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      type="primary"
+                      size="small"
+                      plain
+                      :icon="VideoPlay"
+                    >
+                      在 B 站打开
+                    </el-button>
+                  </div>
+                </div>
+
+                <div v-if="bilibiliPreview.available" class="bili-player-wrap">
+                  <iframe
+                    :src="bilibiliPreview.embed_url"
+                    class="bili-player-iframe"
+                    allowfullscreen
+                    referrerpolicy="no-referrer"
+                    frameborder="0"
+                    scrolling="no"
+                  />
+                </div>
+                <div v-else class="bili-alert-box">
+                  <el-alert
+                    type="warning"
+                    show-icon
+                    :closable="false"
+                    :title="`B 站返回状态 ${bilibiliPreview.status_code}：${bilibiliPreview.message || '视频暂不可用'}`"
+                  />
+                  <div class="bili-alert-actions">
+                    <el-button
+                      tag="a"
+                      :href="bilibiliPreview.watch_url"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      type="primary"
+                      size="small"
+                      :icon="VideoPlay"
+                    >
+                      前往 B 站查看原视频
+                    </el-button>
+                  </div>
+                </div>
               </div>
 
               <div v-else-if="previewDoc" class="preview-container">
@@ -3004,9 +3400,20 @@ onUnmounted(() => {
       </template>
     </el-dialog>
 
-    <!-- Create Markdown File Modal -->
-    <el-dialog v-model="createFileOpen" title="新建 Markdown 文档" width="540px" destroy-on-close>
+    <!-- Create Markdown / Bilibili File Modal -->
+    <el-dialog
+      v-model="createFileOpen"
+      :title="createFileMode === 'bilibili' ? '新建 B 站视频' : '新建 Markdown 文档'"
+      width="540px"
+      destroy-on-close
+    >
       <el-form label-position="top">
+        <el-form-item label="文件类型">
+          <el-radio-group v-model="createFileMode" size="small">
+            <el-radio-button value="markdown">Markdown 文档</el-radio-button>
+            <el-radio-button value="bilibili">B 站视频 (.bili)</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
         <el-form-item label="目标目录">
           <el-input
             :model-value="selectedFolderPath ? `/${selectedFolderPath}` : '/ (根目录)'"
@@ -3014,27 +3421,42 @@ onUnmounted(() => {
             class="mono-text"
           />
         </el-form-item>
-        <el-form-item label="文件名">
-          <el-input
-            v-model="createFileForm.file_name"
-            placeholder="例如：guide.md（未带后缀将自动补充 .md）"
-            class="mono-text"
-          />
-        </el-form-item>
-        <el-form-item label="初始内容（选填）">
-          <el-input
-            v-model="createFileForm.content"
-            type="textarea"
-            :rows="6"
-            placeholder="# 文档标题&#10;&#10;在此输入 Markdown 内容..."
-            class="mono-text"
-          />
-        </el-form-item>
+        <template v-if="createFileMode === 'bilibili'">
+          <el-form-item label="BV 号或 B 站视频链接">
+            <el-input
+              v-model="createBiliInput"
+              placeholder="例如：BV1xx411c7mD 或 https://www.bilibili.com/video/BV1xx411c7mD"
+              class="mono-text"
+              clearable
+            />
+            <div v-if="extractedCreateBvid" class="bili-create-hint">
+              将创建文件：<span class="mono-text">{{ extractedCreateBvid }}.bili</span>
+            </div>
+          </el-form-item>
+        </template>
+        <template v-else>
+          <el-form-item label="文件名">
+            <el-input
+              v-model="createFileForm.file_name"
+              placeholder="例如：guide.md（未带后缀将自动补充 .md）"
+              class="mono-text"
+            />
+          </el-form-item>
+          <el-form-item label="初始内容（选填）">
+            <el-input
+              v-model="createFileForm.content"
+              type="textarea"
+              :rows="6"
+              placeholder="# 文档标题&#10;&#10;在此输入 Markdown 内容..."
+              class="mono-text"
+            />
+          </el-form-item>
+        </template>
       </el-form>
       <template #footer>
         <el-button @click="createFileOpen = false">取消</el-button>
         <el-button type="primary" :loading="creatingFile" @click="handleCreateFile">
-          创建并编辑
+          {{ createFileMode === 'bilibili' ? '创建并预览' : '创建并编辑' }}
         </el-button>
       </template>
     </el-dialog>
@@ -3143,6 +3565,15 @@ onUnmounted(() => {
               <el-icon><Delete /></el-icon>
               <span>删除</span>
             </button>
+            <button
+              v-if="currentKbUndoStack.length > 0"
+              type="button"
+              class="kb-ctx-item"
+              @click="handleUndo(); closeContextMenu()"
+            >
+              <el-icon><RefreshLeft /></el-icon>
+              <span>撤销：{{ latestUndoLabel }} (Ctrl+Z)</span>
+            </button>
           </template>
         </template>
 
@@ -3238,6 +3669,15 @@ onUnmounted(() => {
             >
               <el-icon><Delete /></el-icon>
               <span>删除</span>
+            </button>
+            <button
+              v-if="currentKbUndoStack.length > 0"
+              type="button"
+              class="kb-ctx-item"
+              @click="handleUndo(); closeContextMenu()"
+            >
+              <el-icon><RefreshLeft /></el-icon>
+              <span>撤销：{{ latestUndoLabel }} (Ctrl+Z)</span>
             </button>
           </template>
         </template>
@@ -4377,5 +4817,50 @@ onUnmounted(() => {
   color: #1e293b;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.bili-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.bili-player-wrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #0f172a;
+  border: 1px solid #e2e8f0;
+}
+
+.bili-player-iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  display: block;
+}
+
+.bili-alert-box {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 10px;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+}
+
+.bili-alert-actions {
+  display: flex;
+  align-items: center;
+}
+
+.bili-create-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #4f46e5;
 }
 </style>
