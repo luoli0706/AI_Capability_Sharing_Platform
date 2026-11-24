@@ -38,6 +38,7 @@ var allowedKBExts = map[string]bool{
 	".md":       true,
 	".markdown": true,
 	".bili":     true,
+	".video":    true,
 }
 
 var textKBExts = map[string]bool{
@@ -45,6 +46,7 @@ var textKBExts = map[string]bool{
 	".markdown": true,
 	".txt":      true,
 	".bili":     true,
+	".video":    true,
 	".json":     true,
 	".yaml":     true,
 	".yml":      true,
@@ -77,6 +79,7 @@ var kbMIMETypes = map[string]string{
 	".markdown": "text/markdown; charset=utf-8",
 	".txt":      "text/plain; charset=utf-8",
 	".bili":     "text/plain; charset=utf-8",
+	".video":    "text/plain; charset=utf-8",
 	".json":     "application/json; charset=utf-8",
 	".pdf":      "application/pdf",
 }

@@ -24,6 +24,25 @@ export function isTextFile(fileName: string): boolean {
   )
 }
 
+export type ExternalVideoPlatform =
+  | 'bilibili'
+  | 'youtube'
+  | 'niconico'
+  | 'vimeo'
+  | 'douyin'
+  | 'tencent'
+  | 'youku'
+
+export interface ExternalVideoSource {
+  platform: ExternalVideoPlatform
+  platformLabel: string
+  videoId: string
+  suggestedFileName: string
+  embedUrl: string
+  watchUrl: string
+  requiresMagic: boolean
+}
+
 export function extractBilibiliBvid(fileName: string): string | null {
   const trimmed = fileName.trim()
   if (!trimmed) return null
@@ -31,6 +50,173 @@ export function extractBilibiliBvid(fileName: string): string | null {
   const baseName = lastDot > 0 ? trimmed.slice(0, lastDot) : trimmed
   const match = baseName.match(/^(BV[0-9A-Za-z]{10})$/)
   return match ? match[1] : null
+}
+
+function getBaseName(raw: string): string {
+  const trimmed = raw.trim()
+  const lastDot = trimmed.lastIndexOf('.')
+  return lastDot > 0 ? trimmed.slice(0, lastDot) : trimmed
+}
+
+function parseSingleExternalVideoText(raw: string, fileNameMode: boolean): ExternalVideoSource | null {
+  const trimmed = raw.trim()
+  if (!trimmed) return null
+  const baseName = getBaseName(trimmed)
+
+  // 1. Bilibili
+  const biliUrlMatch = !fileNameMode
+    ? trimmed.match(/bilibili\.com\/video\/(BV[0-9A-Za-z]{10})/i)
+    : null
+  const biliIdMatch = biliUrlMatch || baseName.match(/^(BV[0-9A-Za-z]{10})$/) || (!fileNameMode ? trimmed.match(/\b(BV[0-9A-Za-z]{10})\b/) : null)
+  if (biliIdMatch) {
+    const bvid = biliIdMatch[1]
+    return {
+      platform: 'bilibili',
+      platformLabel: '哔哩哔哩',
+      videoId: bvid,
+      suggestedFileName: `${bvid}.bili`,
+      embedUrl: `https://player.bilibili.com/player.html?bvid=${encodeURIComponent(bvid)}&page=1&as_wide=1&high_quality=1&danmaku=0`,
+      watchUrl: `https://www.bilibili.com/video/${encodeURIComponent(bvid)}`,
+      requiresMagic: false
+    }
+  }
+
+  // 2. YouTube
+  const ytUrlMatch = !fileNameMode
+    ? trimmed.match(/(?:youtube\.com\/(?:watch\?(?:[^#\s]*&)?v=|shorts\/|embed\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/i)
+    : null
+  const ytFileMatch = baseName.match(/^(?:yt|youtube)-([A-Za-z0-9_-]{11})$/i)
+  const ytMatch = ytUrlMatch || ytFileMatch
+  if (ytMatch) {
+    const id = ytMatch[1]
+    return {
+      platform: 'youtube',
+      platformLabel: 'YouTube',
+      videoId: id,
+      suggestedFileName: `yt-${id}.video`,
+      embedUrl: `https://www.youtube.com/embed/${encodeURIComponent(id)}`,
+      watchUrl: `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`,
+      requiresMagic: true
+    }
+  }
+
+  // 3. Niconico
+  const nicoUrlMatch = !fileNameMode
+    ? trimmed.match(/nicovideo\.jp\/watch\/((?:sm|nm|so)\d+)/i)
+    : null
+  const nicoFileMatch = baseName.match(/^((?:sm|nm|so)\d+)$/i)
+  const nicoMatch = nicoUrlMatch || nicoFileMatch
+  if (nicoMatch) {
+    const id = nicoMatch[1].toLowerCase()
+    return {
+      platform: 'niconico',
+      platformLabel: 'Niconico',
+      videoId: id,
+      suggestedFileName: `${id}.video`,
+      embedUrl: `https://embed.nicovideo.jp/watch/${encodeURIComponent(id)}`,
+      watchUrl: `https://www.nicovideo.jp/watch/${encodeURIComponent(id)}`,
+      requiresMagic: true
+    }
+  }
+
+  // 4. Vimeo
+  const vimeoUrlMatch = !fileNameMode
+    ? trimmed.match(/(?:player\.)?vimeo\.com\/(?:video\/)?(\d+)/i)
+    : null
+  const vimeoFileMatch = baseName.match(/^vimeo-(\d+)$/i)
+  const vimeoMatch = vimeoUrlMatch || vimeoFileMatch
+  if (vimeoMatch) {
+    const id = vimeoMatch[1]
+    return {
+      platform: 'vimeo',
+      platformLabel: 'Vimeo',
+      videoId: id,
+      suggestedFileName: `vimeo-${id}.video`,
+      embedUrl: `https://player.vimeo.com/video/${encodeURIComponent(id)}`,
+      watchUrl: `https://vimeo.com/${encodeURIComponent(id)}`,
+      requiresMagic: true
+    }
+  }
+
+  // 5. Douyin
+  const douyinUrlMatch = !fileNameMode
+    ? trimmed.match(/douyin\.com\/video\/(\d+)/i)
+    : null
+  const douyinFileMatch = baseName.match(/^douyin-(\d+)$/i)
+  const douyinMatch = douyinUrlMatch || douyinFileMatch
+  if (douyinMatch) {
+    const id = douyinMatch[1]
+    return {
+      platform: 'douyin',
+      platformLabel: '抖音',
+      videoId: id,
+      suggestedFileName: `douyin-${id}.video`,
+      embedUrl: `https://open.douyin.com/player/video?vid=${encodeURIComponent(id)}&autoplay=0`,
+      watchUrl: `https://www.douyin.com/video/${encodeURIComponent(id)}`,
+      requiresMagic: false
+    }
+  }
+
+  // 6. Tencent Video
+  const tencentUrlMatch = !fileNameMode
+    ? trimmed.match(/v\.qq\.com\/x\/(?:page|cover\/[^/]+)\/([A-Za-z0-9]+)\.html/i)
+    : null
+  const tencentFileMatch = baseName.match(/^qq-([A-Za-z0-9]+)$/i)
+  const tencentMatch = tencentUrlMatch || tencentFileMatch
+  if (tencentMatch) {
+    const id = tencentMatch[1]
+    return {
+      platform: 'tencent',
+      platformLabel: '腾讯视频',
+      videoId: id,
+      suggestedFileName: `qq-${id}.video`,
+      embedUrl: `https://v.qq.com/txp/iframe/player.html?vid=${encodeURIComponent(id)}`,
+      watchUrl: `https://v.qq.com/x/page/${encodeURIComponent(id)}.html`,
+      requiresMagic: false
+    }
+  }
+
+  // 7. Youku
+  const youkuUrlMatch = !fileNameMode
+    ? trimmed.match(/v\.youku\.com\/v_show\/id_([A-Za-z0-9=]+)/i)
+    : null
+  const youkuFileMatch = baseName.match(/^youku-([A-Za-z0-9=]+)$/i)
+  const youkuMatch = youkuUrlMatch || youkuFileMatch
+  if (youkuMatch) {
+    const id = youkuMatch[1]
+    return {
+      platform: 'youku',
+      platformLabel: '优酷',
+      videoId: id,
+      suggestedFileName: `youku-${id}.video`,
+      embedUrl: `https://player.youku.com/embed/${encodeURIComponent(id)}`,
+      watchUrl: `https://v.youku.com/v_show/id_${encodeURIComponent(id)}.html`,
+      requiresMagic: false
+    }
+  }
+
+  return null
+}
+
+export function parseExternalVideoSource(
+  input: string,
+  fileName?: string
+): ExternalVideoSource | null {
+  if (input && input.trim()) {
+    const fromInput = parseSingleExternalVideoText(input, false)
+    if (fromInput) return fromInput
+  }
+  if (fileName && fileName.trim()) {
+    return parseSingleExternalVideoText(fileName, true)
+  }
+  return null
+}
+
+export function isExternalVideoFile(fileName: string): boolean {
+  const trimmed = fileName.trim()
+  if (!trimmed) return false
+  if (/\.(bili|video)$/i.test(trimmed)) return true
+  return parseExternalVideoSource('', trimmed) !== null
 }
 
 const SCOPE_LABELS: Record<KbDownloadParams['scope'], string> = {

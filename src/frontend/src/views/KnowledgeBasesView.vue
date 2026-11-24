@@ -69,7 +69,6 @@ import { useKbTreeCacheStore } from '@/stores/kbTreeCache'
 import type {
   AssetItem,
   DomainCrossRefItem,
-  KbBilibiliPreview,
   KbChunk,
   KbCommentItem,
   KbContentResult,
@@ -89,13 +88,15 @@ import {
   buildPaginatedKbTreeNodes,
   confirmAndDownloadKb,
   createLoadMoreSentinelNode,
-  extractBilibiliBvid,
   extractImmediateFiles,
+  isExternalVideoFile,
   isImageFile,
   isMarkdownFile,
   isTextFile,
   isTxtFile,
   MAX_KB_FILE_SIZE,
+  parseExternalVideoSource,
+  type ExternalVideoSource,
   type KbTreeNode
 } from '@/utils/kbDownload'
 import { renderMarkdown } from '@/utils/markdown'
@@ -228,22 +229,17 @@ const createFolderOpen = ref(false)
 const newFolderName = ref('')
 const creatingFolder = ref(false)
 
-// Create Markdown / Bilibili File Modal
+// Create Markdown / External Video File Modal
 const createFileOpen = ref(false)
-const createFileMode = ref<'markdown' | 'bilibili'>('markdown')
-const createBiliInput = ref('')
+const createFileMode = ref<'markdown' | 'video'>('markdown')
+const createVideoInput = ref('')
 const creatingFile = ref(false)
 const createFileForm = reactive({
   file_name: '',
   content: ''
 })
 
-function extractBvidFromInput(raw: string): string | null {
-  const match = raw.trim().match(/(BV[0-9A-Za-z]{10})/)
-  return match ? match[1] : null
-}
-
-const extractedCreateBvid = computed(() => extractBvidFromInput(createBiliInput.value))
+const parsedCreateVideo = computed(() => parseExternalVideoSource(createVideoInput.value))
 
 // Right Pane Tabs & Preview / Editor
 const rightTab = ref<'preview' | 'search'>('preview')
@@ -254,8 +250,8 @@ const sameFolderImages = ref<KbDocument[]>([])
 const loadingImageBlob = ref(false)
 const imageDoc = ref<KbDocument | null>(null)
 const binaryDoc = ref<KbDocument | null>(null)
-const bilibiliDoc = ref<KbDocument | null>(null)
-const bilibiliPreview = ref<KbBilibiliPreview | null>(null)
+const videoDoc = ref<KbDocument | null>(null)
+const videoPreview = ref<ExternalVideoSource | null>(null)
 const previewMode = ref<'rendered' | 'edit' | 'split' | 'raw'>('rendered')
 const editFileName = ref('')
 const editContent = ref('')
@@ -425,8 +421,8 @@ function resetPreviewState() {
   previewDoc.value = null
   imageDoc.value = null
   binaryDoc.value = null
-  bilibiliDoc.value = null
-  bilibiliPreview.value = null
+  videoDoc.value = null
+  videoPreview.value = null
 }
 
 const renderedHtml = computed(() =>
@@ -964,20 +960,22 @@ async function handleCreateFolder() {
   }
 }
 
-function openCreateFileModal(mode: 'markdown' | 'bilibili' = 'markdown') {
+function openCreateFileModal(mode: 'markdown' | 'video' = 'markdown') {
   createFileMode.value = mode
   createFileForm.file_name = ''
   createFileForm.content = ''
-  createBiliInput.value = ''
+  createVideoInput.value = ''
   createFileOpen.value = true
 }
 
 async function handleCreateFile() {
   if (!selectedKbId.value) return
-  if (createFileMode.value === 'bilibili') {
-    const bvid = extractBvidFromInput(createBiliInput.value)
-    if (!bvid) {
-      ElMessage.warning('请输入有效的 BV 号或 B 站视频链接（如 BV1xx411c7mD）')
+  if (createFileMode.value === 'video') {
+    const parsed = parseExternalVideoSource(createVideoInput.value)
+    if (!parsed) {
+      ElMessage.warning(
+        '请输入有效的视频链接或视频 ID（支持 B站、YouTube、Niconico、Vimeo、抖音、腾讯视频、优酷）'
+      )
       return
     }
     const parentFolder = (selectedFolderPath.value || '').replace(/^\/+|\/+$/g, '')
@@ -985,8 +983,8 @@ async function handleCreateFile() {
     try {
       const created = await createKbFile(selectedKbId.value, {
         folder_path: parentFolder || undefined,
-        file_name: `${bvid}.bili`,
-        content: createBiliInput.value.trim() || bvid
+        file_name: parsed.suggestedFileName,
+        content: createVideoInput.value.trim() || parsed.watchUrl
       })
       pushUndoAction({
         type: 'create',
@@ -995,7 +993,7 @@ async function handleCreateFile() {
         name: created.file_name,
         parentFolder
       })
-      ElMessage.success(`已新建 B 站视频「${created.file_name}」`)
+      ElMessage.success(`已新建外链视频「${created.file_name}」`)
       createFileOpen.value = false
       await refreshFolderInPlace(parentFolder)
       await openFileDoc(created)
@@ -1703,25 +1701,35 @@ async function openFileDoc(doc: KbDocument, overrideKbId?: number) {
     return
   }
 
-  const bvid = extractBilibiliBvid(doc.file_name)
-  if (bvid) {
-    // 直接由用户浏览器直连 B 站官方嵌入式播放器，避免服务端机房 IP 触发 412 风控且不消耗服务器流量
-    bilibiliDoc.value = doc
-    bilibiliPreview.value = {
-      available: true,
-      status_code: 200,
-      bvid,
-      title: doc.file_name,
-      cover: '',
-      embed_url: `https://player.bilibili.com/player.html?bvid=${encodeURIComponent(bvid)}&page=1&as_wide=1&high_quality=1&danmaku=0`,
-      watch_url: `https://www.bilibili.com/video/${encodeURIComponent(bvid)}`,
-      message: ''
-    }
+  const directVideo = parseExternalVideoSource('', doc.file_name)
+  if (directVideo) {
+    // 直接由用户浏览器直连视频平台官方嵌入式播放器，不消耗服务器流量
+    videoDoc.value = doc
+    videoPreview.value = directVideo
     return
   }
 
   loadingPreview.value = true
   try {
+    if (isExternalVideoFile(doc.file_name)) {
+      const contentRes = await getDocumentContent(kbId, doc.id, refDomId)
+      if (isStale()) return
+      const contentVideo = !contentRes.is_binary
+        ? parseExternalVideoSource(contentRes.content, doc.file_name)
+        : null
+      if (contentVideo) {
+        videoDoc.value = doc
+        videoPreview.value = contentVideo
+      } else if (contentRes.is_binary) {
+        binaryDoc.value = doc
+      } else {
+        previewDoc.value = contentRes
+        editFileName.value = contentRes.file_name
+        editContent.value = contentRes.content
+        previewMode.value = 'raw'
+      }
+      return
+    }
     if (isTextFile(doc.file_name)) {
       const contentRes = await getDocumentContent(kbId, doc.id, refDomId)
       if (isStale()) return
@@ -2038,8 +2046,8 @@ async function handleRenameNode(node: KbTreeNode) {
       if (binaryDoc.value?.id === node.doc.id) {
         binaryDoc.value = renamed
       }
-      if (bilibiliDoc.value?.id === node.doc.id) {
-        bilibiliDoc.value = renamed
+      if (videoDoc.value?.id === node.doc.id) {
+        videoDoc.value = renamed
       }
       await refreshAfterMutation([parentFolder])
     }
@@ -2272,8 +2280,8 @@ async function handleUndo() {
           doc: { ...selectedFileNode.value.doc, file_name: action.oldName }
         }
       }
-      if (bilibiliDoc.value?.id === action.docId) {
-        bilibiliDoc.value = { ...bilibiliDoc.value, file_name: action.oldName }
+      if (videoDoc.value?.id === action.docId) {
+        videoDoc.value = { ...videoDoc.value, file_name: action.oldName }
       }
       await refreshAfterMutation([action.parentFolder])
       ElMessage.success(`已撤销：重命名「${action.newName}」`)
@@ -2563,8 +2571,8 @@ onUnmounted(() => {
               <el-button type="primary" :icon="DocumentAdd" @click="openCreateFileModal('markdown')">
                 新建 Markdown
               </el-button>
-              <el-button :icon="VideoPlay" @click="openCreateFileModal('bilibili')">
-                新建 B站视频
+              <el-button :icon="VideoPlay" @click="openCreateFileModal('video')">
+                新建外链视频
               </el-button>
               <el-button :icon="FolderAdd" @click="openCreateFolderModal">新建文件夹</el-button>
               <el-button
@@ -2697,10 +2705,10 @@ onUnmounted(() => {
               <div class="cross-file-main">
                 <el-icon
                   :size="16"
-                  :color="isImageFile(refItem.title) ? '#059669' : extractBilibiliBvid(refItem.title) ? '#FB7299' : '#4F46E5'"
+                  :color="isImageFile(refItem.title) ? '#059669' : isExternalVideoFile(refItem.title) ? '#FB7299' : '#4F46E5'"
                 >
                   <Picture v-if="isImageFile(refItem.title)" />
-                  <VideoPlay v-else-if="extractBilibiliBvid(refItem.title)" />
+                  <VideoPlay v-else-if="isExternalVideoFile(refItem.title)" />
                   <Document v-else />
                 </el-icon>
                 <div class="cross-file-info">
@@ -2768,11 +2776,11 @@ onUnmounted(() => {
                   <div class="tree-node-left">
                     <el-icon
                       :size="15"
-                      :color="data.isFolder ? '#D97706' : isImageFile(data.label) ? '#059669' : extractBilibiliBvid(data.label) ? '#FB7299' : '#4F46E5'"
+                      :color="data.isFolder ? '#D97706' : isImageFile(data.label) ? '#059669' : isExternalVideoFile(data.label) ? '#FB7299' : '#4F46E5'"
                     >
                       <Folder v-if="data.isFolder" />
                       <Picture v-else-if="isImageFile(data.label)" />
-                      <VideoPlay v-else-if="extractBilibiliBvid(data.label)" />
+                      <VideoPlay v-else-if="isExternalVideoFile(data.label)" />
                       <Document v-else />
                     </el-icon>
                     <span class="tree-node-label">{{ data.label }}</span>
@@ -2869,7 +2877,7 @@ onUnmounted(() => {
                 <el-skeleton :rows="6" animated />
               </div>
 
-              <template v-else-if="currentSelectedDoc && (imageDoc || binaryDoc || previewDoc || bilibiliDoc)">
+              <template v-else-if="currentSelectedDoc && (imageDoc || binaryDoc || previewDoc || videoDoc)">
                 <!-- Uploader & Interactions Bar -->
                 <div class="doc-social-bar">
                   <div class="doc-uploader-info">
@@ -3033,25 +3041,32 @@ onUnmounted(() => {
                 </el-button>
               </div>
 
-              <div v-else-if="bilibiliDoc && bilibiliPreview" class="preview-container">
+              <div v-else-if="videoDoc && videoPreview" class="preview-container">
                 <div class="preview-header">
                   <div class="preview-meta">
                     <div class="bili-title-row">
-                      <el-tag size="small" type="danger" effect="light" class="mono-text">
-                        {{ bilibiliPreview.bvid }}
+                      <el-tag
+                        size="small"
+                        :type="videoPreview.requiresMagic ? 'warning' : 'danger'"
+                        effect="light"
+                      >
+                        {{ videoPreview.platformLabel }}
+                      </el-tag>
+                      <el-tag size="small" type="info" effect="plain" class="mono-text">
+                        {{ videoPreview.videoId }}
                       </el-tag>
                       <span class="preview-filename">
-                        {{ bilibiliPreview.title || bilibiliDoc.file_name }}
+                        {{ videoDoc.file_name }}
                       </span>
                     </div>
                     <span class="preview-sub mono-text">
-                      {{ bilibiliDoc.folder_path || '/' }} · {{ bilibiliDoc.file_name }}
+                      {{ videoDoc.folder_path || '/' }} · {{ videoDoc.file_name }}
                     </span>
                   </div>
                   <div class="preview-controls">
                     <el-button
                       tag="a"
-                      :href="bilibiliPreview.watch_url"
+                      :href="videoPreview.watchUrl"
                       target="_blank"
                       rel="noopener noreferrer"
                       type="primary"
@@ -3059,14 +3074,23 @@ onUnmounted(() => {
                       plain
                       :icon="VideoPlay"
                     >
-                      在 B 站打开
+                      在 {{ videoPreview.platformLabel }} 打开
                     </el-button>
                   </div>
                 </div>
 
-                <div v-if="bilibiliPreview.available" class="bili-player-wrap">
+                <el-alert
+                  v-if="videoPreview.requiresMagic"
+                  type="warning"
+                  show-icon
+                  :closable="false"
+                  :title="`提示：该视频来自境外平台（${videoPreview.platformLabel}），需要使用一些魔法来观看。`"
+                  class="video-magic-alert"
+                />
+
+                <div class="bili-player-wrap">
                   <iframe
-                    :src="bilibiliPreview.embed_url"
+                    :src="videoPreview.embedUrl"
                     class="bili-player-iframe"
                     allow="autoplay; fullscreen; picture-in-picture"
                     allowfullscreen
@@ -3074,27 +3098,6 @@ onUnmounted(() => {
                     frameborder="0"
                     scrolling="no"
                   />
-                </div>
-                <div v-else class="bili-alert-box">
-                  <el-alert
-                    type="warning"
-                    show-icon
-                    :closable="false"
-                    :title="`B 站返回状态 ${bilibiliPreview.status_code}：${bilibiliPreview.message || '视频暂不可用'}`"
-                  />
-                  <div class="bili-alert-actions">
-                    <el-button
-                      tag="a"
-                      :href="bilibiliPreview.watch_url"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      type="primary"
-                      size="small"
-                      :icon="VideoPlay"
-                    >
-                      前往 B 站查看原视频
-                    </el-button>
-                  </div>
                 </div>
               </div>
 
@@ -3401,10 +3404,10 @@ onUnmounted(() => {
       </template>
     </el-dialog>
 
-    <!-- Create Markdown / Bilibili File Modal -->
+    <!-- Create Markdown / External Video File Modal -->
     <el-dialog
       v-model="createFileOpen"
-      :title="createFileMode === 'bilibili' ? '新建 B 站视频' : '新建 Markdown 文档'"
+      :title="createFileMode === 'video' ? '新建外链视频' : '新建 Markdown 文档'"
       width="540px"
       destroy-on-close
     >
@@ -3412,7 +3415,7 @@ onUnmounted(() => {
         <el-form-item label="文件类型">
           <el-radio-group v-model="createFileMode" size="small">
             <el-radio-button value="markdown">Markdown 文档</el-radio-button>
-            <el-radio-button value="bilibili">B 站视频 (.bili)</el-radio-button>
+            <el-radio-button value="video">外链视频 (.video / .bili)</el-radio-button>
           </el-radio-group>
         </el-form-item>
         <el-form-item label="目标目录">
@@ -3422,16 +3425,30 @@ onUnmounted(() => {
             class="mono-text"
           />
         </el-form-item>
-        <template v-if="createFileMode === 'bilibili'">
-          <el-form-item label="BV 号或 B 站视频链接">
+        <template v-if="createFileMode === 'video'">
+          <el-form-item label="视频链接或视频 ID">
             <el-input
-              v-model="createBiliInput"
-              placeholder="例如：BV1xx411c7mD 或 https://www.bilibili.com/video/BV1xx411c7mD"
+              v-model="createVideoInput"
+              placeholder="支持 B站 / YouTube / Niconico / Vimeo / 抖音 / 腾讯视频 / 优酷 链接或 ID"
               class="mono-text"
               clearable
             />
-            <div v-if="extractedCreateBvid" class="bili-create-hint">
-              将创建文件：<span class="mono-text">{{ extractedCreateBvid }}.bili</span>
+            <div v-if="parsedCreateVideo" class="bili-create-hint">
+              <div class="video-create-meta">
+                <el-tag
+                  size="small"
+                  :type="parsedCreateVideo.requiresMagic ? 'warning' : 'success'"
+                  effect="light"
+                >
+                  {{ parsedCreateVideo.platformLabel }}
+                </el-tag>
+                <span>
+                  将创建文件：<span class="mono-text">{{ parsedCreateVideo.suggestedFileName }}</span>
+                </span>
+              </div>
+              <div v-if="parsedCreateVideo.requiresMagic" class="video-create-magic-tip">
+                提示：该平台需要使用一些魔法来观看
+              </div>
             </div>
           </el-form-item>
         </template>
@@ -3457,7 +3474,7 @@ onUnmounted(() => {
       <template #footer>
         <el-button @click="createFileOpen = false">取消</el-button>
         <el-button type="primary" :loading="creatingFile" @click="handleCreateFile">
-          {{ createFileMode === 'bilibili' ? '创建并预览' : '创建并编辑' }}
+          {{ createFileMode === 'video' ? '创建并预览' : '创建并编辑' }}
         </el-button>
       </template>
     </el-dialog>
@@ -4860,8 +4877,27 @@ onUnmounted(() => {
 }
 
 .bili-create-hint {
-  margin-top: 6px;
+  margin-top: 8px;
   font-size: 12px;
   color: #4f46e5;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.video-create-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.video-create-magic-tip {
+  color: #b45309;
+  font-size: 12px;
+}
+
+.video-magic-alert {
+  margin-bottom: 12px;
 }
 </style>

@@ -585,6 +585,19 @@ func TestKBCreateAndUpdateMarkdownFile(t *testing.T) {
 		t.Fatalf("unexpected created doc: %+v", doc1)
 	}
 
+	// 1b. CreateMarkdownFile with .video extension -> accepted
+	videoDoc, err := kbSvc.CreateMarkdownFile(10, false, 1, model.CreateKBFileRequest{
+		FolderPath: "guides",
+		FileName:   "demo.video",
+		Content:    "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+	})
+	if err != nil {
+		t.Fatalf("CreateMarkdownFile .video failed: %v", err)
+	}
+	if videoDoc.FileName != "demo.video" || videoDoc.FileExt != ".video" {
+		t.Fatalf("unexpected .video doc: %+v", videoDoc)
+	}
+
 	// 2. Duplicate CreateMarkdownFile -> 409 Conflict
 	_, err = kbSvc.CreateMarkdownFile(10, false, 1, model.CreateKBFileRequest{
 		FolderPath: "guides",
@@ -640,9 +653,9 @@ func TestKBCreateAndUpdateMarkdownFile(t *testing.T) {
 	}
 
 	// 5. Verify audit logs include kb.file_create and kb.file_update
-	if len(auditRepo.logs) != 3 ||
+	if len(auditRepo.logs) != 4 ||
 		auditRepo.logs[0].Action != model.AuditActionKBFileCreate ||
-		auditRepo.logs[2].Action != model.AuditActionKBFileUpdate {
+		auditRepo.logs[3].Action != model.AuditActionKBFileUpdate {
 		t.Fatalf("unexpected audit logs: %+v", auditRepo.logs)
 	}
 }
