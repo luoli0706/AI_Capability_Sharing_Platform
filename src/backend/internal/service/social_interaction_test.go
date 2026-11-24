@@ -870,17 +870,20 @@ func TestKBInteractionsAndUploaderEnrichment(t *testing.T) {
 		t.Fatalf("domain owner should be able to delete comment, got err=%v", err)
 	}
 
-	// Cleanup on DeleteDocument
+	// Soft-delete preserves interactions so RestoreDocument brings them back intact
 	if err := kbSvc.DeleteDocument(1, false, 20, 100); err != nil {
 		t.Fatalf("DeleteDocument failed: %v", err)
 	}
+	if _, err := kbSvc.RestoreDocument(1, false, 20, 100); err != nil {
+		t.Fatalf("RestoreDocument failed: %v", err)
+	}
 	likeCount, _, _, err := interRepo.GetLikeStats(100, 2)
-	if err != nil || likeCount != 0 {
-		t.Fatalf("expected likes cleaned up after DeleteDocument, got %d err=%v", likeCount, err)
+	if err != nil || likeCount != 1 {
+		t.Fatalf("expected likes preserved after soft-delete and restore, got %d err=%v", likeCount, err)
 	}
 	isFav, err := interRepo.IsFavorited(100, 2)
-	if err != nil || isFav {
-		t.Fatalf("expected favorites cleaned up after DeleteDocument, got %v err=%v", isFav, err)
+	if err != nil || !isFav {
+		t.Fatalf("expected favorites preserved after soft-delete and restore, got %v err=%v", isFav, err)
 	}
 }
 

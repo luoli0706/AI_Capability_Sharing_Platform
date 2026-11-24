@@ -157,7 +157,7 @@ func NewKBService(
 		orgRepo:       orgRepo,
 		uploadDir:     uploadDir,
 		storageSecret: storageSecret,
-		httpClient:    &http.Client{Timeout: 8 * time.Second},
+		httpClient:    &http.Client{Timeout: 8 * time.Second, CheckRedirect: bilibiliCheckRedirect},
 	}
 }
 
@@ -951,10 +951,15 @@ func (s *kbService) GetBilibiliPreview(userID uint64, isSuperAdmin bool, kbID, d
 	}
 
 	watchURL := "https://www.bilibili.com/video/" + bvid
-	client := s.httpClient
-	if client == nil {
-		client = &http.Client{Timeout: 8 * time.Second}
+	baseClient := s.httpClient
+	if baseClient == nil {
+		baseClient = &http.Client{Timeout: 8 * time.Second}
 	}
+	clientCopy := *baseClient
+	if clientCopy.CheckRedirect == nil {
+		clientCopy.CheckRedirect = bilibiliCheckRedirect
+	}
+	client := &clientCopy
 	req, err := http.NewRequest(http.MethodGet, watchURL, nil)
 	if err != nil {
 		return &model.KBBilibiliPreview{
@@ -1013,6 +1018,28 @@ func (s *kbService) GetBilibiliPreview(userID uint64, isSuperAdmin bool, kbID, d
 	}, nil
 }
 
+func isAllowedBilibiliHost(host string) bool {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if h == "" {
+		return false
+	}
+	return h == "bilibili.com" || strings.HasSuffix(h, ".bilibili.com") ||
+		h == "b23.tv" || strings.HasSuffix(h, ".b23.tv")
+}
+
+func bilibiliCheckRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 5 {
+		return errors.New("stopped after 5 redirects")
+	}
+	if req.URL == nil || (req.URL.Scheme != "https" && req.URL.Scheme != "http") {
+		return errors.New("redirect to non-http scheme blocked")
+	}
+	if !isAllowedBilibiliHost(req.URL.Hostname()) {
+		return fmt.Errorf("redirect to disallowed host %q blocked", req.URL.Hostname())
+	}
+	return nil
+}
+
 func parseBilibiliHTMLMeta(htmlStr string) (title, cover string) {
 	for _, tag := range biliMetaTagRe.FindAllString(htmlStr, -1) {
 		propMatch := biliMetaPropRe.FindStringSubmatch(tag)
@@ -1029,10 +1056,13 @@ func parseBilibiliHTMLMeta(htmlStr string) (title, cover string) {
 			}
 		case "og:image":
 			if cover == "" {
-				if strings.HasPrefix(content, "//") {
-					cover = "https:" + content
-				} else {
-					cover = content
+				candidate := content
+				if strings.HasPrefix(candidate, "//") {
+					candidate = "https:" + candidate
+				}
+				lower := strings.ToLower(candidate)
+				if strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "http://") {
+					cover = candidate
 				}
 			}
 		}
@@ -1084,7 +1114,7 @@ func (s *kbService) DeleteDocument(userID uint64, isSuperAdmin bool, kbID, docID
 
 	if doc.IsFolder {
 		var folderDocIDs []uint64
-		if s.crossRefRepo != nil || s.interactionRepo != nil {
+		if s.crossRefRepo != nil {
 			if allDocs, listErr := s.kbRepo.ListDocuments(kbID); listErr == nil {
 				for _, d := range allDocs {
 					if d.FolderPath == doc.FolderPath || strings.HasPrefix(d.FolderPath, doc.FolderPath+"/") {
@@ -1101,9 +1131,6 @@ func (s *kbService) DeleteDocument(userID uint64, isSuperAdmin bool, kbID, docID
 		if s.crossRefRepo != nil && len(folderDocIDs) > 0 {
 			_ = s.crossRefRepo.DeleteByKBDocIDs(folderDocIDs)
 		}
-		if s.interactionRepo != nil && len(folderDocIDs) > 0 {
-			_ = s.interactionRepo.DeleteByDocIDs(folderDocIDs)
-		}
 		recordAudit(s.auditRepo, s.userRepo, userID, detail.DomainID, detail.DomainName, detail.ID, detail.AssetCode, detail.Name, detail.AssetType, model.AuditActionKBFileDelete, doc.FolderPath, "删除目录 "+doc.FolderPath)
 		return nil
 	}
@@ -1113,9 +1140,6 @@ func (s *kbService) DeleteDocument(userID uint64, isSuperAdmin bool, kbID, docID
 	}
 	if s.crossRefRepo != nil {
 		_ = s.crossRefRepo.DeleteByKBDocIDs([]uint64{docID})
-	}
-	if s.interactionRepo != nil {
-		_ = s.interactionRepo.DeleteByDocIDs([]uint64{docID})
 	}
 	recordAudit(s.auditRepo, s.userRepo, userID, detail.DomainID, detail.DomainName, detail.ID, detail.AssetCode, detail.Name, detail.AssetType, model.AuditActionKBFileDelete, relativeDocPath(*doc), "删除文档 "+relativeDocPath(*doc))
 	return nil

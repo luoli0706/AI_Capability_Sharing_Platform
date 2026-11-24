@@ -118,7 +118,6 @@ write_upstream_inc() {
   cat > "$tmp_file" <<EOF
 upstream ascp_backend_pool {
     server 127.0.0.1:${port};
-    keepalive 16;
 }
 EOF
   chmod 644 "$tmp_file"
@@ -193,7 +192,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
   fi
   log "[dry-run] ASCP_SLOT=\"${NEXT_SLOT}\" ASCP_PORT=\"${NEXT_PORT}\" docker compose -p \"ascp-${NEXT_SLOT}\" --env-file \"${ENV_FILE}\" -f \"${COMPOSE_FILE}\" up -d --no-build --force-recreate"
   log "[dry-run] Poll http://127.0.0.1:${NEXT_PORT}/api/v1/healthz (up to ${HEALTH_TIMEOUT}s) for HTTP 200 and \"status\":\"ok\""
-  log "[dry-run] Atomically write ${UPSTREAM_INC} -> server 127.0.0.1:${NEXT_PORT}; keepalive 16;"
+  log "[dry-run] Atomically write ${UPSTREAM_INC} -> server 127.0.0.1:${NEXT_PORT};"
   log "[dry-run] nginx -t && nginx -s reload"
   log "[dry-run] Sleep ${DRAIN_SECONDS}s to drain in-flight requests"
   log "[dry-run] Stop & remove old slot ascp-${CUR_SLOT} and any legacy ascp-nginx/ascp-backend containers"

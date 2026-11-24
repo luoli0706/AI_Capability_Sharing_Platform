@@ -138,14 +138,15 @@ type KBDocumentListResult struct {
 }
 
 type KBChunk struct {
-	ID         uint64    `gorm:"primaryKey;autoIncrement" json:"id"`
-	KBAssetID  uint64    `gorm:"column:kb_asset_id;index:idx_kb_doc;not null" json:"kb_asset_id"`
-	DocID      uint64    `gorm:"index:idx_kb_doc;not null" json:"doc_id"`
-	ChunkIndex int       `gorm:"type:int;not null" json:"chunk_index"`
-	Content    string    `gorm:"type:mediumtext;not null" json:"content"`
-	TokenCount int       `gorm:"type:int;not null;default:0" json:"token_count"`
-	Metadata   JSONRaw   `gorm:"type:json" json:"metadata,omitempty"`
-	CreatedAt  time.Time `gorm:"autoCreateTime" json:"created_at"`
+	ID         uint64         `gorm:"primaryKey;autoIncrement" json:"id"`
+	KBAssetID  uint64         `gorm:"column:kb_asset_id;index:idx_kb_doc;not null" json:"kb_asset_id"`
+	DocID      uint64         `gorm:"index:idx_kb_doc;not null" json:"doc_id"`
+	ChunkIndex int            `gorm:"type:int;not null" json:"chunk_index"`
+	Content    string         `gorm:"type:mediumtext;not null" json:"content"`
+	TokenCount int            `gorm:"type:int;not null;default:0" json:"token_count"`
+	Metadata   JSONRaw        `gorm:"type:json" json:"metadata,omitempty"`
+	CreatedAt  time.Time      `gorm:"autoCreateTime" json:"created_at"`
+	DeletedAt  gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
 func (KBChunk) TableName() string {

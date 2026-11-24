@@ -301,7 +301,7 @@ func (r *kbRepository) ReplaceDocumentChunks(kbAssetID uint64, doc *model.KBDocu
 		}).Error; err != nil {
 			return err
 		}
-		if err := tx.Where("kb_asset_id = ? AND doc_id = ?", kbAssetID, doc.ID).Delete(&model.KBChunk{}).Error; err != nil {
+		if err := tx.Unscoped().Where("kb_asset_id = ? AND doc_id = ?", kbAssetID, doc.ID).Delete(&model.KBChunk{}).Error; err != nil {
 			return err
 		}
 		if len(chunks) > 0 {
@@ -372,21 +372,23 @@ func (r *kbRepository) DeleteDocument(kbAssetID, docID uint64) error {
 
 func (r *kbRepository) DeleteFolderRecursive(kbAssetID uint64, folderPath string) ([]string, error) {
 	var filePaths []string
+	prefix := folderPath + "/"
 	err := r.db.Transaction(func(tx *gorm.DB) error {
-		var docs []model.KBDocument
-		if err := tx.Where("kb_asset_id = ? AND (folder_path = ? OR folder_path LIKE ?)",
-			kbAssetID, folderPath, folderPath+"/%").Find(&docs).Error; err != nil {
+		var allDocs []model.KBDocument
+		if err := tx.Where("kb_asset_id = ?", kbAssetID).Find(&allDocs).Error; err != nil {
 			return err
 		}
-		if len(docs) == 0 {
-			return nil
-		}
-		docIDs := make([]uint64, 0, len(docs))
-		for _, d := range docs {
-			docIDs = append(docIDs, d.ID)
-			if !d.IsFolder && d.FilePath != "" {
-				filePaths = append(filePaths, d.FilePath)
+		docIDs := make([]uint64, 0)
+		for _, d := range allDocs {
+			if d.FolderPath == folderPath || strings.HasPrefix(d.FolderPath, prefix) {
+				docIDs = append(docIDs, d.ID)
+				if !d.IsFolder && d.FilePath != "" {
+					filePaths = append(filePaths, d.FilePath)
+				}
 			}
+		}
+		if len(docIDs) == 0 {
+			return nil
 		}
 		if err := tx.Where("kb_asset_id = ? AND doc_id IN ?", kbAssetID, docIDs).Delete(&model.KBChunk{}).Error; err != nil {
 			return err
@@ -414,24 +416,48 @@ func (r *kbRepository) RestoreDocument(kbAssetID, docID uint64) error {
 			Update("deleted_at", nil).Error; err != nil {
 			return err
 		}
+		if err := tx.Unscoped().Model(&model.KBChunk{}).
+			Where("kb_asset_id = ? AND doc_id = ? AND deleted_at IS NOT NULL", kbAssetID, docID).
+			Update("deleted_at", nil).Error; err != nil {
+			return err
+		}
 		return recalculateKBCounts(tx, kbAssetID)
 	})
 }
 
 func (r *kbRepository) RestoreFolderRecursive(kbAssetID, folderDocID uint64, folderPath string, deletedAt time.Time) error {
+	prefix := folderPath + "/"
+	winStart := deletedAt.Add(-2 * time.Second)
+	winEnd := deletedAt.Add(2 * time.Second)
 	return r.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Unscoped().Model(&model.KBDocument{}).
-			Where("id = ? AND kb_asset_id = ? AND deleted_at IS NOT NULL", folderDocID, kbAssetID).
-			Update("deleted_at", nil).Error; err != nil {
+		var candidates []model.KBDocument
+		if err := tx.Unscoped().
+			Where("kb_asset_id = ? AND deleted_at IS NOT NULL", kbAssetID).
+			Find(&candidates).Error; err != nil {
 			return err
 		}
-		winStart := deletedAt.Add(-2 * time.Second)
-		winEnd := deletedAt.Add(2 * time.Second)
-		if err := tx.Unscoped().Model(&model.KBDocument{}).
-			Where("kb_asset_id = ? AND id <> ? AND (folder_path = ? OR folder_path LIKE ?) AND deleted_at IS NOT NULL AND deleted_at >= ? AND deleted_at <= ?",
-				kbAssetID, folderDocID, folderPath, folderPath+"/%", winStart, winEnd).
-			Update("deleted_at", nil).Error; err != nil {
-			return err
+		restoredDocIDs := make([]uint64, 0)
+		for _, d := range candidates {
+			if d.ID == folderDocID {
+				restoredDocIDs = append(restoredDocIDs, d.ID)
+				continue
+			}
+			if (d.FolderPath == folderPath || strings.HasPrefix(d.FolderPath, prefix)) &&
+				!d.DeletedAt.Time.Before(winStart) && !d.DeletedAt.Time.After(winEnd) {
+				restoredDocIDs = append(restoredDocIDs, d.ID)
+			}
+		}
+		if len(restoredDocIDs) > 0 {
+			if err := tx.Unscoped().Model(&model.KBDocument{}).
+				Where("kb_asset_id = ? AND id IN ?", kbAssetID, restoredDocIDs).
+				Update("deleted_at", nil).Error; err != nil {
+				return err
+			}
+			if err := tx.Unscoped().Model(&model.KBChunk{}).
+				Where("kb_asset_id = ? AND doc_id IN ? AND deleted_at IS NOT NULL", kbAssetID, restoredDocIDs).
+				Update("deleted_at", nil).Error; err != nil {
+				return err
+			}
 		}
 		return recalculateKBCounts(tx, kbAssetID)
 	})
@@ -468,7 +494,7 @@ func (r *kbRepository) SearchChunks(kbAssetID uint64, query string, topK int) ([
 	err := r.db.Table("kb_chunk").
 		Select("kb_chunk.id, kb_chunk.doc_id, COALESCE(kb_document.file_name, '') AS file_name, kb_chunk.chunk_index, kb_chunk.content").
 		Joins("LEFT JOIN kb_document ON kb_document.id = kb_chunk.doc_id AND kb_document.deleted_at IS NULL").
-		Where("kb_chunk.kb_asset_id = ?", kbAssetID).
+		Where("kb_chunk.kb_asset_id = ? AND kb_chunk.deleted_at IS NULL", kbAssetID).
 		Scan(&rows).Error
 	if err != nil {
 		return nil, err

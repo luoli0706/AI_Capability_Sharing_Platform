@@ -74,7 +74,6 @@ if [ ! -f "$UPSTREAM_INC" ]; then
   cat > "$tmp_inc" <<EOF
 upstream ascp_backend_pool {
     server 127.0.0.1:${INITIAL_PORT};
-    keepalive 16;
 }
 EOF
   chmod 644 "$tmp_inc"
@@ -88,7 +87,7 @@ cp -p "$NGINX_SITE_CONF" "$BACKUP_FILE"
 tmp_conf="$(mktemp "$(dirname "$NGINX_SITE_CONF")/.ascp_site.tmp.XXXXXX")"
 awk -v inc="include ${UPSTREAM_INC};" '
   BEGIN { has_inc = 0 }
-  $0 ~ inc { has_inc = 1 }
+  index($0, inc) > 0 { has_inc = 1 }
   {
     gsub(/http:\/\/127\.0\.0\.1:6657/, "http://ascp_backend_pool")
     lines[NR] = $0

@@ -2240,11 +2240,14 @@ function handleKeydown(e: KeyboardEvent) {
   } else if (
     key === 'z' &&
     !e.shiftKey &&
+    !e.altKey &&
     !novelReaderOpen.value &&
     !createFolderOpen.value &&
     !createFileOpen.value &&
     !moveDialogOpen.value &&
+    !shareDialogOpen.value &&
     !lightboxOpen.value &&
+    !document.querySelector('.el-message-box__wrapper') &&
     currentKbUndoStack.value.length > 0
   ) {
     e.preventDefault()
@@ -2264,14 +2267,14 @@ async function handleUndo() {
   }
   if (idx === -1) return
   const action = undoStack.value[idx]
-  undoStack.value = [
-    ...undoStack.value.slice(0, idx),
-    ...undoStack.value.slice(idx + 1)
-  ]
+  const removeUndoEntry = () => {
+    undoStack.value = undoStack.value.filter((item) => item !== action)
+  }
   undoing.value = true
   try {
     if (action.type === 'rename') {
       await renameDocument(kbId, action.docId, action.oldName)
+      removeUndoEntry()
       if (previewDoc.value?.id === action.docId) {
         previewDoc.value = { ...previewDoc.value, file_name: action.oldName }
         editFileName.value = action.oldName
@@ -2290,6 +2293,7 @@ async function handleUndo() {
       ElMessage.success(`已撤销：重命名「${action.newName}」`)
     } else if (action.type === 'move') {
       await moveDocument(kbId, action.docId, action.oldParentFolder)
+      removeUndoEntry()
       if (selectedFileNode.value?.doc?.id === action.docId) {
         selectedFileNode.value.folderPath = action.oldParentFolder
       }
@@ -2300,6 +2304,7 @@ async function handleUndo() {
       ElMessage.success(`已撤销：移动「${action.name}」`)
     } else if (action.type === 'create') {
       await deleteDocument(kbId, action.docId)
+      removeUndoEntry()
       if (currentSelectedDoc.value?.id === action.docId) {
         resetPreviewState()
         selectedFileNode.value = null
@@ -2308,6 +2313,7 @@ async function handleUndo() {
       ElMessage.success(`已撤销：新建「${action.name}」`)
     } else if (action.type === 'delete') {
       await restoreDocument(kbId, action.docId)
+      removeUndoEntry()
       await refreshAfterMutation([action.parentFolder])
       ElMessage.success(`已撤销：删除「${action.name}」`)
     }
@@ -2703,8 +2709,12 @@ onUnmounted(() => {
               @click="openCrossFileRef(refItem)"
             >
               <div class="cross-file-main">
-                <el-icon :size="16" :color="isImageFile(refItem.title) ? '#059669' : '#4F46E5'">
+                <el-icon
+                  :size="16"
+                  :color="isImageFile(refItem.title) ? '#059669' : extractBilibiliBvid(refItem.title) ? '#FB7299' : '#4F46E5'"
+                >
                   <Picture v-if="isImageFile(refItem.title)" />
+                  <VideoPlay v-else-if="extractBilibiliBvid(refItem.title)" />
                   <Document v-else />
                 </el-icon>
                 <div class="cross-file-info">
@@ -2770,9 +2780,13 @@ onUnmounted(() => {
                 </div>
                 <div v-else class="tree-node-row">
                   <div class="tree-node-left">
-                    <el-icon :size="15" :color="data.isFolder ? '#D97706' : isImageFile(data.label) ? '#059669' : '#4F46E5'">
+                    <el-icon
+                      :size="15"
+                      :color="data.isFolder ? '#D97706' : isImageFile(data.label) ? '#059669' : extractBilibiliBvid(data.label) ? '#FB7299' : '#4F46E5'"
+                    >
                       <Folder v-if="data.isFolder" />
                       <Picture v-else-if="isImageFile(data.label)" />
+                      <VideoPlay v-else-if="extractBilibiliBvid(data.label)" />
                       <Document v-else />
                     </el-icon>
                     <span class="tree-node-label">{{ data.label }}</span>
@@ -3068,6 +3082,7 @@ onUnmounted(() => {
                   <iframe
                     :src="bilibiliPreview.embed_url"
                     class="bili-player-iframe"
+                    sandbox="allow-scripts allow-same-origin allow-popups allow-presentation"
                     allowfullscreen
                     referrerpolicy="no-referrer"
                     frameborder="0"

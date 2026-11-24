@@ -25,9 +25,30 @@ import (
 )
 
 type mockFileKBRepo struct {
-	nextID uint64
-	docs   map[uint64]*model.KBDocument
-	chunks map[uint64][]model.KBChunk
+	nextID      uint64
+	docs        map[uint64]*model.KBDocument
+	chunks      map[uint64][]model.KBChunk
+	docCount    int
+	totalChunks int
+}
+
+func (m *mockFileKBRepo) recalculateCounts(kbAssetID uint64) {
+	docCount := 0
+	totalChunks := 0
+	for _, d := range m.docs {
+		if d.KBAssetID == kbAssetID && !d.DeletedAt.Valid && !d.IsFolder {
+			docCount++
+		}
+	}
+	for _, list := range m.chunks {
+		for _, c := range list {
+			if c.KBAssetID == kbAssetID && !c.DeletedAt.Valid {
+				totalChunks++
+			}
+		}
+	}
+	m.docCount = docCount
+	m.totalChunks = totalChunks
 }
 
 func newMockFileKBRepo() *mockFileKBRepo {
@@ -236,6 +257,7 @@ func (m *mockFileKBRepo) ReplaceDocumentChunks(kbAssetID uint64, doc *model.KBDo
 		m.chunks = make(map[uint64][]model.KBChunk)
 	}
 	m.chunks[doc.ID] = chunks
+	m.recalculateCounts(kbAssetID)
 	return nil
 }
 func (m *mockFileKBRepo) CompleteDocumentParsing(kbAssetID, docID uint64, chunks []model.KBChunk) error {
@@ -243,6 +265,7 @@ func (m *mockFileKBRepo) CompleteDocumentParsing(kbAssetID, docID uint64, chunks
 		m.chunks = make(map[uint64][]model.KBChunk)
 	}
 	m.chunks[docID] = chunks
+	m.recalculateCounts(kbAssetID)
 	return nil
 }
 func (m *mockFileKBRepo) FailDocumentParsing(docID uint64, errMsg string) error { return nil }
@@ -250,9 +273,16 @@ func (m *mockFileKBRepo) ListChunks(kbAssetID, docID uint64, page, pageSize int)
 	return nil, 0, nil
 }
 func (m *mockFileKBRepo) DeleteDocument(kbAssetID, docID uint64) error {
+	now := time.Now()
 	if d, ok := m.docs[docID]; ok && d.KBAssetID == kbAssetID && !d.DeletedAt.Valid {
-		d.DeletedAt = gorm.DeletedAt{Time: time.Now(), Valid: true}
+		d.DeletedAt = gorm.DeletedAt{Time: now, Valid: true}
 	}
+	for i := range m.chunks[docID] {
+		if m.chunks[docID][i].KBAssetID == kbAssetID && !m.chunks[docID][i].DeletedAt.Valid {
+			m.chunks[docID][i].DeletedAt = gorm.DeletedAt{Time: now, Valid: true}
+		}
+	}
+	m.recalculateCounts(kbAssetID)
 	return nil
 }
 func (m *mockFileKBRepo) DeleteFolderRecursive(kbAssetID uint64, folderPath string) ([]string, error) {
@@ -264,16 +294,28 @@ func (m *mockFileKBRepo) DeleteFolderRecursive(kbAssetID uint64, folderPath stri
 		}
 		if d.FolderPath == folderPath || strings.HasPrefix(d.FolderPath, folderPath+"/") {
 			d.DeletedAt = gorm.DeletedAt{Time: now, Valid: true}
+			for i := range m.chunks[d.ID] {
+				if m.chunks[d.ID][i].KBAssetID == kbAssetID && !m.chunks[d.ID][i].DeletedAt.Valid {
+					m.chunks[d.ID][i].DeletedAt = gorm.DeletedAt{Time: now, Valid: true}
+				}
+			}
 			if !d.IsFolder && d.FilePath != "" {
 				paths = append(paths, d.FilePath)
 			}
 		}
 	}
+	m.recalculateCounts(kbAssetID)
 	return paths, nil
 }
 func (m *mockFileKBRepo) RestoreDocument(kbAssetID, docID uint64) error {
 	if d, ok := m.docs[docID]; ok && d.KBAssetID == kbAssetID && d.DeletedAt.Valid {
 		d.DeletedAt = gorm.DeletedAt{}
+		for i := range m.chunks[docID] {
+			if m.chunks[docID][i].KBAssetID == kbAssetID && m.chunks[docID][i].DeletedAt.Valid {
+				m.chunks[docID][i].DeletedAt = gorm.DeletedAt{}
+			}
+		}
+		m.recalculateCounts(kbAssetID)
 		return nil
 	}
 	return gorm.ErrRecordNotFound
@@ -293,12 +335,41 @@ func (m *mockFileKBRepo) RestoreFolderRecursive(kbAssetID, folderDocID uint64, f
 		if (d.FolderPath == folderPath || strings.HasPrefix(d.FolderPath, folderPath+"/")) &&
 			!d.DeletedAt.Time.Before(winStart) && !d.DeletedAt.Time.After(winEnd) {
 			d.DeletedAt = gorm.DeletedAt{}
+			for i := range m.chunks[d.ID] {
+				if m.chunks[d.ID][i].KBAssetID == kbAssetID && m.chunks[d.ID][i].DeletedAt.Valid {
+					m.chunks[d.ID][i].DeletedAt = gorm.DeletedAt{}
+				}
+			}
 		}
 	}
+	m.recalculateCounts(kbAssetID)
 	return nil
 }
 func (m *mockFileKBRepo) SearchChunks(kbAssetID uint64, query string, topK int) ([]model.KBSearchHit, error) {
-	return nil, nil
+	qLower := strings.ToLower(strings.TrimSpace(query))
+	var hits []model.KBSearchHit
+	for docID, list := range m.chunks {
+		fileName := ""
+		if d, ok := m.docs[docID]; ok && !d.DeletedAt.Valid {
+			fileName = d.FileName
+		}
+		for _, c := range list {
+			if c.KBAssetID != kbAssetID || c.DeletedAt.Valid {
+				continue
+			}
+			if qLower == "" || strings.Contains(strings.ToLower(c.Content), qLower) {
+				hits = append(hits, model.KBSearchHit{
+					ChunkID:    c.ID,
+					DocID:      c.DocID,
+					FileName:   fileName,
+					ChunkIndex: c.ChunkIndex,
+					Content:    c.Content,
+					Score:      1,
+				})
+			}
+		}
+	}
+	return hits, nil
 }
 
 func TestNormalizeFolderPath(t *testing.T) {
@@ -1231,6 +1302,45 @@ func TestKBBilibiliPreview(t *testing.T) {
 	} else {
 		assertAppErrStatus(t, err, http.StatusBadRequest)
 	}
+
+	// 5. Redirect to disallowed host is blocked
+	svcImpl.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			hdr := make(http.Header)
+			hdr.Set("Location", "https://evil.example.com/steal")
+			return &http.Response{
+				StatusCode: http.StatusFound,
+				Body:       io.NopCloser(strings.NewReader("")),
+				Header:     hdr,
+			}, nil
+		}),
+	}
+	prevRedirectBlocked, err := kbSvc.GetBilibiliPreview(10, false, 1, doc1.ID, 0)
+	if err != nil {
+		t.Fatalf("GetBilibiliPreview redirect blocked returned error: %v", err)
+	}
+	if prevRedirectBlocked.Available {
+		t.Fatalf("expected disallowed redirect to fail preview, got %+v", prevRedirectBlocked)
+	}
+
+	// 6. Unsafe og:image scheme is rejected (Cover == "")
+	svcImpl.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			body := `<html><head><meta property="og:title" content="Safe Title"><meta property="og:image" content="javascript:alert(1)"></head></html>`
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(body)),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+	prevUnsafeCover, err := kbSvc.GetBilibiliPreview(10, false, 1, doc1.ID, 0)
+	if err != nil {
+		t.Fatalf("GetBilibiliPreview unsafe cover failed: %v", err)
+	}
+	if !prevUnsafeCover.Available || prevUnsafeCover.Cover != "" {
+		t.Fatalf("expected unsafe og:image to be stripped, got %+v", prevUnsafeCover)
+	}
 }
 
 func TestKBMoveFolder(t *testing.T) {
@@ -1311,7 +1421,7 @@ func TestKBDeleteAndRestoreDocument(t *testing.T) {
 	}
 	kbSvc := NewKBService(kbRepo, assetRepo, domainRepo, nil, nil, tmpDir, "test-storage-secret")
 
-	// 1. Single file delete preserves disk file and restore brings it back
+	// 1. Single file delete preserves disk file and soft-deletes chunks; restore brings both back
 	fileDoc, err := kbSvc.CreateMarkdownFile(10, false, 1, model.CreateKBFileRequest{
 		FileName: "undo-me.md",
 		Content:  "# Undo Test",
@@ -1319,11 +1429,20 @@ func TestKBDeleteAndRestoreDocument(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateMarkdownFile failed: %v", err)
 	}
+	if kbRepo.totalChunks == 0 {
+		t.Fatalf("expected chunks to be created for undo-me.md, got totalChunks=%d", kbRepo.totalChunks)
+	}
 	if err := kbSvc.DeleteDocument(10, false, 1, fileDoc.ID); err != nil {
 		t.Fatalf("DeleteDocument file failed: %v", err)
 	}
 	if _, err := os.Stat(fileDoc.FilePath); err != nil {
 		t.Fatalf("expected physical file preserved on disk after soft-delete, got %v", err)
+	}
+	if kbRepo.totalChunks != 0 {
+		t.Fatalf("expected totalChunks=0 after soft-delete, got %d", kbRepo.totalChunks)
+	}
+	if hits, _ := kbRepo.SearchChunks(1, "Undo Test", 5); len(hits) != 0 {
+		t.Fatalf("expected SearchChunks to return 0 hits after soft-delete, got %d", len(hits))
 	}
 	restoredFile, err := kbSvc.RestoreDocument(10, false, 1, fileDoc.ID)
 	if err != nil {
@@ -1331,6 +1450,12 @@ func TestKBDeleteAndRestoreDocument(t *testing.T) {
 	}
 	if restoredFile.FileName != "undo-me.md" || restoredFile.DeletedAt.Valid {
 		t.Fatalf("unexpected restored file: %+v", restoredFile)
+	}
+	if kbRepo.totalChunks == 0 {
+		t.Fatalf("expected totalChunks restored after RestoreDocument, got %d", kbRepo.totalChunks)
+	}
+	if hits, _ := kbRepo.SearchChunks(1, "Undo Test", 5); len(hits) == 0 {
+		t.Fatal("expected SearchChunks to find restored document chunks")
 	}
 
 	// 2. Restore file conflict -> 409 when active file with same name exists
@@ -1349,11 +1474,18 @@ func TestKBDeleteAndRestoreDocument(t *testing.T) {
 		assertAppErrStatus(t, err, http.StatusConflict)
 	}
 
-	// 3. Folder delete + restore: descendants deleted together are restored, earlier-deleted sibling NOT resurrected
+	// 3. Folder delete + restore: descendants & chunks deleted together are restored, earlier-deleted sibling NOT resurrected
 	_ = kbRepo.CreateDocument(&model.KBDocument{KBAssetID: 1, FolderPath: "proj", IsFolder: true, FileName: "proj"})
 	projFolderID := kbRepo.nextID - 1
-	_ = kbRepo.CreateDocument(&model.KBDocument{KBAssetID: 1, FolderPath: "proj", IsFolder: false, FileName: "keep.md"})
-	keepFileID := kbRepo.nextID - 1
+	keepFile, err := kbSvc.CreateMarkdownFile(10, false, 1, model.CreateKBFileRequest{
+		FolderPath: "proj",
+		FileName:   "keep.md",
+		Content:    "# Keep Folder Chunk",
+	})
+	if err != nil {
+		t.Fatalf("CreateMarkdownFile keep.md failed: %v", err)
+	}
+	keepFileID := keepFile.ID
 	_ = kbRepo.CreateDocument(&model.KBDocument{
 		KBAssetID:  1,
 		FolderPath: "proj",
@@ -1363,8 +1495,12 @@ func TestKBDeleteAndRestoreDocument(t *testing.T) {
 	})
 	oldDeletedID := kbRepo.nextID - 1
 
+	chunksBeforeFolderDel := kbRepo.totalChunks
 	if err := kbSvc.DeleteDocument(10, false, 1, projFolderID); err != nil {
 		t.Fatalf("DeleteDocument folder failed: %v", err)
+	}
+	if hits, _ := kbRepo.SearchChunks(1, "Keep Folder Chunk", 5); len(hits) != 0 {
+		t.Fatalf("expected SearchChunks not to find deleted folder doc, got %d", len(hits))
 	}
 	if _, err := kbSvc.RestoreDocument(10, false, 1, projFolderID); err != nil {
 		t.Fatalf("RestoreDocument folder failed: %v", err)
@@ -1374,6 +1510,12 @@ func TestKBDeleteAndRestoreDocument(t *testing.T) {
 	}
 	if !kbRepo.docs[oldDeletedID].DeletedAt.Valid {
 		t.Fatal("expected earlier-deleted file NOT to be resurrected on folder restore")
+	}
+	if kbRepo.totalChunks != chunksBeforeFolderDel {
+		t.Fatalf("expected totalChunks=%d after folder restore, got %d", chunksBeforeFolderDel, kbRepo.totalChunks)
+	}
+	if hits, _ := kbRepo.SearchChunks(1, "Keep Folder Chunk", 5); len(hits) == 0 {
+		t.Fatal("expected SearchChunks to find restored folder doc chunks")
 	}
 
 	// 4. Folder restore conflict -> 409
@@ -1385,5 +1527,25 @@ func TestKBDeleteAndRestoreDocument(t *testing.T) {
 		t.Fatal("expected 409 conflict restoring folder when active folder exists")
 	} else {
 		assertAppErrStatus(t, err, http.StatusConflict)
+	}
+
+	// 5. Folder name with '_' ('a_b' vs 'axb'): deleting 'a_b' must NOT delete 'axb'
+	_ = kbRepo.CreateDocument(&model.KBDocument{KBAssetID: 1, FolderPath: "a_b", IsFolder: true, FileName: "a_b"})
+	abFolderID := kbRepo.nextID - 1
+	_ = kbRepo.CreateDocument(&model.KBDocument{KBAssetID: 1, FolderPath: "a_b/sub", IsFolder: false, FileName: "in-ab.md"})
+	inABID := kbRepo.nextID - 1
+	_ = kbRepo.CreateDocument(&model.KBDocument{KBAssetID: 1, FolderPath: "axb", IsFolder: true, FileName: "axb"})
+	axbFolderID := kbRepo.nextID - 1
+	_ = kbRepo.CreateDocument(&model.KBDocument{KBAssetID: 1, FolderPath: "axb/sub", IsFolder: false, FileName: "in-axb.md"})
+	inAXBID := kbRepo.nextID - 1
+
+	if err := kbSvc.DeleteDocument(10, false, 1, abFolderID); err != nil {
+		t.Fatalf("DeleteDocument a_b folder failed: %v", err)
+	}
+	if !kbRepo.docs[abFolderID].DeletedAt.Valid || !kbRepo.docs[inABID].DeletedAt.Valid {
+		t.Fatal("expected a_b and its child to be soft-deleted")
+	}
+	if kbRepo.docs[axbFolderID].DeletedAt.Valid || kbRepo.docs[inAXBID].DeletedAt.Valid {
+		t.Fatal("expected sibling folder axb and its child NOT to be deleted when deleting a_b")
 	}
 }
