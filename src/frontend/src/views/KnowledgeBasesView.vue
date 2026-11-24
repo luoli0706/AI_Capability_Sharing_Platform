@@ -50,7 +50,6 @@ import {
   createKbFolder,
   deleteDocument,
   deleteDocumentComment,
-  getBilibiliPreview,
   getDocumentContent,
   getDocumentInteractions,
   getDocumentMeta,
@@ -1706,30 +1705,17 @@ async function openFileDoc(doc: KbDocument, overrideKbId?: number) {
 
   const bvid = extractBilibiliBvid(doc.file_name)
   if (bvid) {
-    loadingPreview.value = true
-    try {
-      const preview = await getBilibiliPreview(kbId, doc.id, refDomId)
-      if (isStale()) return
-      bilibiliDoc.value = doc
-      bilibiliPreview.value = preview
-    } catch {
-      if (!isStale()) {
-        bilibiliDoc.value = doc
-        bilibiliPreview.value = {
-          available: false,
-          status_code: 0,
-          bvid,
-          title: doc.file_name,
-          cover: '',
-          embed_url: '',
-          watch_url: `https://www.bilibili.com/video/${bvid}`,
-          message: '获取 B 站视频信息失败'
-        }
-      }
-    } finally {
-      if (requestSeq === previewRequestSeq) {
-        loadingPreview.value = false
-      }
+    // 直接由用户浏览器直连 B 站官方嵌入式播放器，避免服务端机房 IP 触发 412 风控且不消耗服务器流量
+    bilibiliDoc.value = doc
+    bilibiliPreview.value = {
+      available: true,
+      status_code: 200,
+      bvid,
+      title: doc.file_name,
+      cover: '',
+      embed_url: `https://player.bilibili.com/player.html?bvid=${encodeURIComponent(bvid)}&page=1&as_wide=1&high_quality=1&danmaku=0`,
+      watch_url: `https://www.bilibili.com/video/${encodeURIComponent(bvid)}`,
+      message: ''
     }
     return
   }
@@ -3082,7 +3068,7 @@ onUnmounted(() => {
                   <iframe
                     :src="bilibiliPreview.embed_url"
                     class="bili-player-iframe"
-                    sandbox="allow-scripts allow-same-origin allow-popups allow-presentation"
+                    allow="autoplay; fullscreen; picture-in-picture"
                     allowfullscreen
                     referrerpolicy="no-referrer"
                     frameborder="0"

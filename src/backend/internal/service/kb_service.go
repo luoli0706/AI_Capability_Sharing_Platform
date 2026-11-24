@@ -986,6 +986,30 @@ func (s *kbService) GetBilibiliPreview(userID uint64, isSuperAdmin bool, kbID, d
 	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
 	bodyStr := string(bodyBytes)
 
+	embedURL := "https://player.bilibili.com/player.html?bvid=" + bvid + "&page=1&as_wide=1&high_quality=1&danmaku=0"
+
+	if resp.StatusCode == http.StatusPreconditionFailed || resp.StatusCode == http.StatusForbidden {
+		playerReq, pErr := http.NewRequest(http.MethodGet, embedURL, nil)
+		if pErr == nil {
+			playerReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+			playerReq.Header.Set("Referer", "https://www.bilibili.com")
+			if pResp, pDoErr := client.Do(playerReq); pDoErr == nil {
+				_, _ = io.Copy(io.Discard, io.LimitReader(pResp.Body, 64*1024))
+				_ = pResp.Body.Close()
+				if pResp.StatusCode == http.StatusOK {
+					return &model.KBBilibiliPreview{
+						Available:  true,
+						StatusCode: http.StatusOK,
+						BVID:       bvid,
+						Title:      bvid,
+						EmbedURL:   embedURL,
+						WatchURL:   watchURL,
+					}, nil
+				}
+			}
+		}
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		return &model.KBBilibiliPreview{
 			Available:  false,
@@ -1013,7 +1037,7 @@ func (s *kbService) GetBilibiliPreview(userID uint64, isSuperAdmin bool, kbID, d
 		BVID:       bvid,
 		Title:      title,
 		Cover:      cover,
-		EmbedURL:   "https://player.bilibili.com/player.html?bvid=" + bvid + "&page=1&as_wide=1&high_quality=1&danmaku=0",
+		EmbedURL:   embedURL,
 		WatchURL:   watchURL,
 	}, nil
 }
