@@ -626,6 +626,7 @@ async function applyRouteOrDefaultSelection() {
         const entryKey = `cross-kb:${targetRef.id}`
         if (kbSelectorEntries.value.some((e) => e.key === entryKey)) {
           handleSelectEntry(entryKey)
+          await tryOpenQueryDocument()
           return
         }
       } else if (targetRef.ref_type === 'kb_file') {
@@ -639,6 +640,7 @@ async function applyRouteOrDefaultSelection() {
   }
 
   const queryKbId = Number(route.query.kbId)
+  const queryDocId = Number(route.query.docId)
   if (Number.isFinite(queryKbId) && queryKbId > 0) {
     const ownKey = `own:${queryKbId}`
     if (kbSelectorEntries.value.some((e) => e.key === ownKey)) {
@@ -646,6 +648,23 @@ async function applyRouteOrDefaultSelection() {
       selectedCrossFileRef.value = null
       refreshTree()
       await tryOpenQueryDocument()
+      return
+    }
+    const matchedCrossKb = crossKbRefs.value.find((r) => r.source_asset_id === queryKbId)
+    if (matchedCrossKb) {
+      const entryKey = `cross-kb:${matchedCrossKb.id}`
+      if (kbSelectorEntries.value.some((e) => e.key === entryKey)) {
+        handleSelectEntry(entryKey)
+        await tryOpenQueryDocument()
+        return
+      }
+    }
+    const matchedCrossFile = crossFileRefs.value.find(
+      (r) => r.source_asset_id === queryKbId && (!queryDocId || r.source_doc_id === queryDocId)
+    )
+    if (matchedCrossFile && kbSelectorEntries.value.some((e) => e.key === 'cross-files')) {
+      handleSelectEntry('cross-files')
+      await openCrossFileRef(matchedCrossFile)
       return
     }
   }
@@ -1587,6 +1606,7 @@ const shareTarget = ref<{
   docName?: string
   isFolder?: boolean
   refDomainId?: number
+  crossRefId?: number
 } | null>(null)
 
 async function loadMyFavorites() {
@@ -1624,34 +1644,81 @@ async function handleToggleFolderFavorite(doc: KbDocument) {
   }
 }
 
+function buildShareBaseTarget() {
+  if (isCrossFilesMode.value && selectedCrossFileRef.value) {
+    const refItem = selectedCrossFileRef.value
+    return {
+      assetId: refItem.source_asset_id,
+      assetName: refItem.kb_name || refItem.title,
+      assetType: 'kb',
+      domainId: refItem.source_domain_id,
+      domainName: refItem.source_domain_name || `域 #${refItem.source_domain_id}`,
+      refDomainId: domainId.value,
+      crossRefId: refItem.id
+    }
+  }
+  if (isCrossKbMode.value && selectedEntry.value?.crossRef) {
+    const refItem = selectedEntry.value.crossRef
+    return {
+      assetId: refItem.source_asset_id,
+      assetName: selectedEntry.value.name || refItem.title,
+      assetType: 'kb',
+      domainId: refItem.source_domain_id,
+      domainName: selectedEntry.value.sourceDomainName || refItem.source_domain_name,
+      refDomainId: domainId.value,
+      crossRefId: refItem.id
+    }
+  }
+  if (selectedKbId.value && selectedKb.value) {
+    return {
+      assetId: selectedKbId.value,
+      assetName: selectedKb.value.name,
+      assetType: 'kb',
+      domainId: selectedKb.value.domain_id || domainId.value,
+      domainName: selectedKb.value.domain_name || currentDomain.value?.domain_name,
+      refDomainId: undefined,
+      crossRefId: undefined
+    }
+  }
+  return null
+}
+
 function openShareDialogForCurrentDoc() {
-  if (!selectedKbId.value || !selectedKb.value || !currentSelectedDoc.value) return
+  const base = buildShareBaseTarget()
+  if (!base || !currentSelectedDoc.value) return
   shareTarget.value = {
-    assetId: selectedKbId.value,
-    assetName: selectedKb.value.name,
-    assetType: 'kb',
-    domainId: selectedKb.value.domain_id || domainId.value,
-    domainName: selectedKb.value.domain_name || currentDomain.value?.domain_name,
+    ...base,
     docId: currentSelectedDoc.value.id,
     docName: currentSelectedDoc.value.file_name,
-    isFolder: Boolean(currentSelectedDoc.value.is_folder),
-    refDomainId: activeRefDomainId.value
+    isFolder: Boolean(currentSelectedDoc.value.is_folder)
   }
   shareDialogOpen.value = true
 }
 
 function openShareDialogForNode(node: KbTreeNode) {
-  if (!selectedKbId.value || !selectedKb.value || !node.doc) return
+  const base = buildShareBaseTarget()
+  if (!base || !node.doc) return
   shareTarget.value = {
-    assetId: selectedKbId.value,
-    assetName: selectedKb.value.name,
-    assetType: 'kb',
-    domainId: selectedKb.value.domain_id || domainId.value,
-    domainName: selectedKb.value.domain_name || currentDomain.value?.domain_name,
+    ...base,
     docId: node.doc.id,
     docName: node.label,
-    isFolder: node.isFolder,
-    refDomainId: activeRefDomainId.value
+    isFolder: node.isFolder
+  }
+  shareDialogOpen.value = true
+}
+
+function openShareDialogForCrossFile(refItem: DomainCrossRefItem) {
+  shareTarget.value = {
+    assetId: refItem.source_asset_id,
+    assetName: refItem.kb_name || refItem.title,
+    assetType: 'kb',
+    domainId: refItem.source_domain_id,
+    domainName: refItem.source_domain_name || `域 #${refItem.source_domain_id}`,
+    docId: refItem.source_doc_id,
+    docName: refItem.title,
+    isFolder: false,
+    refDomainId: domainId.value,
+    crossRefId: refItem.id
   }
   shareDialogOpen.value = true
 }
@@ -2811,14 +2878,24 @@ onUnmounted(() => {
                   </div>
                 </div>
               </div>
-              <el-button
-                link
-                type="primary"
-                size="small"
-                @click.stop="handleDownloadFile(refItem.source_doc_id, refItem.title, refItem.source_asset_id)"
-              >
-                下载
-              </el-button>
+              <div style="display: flex; align-items: center; gap: 4px">
+                <el-button
+                  link
+                  type="info"
+                  size="small"
+                  :icon="Share"
+                  title="分享文件"
+                  @click.stop="openShareDialogForCrossFile(refItem)"
+                />
+                <el-button
+                  link
+                  type="primary"
+                  size="small"
+                  @click.stop="handleDownloadFile(refItem.source_doc_id, refItem.title, refItem.source_asset_id)"
+                >
+                  下载
+                </el-button>
+              </div>
             </div>
           </div>
 
@@ -3470,6 +3547,7 @@ onUnmounted(() => {
       :doc-name="shareTarget.docName"
       :is-folder="shareTarget.isFolder"
       :ref-domain-id="shareTarget.refDomainId"
+      :cross-ref-id="shareTarget.crossRefId"
     />
 
     <el-dialog v-model="createFolderOpen" title="新建文件夹" width="420px" destroy-on-close>

@@ -3,9 +3,21 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { useMediaQuery } from '@vueuse/core'
-import { ArrowLeft, ChatDotRound, Plus, Promotion, Search, Share, User } from '@element-plus/icons-vue'
+import {
+  ArrowLeft,
+  ChatDotRound,
+  Document,
+  Folder,
+  FolderOpened,
+  Plus,
+  Promotion,
+  Search,
+  Share,
+  User
+} from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { checkAssetAccess, getAssets } from '@/api/asset'
+import { getDocuments } from '@/api/kb'
 import {
   createOrGetConversation,
   getMessageContacts,
@@ -20,7 +32,9 @@ import type {
   AssetCardPayload,
   AssetItem,
   AssetType,
+  ContactSourceItem,
   ConversationItem,
+  KbDocument,
   MessageContactItem,
   UserBrief,
   UserMessageItem
@@ -67,6 +81,33 @@ const pickerAssets = ref<AssetItem[]>([])
 const assetNote = ref('')
 const sendingCard = ref(false)
 const checkingCardMsgId = ref<number | null>(null)
+
+// KB sub-browser inside asset picker
+const kbBrowserAsset = ref<AssetItem | null>(null)
+const kbBrowserPath = ref('')
+const loadingKbBrowser = ref(false)
+const kbBrowserFolders = ref<KbDocument[]>([])
+const kbBrowserFiles = ref<KbDocument[]>([])
+const kbBrowserKeyword = ref('')
+
+function normalizeContactSources(contact: MessageContactItem): ContactSourceItem[] {
+  if (!Array.isArray(contact.sources)) return []
+  return contact.sources
+    .map((src, idx) => {
+      if (typeof src === 'string') {
+        return { type: 'domain', id: idx + 1, name: src }
+      }
+      if (src && typeof src === 'object') {
+        return {
+          type: src.type === 'org' ? 'org' : 'domain',
+          id: Number(src.id) || 0,
+          name: String(src.name || '').trim()
+        }
+      }
+      return null
+    })
+    .filter((item): item is ContactSourceItem => Boolean(item && item.name))
+}
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
@@ -265,11 +306,81 @@ async function fetchPickerAssets() {
 function openAssetPicker() {
   assetKeyword.value = ''
   assetNote.value = ''
+  kbBrowserAsset.value = null
+  kbBrowserPath.value = ''
+  kbBrowserFolders.value = []
+  kbBrowserFiles.value = []
+  kbBrowserKeyword.value = ''
   assetPickerOpen.value = true
   void fetchPickerAssets()
 }
 
-async function handleSendAssetCard(asset: AssetItem) {
+const kbBrowserSegments = computed(() => {
+  const clean = kbBrowserPath.value.replace(/^\/+|\/+$/g, '')
+  if (!clean) return []
+  const parts = clean.split('/').filter(Boolean)
+  return parts.map((name, idx) => ({
+    name,
+    path: parts.slice(0, idx + 1).join('/')
+  }))
+})
+
+const filteredKbBrowserFolders = computed(() => {
+  const kw = kbBrowserKeyword.value.trim().toLowerCase()
+  if (!kw) return kbBrowserFolders.value
+  return kbBrowserFolders.value.filter((f) => f.file_name.toLowerCase().includes(kw))
+})
+
+const filteredKbBrowserFiles = computed(() => {
+  const kw = kbBrowserKeyword.value.trim().toLowerCase()
+  if (!kw) return kbBrowserFiles.value
+  return kbBrowserFiles.value.filter((f) => f.file_name.toLowerCase().includes(kw))
+})
+
+async function loadKbBrowserFolder(kbId: number, folderPath: string) {
+  loadingKbBrowser.value = true
+  kbBrowserPath.value = folderPath
+  try {
+    const res = await getDocuments(kbId, {
+      lazy: true,
+      folder_path: folderPath,
+      offset: 0,
+      limit: 100,
+      fields: 'minimal'
+    })
+    const docs = Array.isArray(res) ? res : (res.list ?? res.items ?? [])
+    kbBrowserFolders.value = docs.filter((d) => d.is_folder)
+    kbBrowserFiles.value = docs.filter((d) => !d.is_folder)
+  } catch {
+    kbBrowserFolders.value = []
+    kbBrowserFiles.value = []
+  } finally {
+    loadingKbBrowser.value = false
+  }
+}
+
+async function enterKbBrowser(asset: AssetItem) {
+  kbBrowserAsset.value = asset
+  kbBrowserKeyword.value = ''
+  await loadKbBrowserFolder(asset.id, '')
+}
+
+function exitKbBrowser() {
+  kbBrowserAsset.value = null
+  kbBrowserPath.value = ''
+  kbBrowserFolders.value = []
+  kbBrowserFiles.value = []
+  kbBrowserKeyword.value = ''
+}
+
+function getFolderNextPath(folder: KbDocument): string {
+  const clean = (folder.folder_path || '').replace(/^\/+|\/+$/g, '')
+  if (clean) return clean
+  const base = kbBrowserPath.value.replace(/^\/+|\/+$/g, '')
+  return base ? `${base}/${folder.file_name}` : folder.file_name
+}
+
+async function handleSendAssetCard(asset: AssetItem, doc?: KbDocument) {
   if (!activeConversationId.value || sendingCard.value) return
   sendingCard.value = true
   try {
@@ -279,17 +390,27 @@ async function handleSendAssetCard(asset: AssetItem) {
       asset_type: asset.asset_type,
       domain_id: asset.domain_id,
       domain_name: asset.domain_name,
+      ...(doc
+        ? {
+            doc_id: doc.id,
+            doc_name: doc.file_name,
+            is_folder: Boolean(doc.is_folder)
+          }
+        : {}),
       note: assetNote.value.trim() || undefined
     }
+    const label = doc
+      ? `${doc.is_folder ? '[知识库文件夹]' : '[知识库文档]'} ${doc.file_name}`
+      : `[资产卡片] ${asset.name}`
     const msg = await sendMessage(activeConversationId.value, {
       msg_type: 'asset_card',
-      content: `[资产卡片] ${asset.name}`,
+      content: label,
       payload: cardPayload
     })
     messages.value = [...messages.value, msg]
     const conv = conversations.value.find((c) => c.id === activeConversationId.value)
     if (conv) {
-      conv.last_message_preview = `[资产卡片] ${asset.name}`
+      conv.last_message_preview = label
       conv.last_message_at = msg.created_at
       conv.updated_at = msg.created_at
     }
@@ -332,10 +453,12 @@ async function handleClickAssetCard(msg: UserMessageItem) {
       return
     }
     if (card.asset_type === 'kb') {
+      const targetDomainId = card.ref_domain_id || card.domain_id
       router.push({
-        path: `/domains/${card.domain_id}/knowledge-bases`,
+        path: `/domains/${targetDomainId}/knowledge-bases`,
         query: {
           kbId: String(card.asset_id),
+          ...(card.cross_ref_id ? { crossRefId: String(card.cross_ref_id) } : {}),
           ...(card.doc_id ? { docId: String(card.doc_id) } : {})
         }
       })
@@ -645,15 +768,15 @@ onBeforeUnmount(() => {
                   <span class="user-result-name">{{ getUserDisplay(peer) }}</span>
                   <span class="user-result-uname mono-text">@{{ peer.username }}</span>
                 </div>
-                <div v-if="peer.sources?.length" class="contact-sources">
+                <div v-if="normalizeContactSources(peer).length" class="contact-sources">
                   <el-tag
-                    v-for="src in peer.sources"
-                    :key="src"
+                    v-for="(src, idx) in normalizeContactSources(peer)"
+                    :key="`${src.type}-${src.id}-${idx}`"
                     size="small"
-                    type="info"
-                    effect="plain"
+                    :type="src.type === 'org' ? 'success' : 'primary'"
+                    effect="light"
                   >
-                    {{ src }}
+                    {{ src.type === 'org' ? `组织 · ${src.name}` : `域 · ${src.name}` }}
                   </el-tag>
                 </div>
               </div>
@@ -726,60 +849,194 @@ onBeforeUnmount(() => {
     </el-dialog>
 
     <!-- Asset Picker Dialog -->
-    <el-dialog v-model="assetPickerOpen" title="分享资产卡片" width="520px" destroy-on-close>
-      <div class="user-search-bar">
-        <el-input
-          v-model="assetKeyword"
-          placeholder="搜索可访问的 MCP / Skill / Agent / 知识库..."
-          clearable
-          :prefix-icon="Search"
-          @keyup.enter="fetchPickerAssets"
-        />
-        <el-button type="primary" :loading="loadingAssets" @click="fetchPickerAssets">
-          搜索
-        </el-button>
-      </div>
-
+    <el-dialog
+      v-model="assetPickerOpen"
+      :title="kbBrowserAsset ? `选择知识库内容 · ${kbBrowserAsset.name}` : '分享资产卡片'"
+      width="580px"
+      destroy-on-close
+    >
       <el-input
         v-model="assetNote"
-        placeholder="附言（可选）：例如推荐查看这个能力..."
+        placeholder="附言（可选）：例如推荐查看这个能力/文件夹/文档..."
         clearable
         style="margin-bottom: 12px"
       />
 
-      <div v-loading="loadingAssets" class="user-search-results">
-        <div
-          v-for="asset in pickerAssets"
-          :key="asset.id"
-          class="user-result-row"
-        >
-          <div class="picker-asset-meta">
-            <div class="picker-asset-top">
-              <el-tag :type="getAssetTypeMeta(asset.asset_type).tagType" size="small" effect="light">
-                {{ getAssetTypeMeta(asset.asset_type).shortLabel }}
-              </el-tag>
-              <span class="user-result-name">{{ asset.name }}</span>
-            </div>
-            <div class="picker-asset-sub">
-              <span>{{ asset.domain_name || `域 #${asset.domain_id}` }}</span>
-              <span class="mono-text">{{ asset.asset_code }}</span>
-            </div>
-          </div>
-          <el-button
-            type="primary"
-            size="small"
-            :loading="sendingCard"
-            @click="handleSendAssetCard(asset)"
-          >
-            发送卡片
+      <!-- Step 1: Asset List -->
+      <template v-if="!kbBrowserAsset">
+        <div class="user-search-bar">
+          <el-input
+            v-model="assetKeyword"
+            placeholder="搜索可访问的 MCP / Skill / Agent / 知识库..."
+            clearable
+            :prefix-icon="Search"
+            @keyup.enter="fetchPickerAssets"
+          />
+          <el-button type="primary" :loading="loadingAssets" @click="fetchPickerAssets">
+            搜索
           </el-button>
         </div>
-        <el-empty
-          v-if="!loadingAssets && pickerAssets.length === 0"
-          description="未找到可分享的资产"
-          :image-size="48"
-        />
-      </div>
+
+        <div v-loading="loadingAssets" class="user-search-results">
+          <div
+            v-for="asset in pickerAssets"
+            :key="asset.id"
+            class="user-result-row"
+          >
+            <div class="picker-asset-meta">
+              <div class="picker-asset-top">
+                <el-tag :type="getAssetTypeMeta(asset.asset_type).tagType" size="small" effect="light">
+                  {{ getAssetTypeMeta(asset.asset_type).shortLabel }}
+                </el-tag>
+                <span class="user-result-name">{{ asset.name }}</span>
+              </div>
+              <div class="picker-asset-sub">
+                <span>{{ asset.domain_name || `域 #${asset.domain_id}` }}</span>
+                <span class="mono-text">{{ asset.asset_code }}</span>
+              </div>
+            </div>
+            <div class="picker-asset-actions">
+              <el-button
+                v-if="asset.asset_type === 'kb'"
+                size="small"
+                plain
+                :icon="FolderOpened"
+                @click="enterKbBrowser(asset)"
+              >
+                选文件夹/文件
+              </el-button>
+              <el-button
+                type="primary"
+                size="small"
+                :loading="sendingCard"
+                @click="handleSendAssetCard(asset)"
+              >
+                {{ asset.asset_type === 'kb' ? '发送整库' : '发送卡片' }}
+              </el-button>
+            </div>
+          </div>
+          <el-empty
+            v-if="!loadingAssets && pickerAssets.length === 0"
+            description="未找到可分享的资产"
+            :image-size="48"
+          />
+        </div>
+      </template>
+
+      <!-- Step 2: KB Folder & File Browser -->
+      <template v-else>
+        <div class="kb-browser-toolbar">
+          <div class="kb-browser-nav">
+            <el-button size="small" :icon="ArrowLeft" @click="exitKbBrowser">返回列表</el-button>
+            <el-button
+              size="small"
+              type="primary"
+              plain
+              :loading="sendingCard"
+              @click="handleSendAssetCard(kbBrowserAsset)"
+            >
+              发送整个知识库
+            </el-button>
+          </div>
+          <el-input
+            v-model="kbBrowserKeyword"
+            placeholder="筛选当前目录的文件夹/文件..."
+            clearable
+            size="small"
+            :prefix-icon="Search"
+            style="width: 210px"
+          />
+        </div>
+
+        <div class="kb-browser-breadcrumb">
+          <el-button
+            link
+            type="primary"
+            size="small"
+            @click="loadKbBrowserFolder(kbBrowserAsset.id, '')"
+          >
+            根目录
+          </el-button>
+          <template v-for="seg in kbBrowserSegments" :key="seg.path">
+            <span class="crumb-sep">/</span>
+            <el-button
+              link
+              type="primary"
+              size="small"
+              @click="loadKbBrowserFolder(kbBrowserAsset.id, seg.path)"
+            >
+              {{ seg.name }}
+            </el-button>
+          </template>
+        </div>
+
+        <div v-loading="loadingKbBrowser" class="user-search-results">
+          <div
+            v-for="folder in filteredKbBrowserFolders"
+            :key="`folder-${folder.id}`"
+            class="user-result-row"
+          >
+            <div
+              class="picker-doc-left"
+              @click="loadKbBrowserFolder(kbBrowserAsset.id, getFolderNextPath(folder))"
+            >
+              <el-icon :size="18" color="#F59E0B"><Folder /></el-icon>
+              <div class="picker-asset-meta">
+                <span class="user-result-name">{{ folder.file_name }}</span>
+                <span class="picker-doc-sub">文件夹 · 点击进入子目录</span>
+              </div>
+            </div>
+            <div class="picker-asset-actions">
+              <el-button
+                size="small"
+                plain
+                @click="loadKbBrowserFolder(kbBrowserAsset.id, getFolderNextPath(folder))"
+              >
+                打开
+              </el-button>
+              <el-button
+                v-if="folder.id > 0"
+                type="primary"
+                size="small"
+                :loading="sendingCard"
+                @click="handleSendAssetCard(kbBrowserAsset, folder)"
+              >
+                发送文件夹
+              </el-button>
+            </div>
+          </div>
+
+          <div
+            v-for="file in filteredKbBrowserFiles"
+            :key="`file-${file.id}`"
+            class="user-result-row"
+          >
+            <div class="picker-doc-left">
+              <el-icon :size="18" color="#4F46E5"><Document /></el-icon>
+              <div class="picker-asset-meta">
+                <span class="user-result-name">{{ file.file_name }}</span>
+                <span class="picker-doc-sub mono-text">
+                  {{ file.folder_path ? `/${file.folder_path}` : '/' }}
+                </span>
+              </div>
+            </div>
+            <el-button
+              type="primary"
+              size="small"
+              :loading="sendingCard"
+              @click="handleSendAssetCard(kbBrowserAsset, file)"
+            >
+              发送文件
+            </el-button>
+          </div>
+
+          <el-empty
+            v-if="!loadingKbBrowser && filteredKbBrowserFolders.length === 0 && filteredKbBrowserFiles.length === 0"
+            description="当前目录下暂无文件夹或文件"
+            :image-size="48"
+          />
+        </div>
+      </template>
     </el-dialog>
   </div>
 </template>
@@ -1180,6 +1437,59 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 8px;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.picker-asset-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.kb-browser-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.kb-browser-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.kb-browser-breadcrumb {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 10px;
+  margin-bottom: 10px;
+  border-radius: 6px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  font-size: 12px;
+}
+
+.crumb-sep {
+  color: #94a3b8;
+}
+
+.picker-doc-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+  cursor: pointer;
+}
+
+.picker-doc-sub {
   font-size: 12px;
   color: #64748b;
 }

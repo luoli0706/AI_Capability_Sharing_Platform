@@ -3,7 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { CopyDocument, Link, Promotion, Search, Share } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { getMessageContacts, shareAssetCard } from '@/api/messages'
-import type { AssetType, MessageContactItem } from '@/types/api'
+import type { AssetType, ContactSourceItem, MessageContactItem } from '@/types/api'
 import { getAssetTypeMeta } from '@/utils/format'
 
 const props = defineProps<{
@@ -17,6 +17,7 @@ const props = defineProps<{
   docName?: string
   isFolder?: boolean
   refDomainId?: number
+  crossRefId?: number
 }>()
 
 const emit = defineEmits<{
@@ -31,17 +32,36 @@ const visible = computed({
 const loadingContacts = ref(false)
 const contacts = ref<MessageContactItem[]>([])
 const searchKeyword = ref('')
+const sourceScopeFilter = ref<'all' | 'domain' | 'org'>('all')
+const specificSourceKey = ref<string>('all')
+const shareScope = ref<'doc' | 'asset'>('doc')
 const selectedUserIds = ref<number[]>([])
 const note = ref('')
 const sending = ref(false)
 
+const hasDocTarget = computed(() => Boolean(props.docId && props.docId > 0))
+const effectiveDocId = computed(() =>
+  hasDocTarget.value && shareScope.value === 'doc' ? props.docId : undefined
+)
+
+const dialogTitle = computed(() => {
+  if (hasDocTarget.value && shareScope.value === 'doc') {
+    return props.isFolder ? '分享文件夹' : '分享知识库文档'
+  }
+  return props.assetType === 'kb' ? '分享知识库' : '分享资产'
+})
+
 const targetPath = computed(() => {
   if (props.assetType === 'kb' || props.docId) {
     const query = new URLSearchParams({ kbId: String(props.assetId) })
-    if (props.docId) {
-      query.set('docId', String(props.docId))
+    if (props.crossRefId) {
+      query.set('crossRefId', String(props.crossRefId))
     }
-    return `/domains/${props.domainId}/knowledge-bases?${query.toString()}`
+    if (effectiveDocId.value) {
+      query.set('docId', String(effectiveDocId.value))
+    }
+    const targetDomainId = props.refDomainId || props.domainId
+    return `/domains/${targetDomainId}/knowledge-bases?${query.toString()}`
   }
   return `/assets/${props.assetId}`
 })
@@ -51,14 +71,76 @@ const fullShareUrl = computed(() => {
   return `${window.location.origin}${targetPath.value}`
 })
 
+function normalizeContactSources(contact: MessageContactItem): ContactSourceItem[] {
+  if (!Array.isArray(contact.sources)) return []
+  return contact.sources
+    .map((src, idx) => {
+      if (typeof src === 'string') {
+        return {
+          type: 'domain',
+          id: idx + 1,
+          name: src
+        }
+      }
+      if (src && typeof src === 'object') {
+        return {
+          type: src.type === 'org' ? 'org' : 'domain',
+          id: Number(src.id) || 0,
+          name: String(src.name || '').trim()
+        }
+      }
+      return null
+    })
+    .filter((item): item is ContactSourceItem => Boolean(item && item.name))
+}
+
+function getSourceKey(src: ContactSourceItem): string {
+  return `${src.type}:${src.id}:${src.name}`
+}
+
+const domainContactsCount = computed(
+  () =>
+    contacts.value.filter((c) => normalizeContactSources(c).some((s) => s.type === 'domain')).length
+)
+
+const orgContactsCount = computed(
+  () => contacts.value.filter((c) => normalizeContactSources(c).some((s) => s.type === 'org')).length
+)
+
+const availableSpecificSources = computed(() => {
+  if (sourceScopeFilter.value === 'all') return []
+  const map = new Map<string, ContactSourceItem>()
+  for (const contact of contacts.value) {
+    for (const src of normalizeContactSources(contact)) {
+      if (src.type !== sourceScopeFilter.value) continue
+      const key = getSourceKey(src)
+      if (!map.has(key)) {
+        map.set(key, src)
+      }
+    }
+  }
+  return Array.from(map.values())
+})
+
 const filteredContacts = computed(() => {
   const kw = searchKeyword.value.trim().toLowerCase()
-  if (!kw) return contacts.value
   return contacts.value.filter((c) => {
+    const sources = normalizeContactSources(c)
+    if (sourceScopeFilter.value !== 'all') {
+      const hasType = sources.some((s) => s.type === sourceScopeFilter.value)
+      if (!hasType) return false
+      if (
+        specificSourceKey.value !== 'all' &&
+        !sources.some((s) => s.type === sourceScopeFilter.value && getSourceKey(s) === specificSourceKey.value)
+      ) {
+        return false
+      }
+    }
+    if (!kw) return true
     const nameMatch =
       (c.nickname || '').toLowerCase().includes(kw) ||
       (c.username || '').toLowerCase().includes(kw)
-    const sourceMatch = (c.sources || []).some((s) => s.toLowerCase().includes(kw))
+    const sourceMatch = sources.some((s) => s.name.toLowerCase().includes(kw))
     return nameMatch || sourceMatch
   })
 })
@@ -124,10 +206,11 @@ async function handleSendShareCard() {
   sending.value = true
   try {
     await shareAssetCard({
-      target_user_ids: selectedUserIds.value,
+      recipient_ids: selectedUserIds.value,
       asset_id: props.assetId,
-      doc_id: props.docId || undefined,
+      doc_id: effectiveDocId.value,
       ref_domain_id: props.refDomainId || undefined,
+      cross_ref_id: props.crossRefId || undefined,
       note: note.value.trim() || undefined
     })
     ElMessage.success(`已向 ${selectedUserIds.value.length} 位成员发送分享卡片`)
@@ -139,11 +222,18 @@ async function handleSendShareCard() {
   }
 }
 
+watch(sourceScopeFilter, () => {
+  specificSourceKey.value = 'all'
+})
+
 watch(
   () => props.modelValue,
   (open) => {
     if (open) {
       searchKeyword.value = ''
+      sourceScopeFilter.value = 'all'
+      specificSourceKey.value = 'all'
+      shareScope.value = props.docId ? 'doc' : 'asset'
       selectedUserIds.value = []
       note.value = ''
       void fetchContacts()
@@ -155,8 +245,8 @@ watch(
 <template>
   <el-dialog
     v-model="visible"
-    title="分享资产"
-    width="540px"
+    :title="dialogTitle"
+    width="560px"
     destroy-on-close
     append-to-body
   >
@@ -172,8 +262,22 @@ watch(
           <el-tag v-if="domainName" size="small" type="info" effect="plain">
             {{ domainName }}
           </el-tag>
+          <el-tag v-if="refDomainId" size="small" type="warning" effect="plain">
+            跨域引用
+          </el-tag>
         </div>
-        <div v-if="docName" class="share-target-doc">
+
+        <div v-if="hasDocTarget" class="share-scope-row">
+          <span class="scope-label">分享粒度：</span>
+          <el-radio-group v-model="shareScope" size="small">
+            <el-radio-button value="doc">
+              {{ isFolder ? '仅当前文件夹' : '仅当前文档' }}
+            </el-radio-button>
+            <el-radio-button value="asset">整个知识库</el-radio-button>
+          </el-radio-group>
+        </div>
+
+        <div v-if="docName && shareScope === 'doc'" class="share-target-doc">
           <el-tag size="small" :type="isFolder ? 'warning' : 'success'" effect="plain">
             {{ isFolder ? '文件夹' : '文档' }}
           </el-tag>
@@ -200,11 +304,38 @@ watch(
         <div class="section-header-row">
           <div class="section-label">
             <el-icon :size="14"><Promotion /></el-icon>
-            <span>分享资产卡片给同域/同组织成员（可多选）</span>
+            <span>分享卡片给成员（区分同域 / 同组织，可多选）</span>
           </div>
           <span v-if="selectedUserIds.length > 0" class="selected-count">
             已选 {{ selectedUserIds.length }} 人
           </span>
+        </div>
+
+        <div class="scope-filter-row">
+          <el-radio-group v-model="sourceScopeFilter" size="small">
+            <el-radio-button value="all">全部 ({{ contacts.length }})</el-radio-button>
+            <el-radio-button value="domain">同域成员 ({{ domainContactsCount }})</el-radio-button>
+            <el-radio-button value="org">同组织成员 ({{ orgContactsCount }})</el-radio-button>
+          </el-radio-group>
+
+          <el-select
+            v-if="sourceScopeFilter !== 'all' && availableSpecificSources.length > 0"
+            v-model="specificSourceKey"
+            size="small"
+            class="specific-source-select"
+            :placeholder="sourceScopeFilter === 'domain' ? '按域筛选' : '按组织筛选'"
+          >
+            <el-option
+              :label="sourceScopeFilter === 'domain' ? '全部同域' : '全部同组织'"
+              value="all"
+            />
+            <el-option
+              v-for="src in availableSpecificSources"
+              :key="getSourceKey(src)"
+              :label="src.name"
+              :value="getSourceKey(src)"
+            />
+          </el-select>
         </div>
 
         <div class="contact-filter-bar">
@@ -221,14 +352,14 @@ watch(
             :disabled="filteredContacts.length === 0"
             @change="handleToggleSelectAll"
           >
-            全选
+            全选当前
           </el-checkbox>
         </div>
 
         <div v-loading="loadingContacts" class="contact-list">
           <el-empty
             v-if="!loadingContacts && filteredContacts.length === 0"
-            :description="contacts.length === 0 ? '暂无同域或同组织的可分享成员' : '未找到匹配的成员'"
+            :description="contacts.length === 0 ? '暂无同域或同组织的可分享成员' : '当前筛选条件下暂无匹配成员'"
             :image-size="48"
           />
 
@@ -248,15 +379,15 @@ watch(
                   <span class="contact-name">{{ getUserDisplay(contact) }}</span>
                   <span class="contact-username mono-text">@{{ contact.username }}</span>
                 </div>
-                <div v-if="contact.sources?.length" class="contact-sources">
+                <div v-if="normalizeContactSources(contact).length" class="contact-sources">
                   <el-tag
-                    v-for="src in contact.sources"
-                    :key="src"
+                    v-for="src in normalizeContactSources(contact)"
+                    :key="getSourceKey(src)"
                     size="small"
-                    type="info"
-                    effect="plain"
+                    :type="src.type === 'org' ? 'success' : 'primary'"
+                    effect="light"
                   >
-                    {{ src }}
+                    {{ src.type === 'org' ? `组织 · ${src.name}` : `域 · ${src.name}` }}
                   </el-tag>
                 </div>
               </div>
@@ -270,7 +401,7 @@ watch(
           :rows="2"
           maxlength="200"
           show-word-limit
-          placeholder="附言（可选）：例如推荐查看这个文档/能力..."
+          placeholder="附言（可选）：例如推荐查看这个文件夹/文档..."
           class="note-input"
         />
       </div>
@@ -295,7 +426,7 @@ watch(
 .share-dialog-body {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 16px;
 }
 
 .share-target-summary {
@@ -319,6 +450,18 @@ watch(
   font-size: 14px;
   font-weight: 600;
   color: var(--ascp-text-main, #0f172a);
+}
+
+.share-scope-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.scope-label {
+  font-size: 12px;
+  color: var(--ascp-text-sub, #475569);
 }
 
 .share-target-doc {
@@ -360,6 +503,18 @@ watch(
 .link-copy-row {
   display: flex;
   gap: 8px;
+}
+
+.scope-filter-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.specific-source-select {
+  width: 150px;
 }
 
 .contact-filter-bar {

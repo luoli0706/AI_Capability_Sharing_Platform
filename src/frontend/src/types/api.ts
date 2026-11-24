@@ -622,8 +622,14 @@ export interface UserFavoriteItem {
   created_at: string
 }
 
+export interface ContactSourceItem {
+  type: 'domain' | 'org' | string
+  id: number
+  name: string
+}
+
 export interface MessageContactItem extends UserBrief {
-  sources?: string[]
+  sources?: Array<ContactSourceItem | string>
 }
 
 export interface AssetCardPayload {
@@ -636,15 +642,17 @@ export interface AssetCardPayload {
   doc_name?: string
   is_folder?: boolean
   ref_domain_id?: number
+  cross_ref_id?: number
   note?: string
   url?: string
 }
 
 export interface ShareAssetCardPayload {
-  target_user_ids: number[]
+  recipient_ids: number[]
   asset_id: number
   doc_id?: number
   ref_domain_id?: number
+  cross_ref_id?: number
   note?: string
 }
 

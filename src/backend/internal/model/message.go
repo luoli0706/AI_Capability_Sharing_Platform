@@ -60,6 +60,7 @@ type AssetCardPayload struct {
 	DocName     string `json:"doc_name,omitempty"`
 	IsFolder    bool   `json:"is_folder,omitempty"`
 	RefDomainID uint64 `json:"ref_domain_id,omitempty"`
+	CrossRefID  uint64 `json:"cross_ref_id,omitempty"`
 	Note        string `json:"note,omitempty"`
 }
 
@@ -76,6 +77,7 @@ type ShareAssetCardRequest struct {
 	AssetID      uint64   `json:"asset_id" validate:"required,gt=0"`
 	DocID        uint64   `json:"doc_id"`
 	RefDomainID  uint64   `json:"ref_domain_id"`
+	CrossRefID   uint64   `json:"cross_ref_id"`
 	Note         string   `json:"note" validate:"max=500"`
 }
 

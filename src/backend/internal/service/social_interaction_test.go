@@ -1066,7 +1066,7 @@ func TestMessageService_ContactsAndShareAssetCard(t *testing.T) {
 		}
 	}
 	for _, conv := range msgRepo.convs {
-		if conv.LastMessagePreview != "[知识库卡片] Architecture.md" {
+		if conv.LastMessagePreview != "[知识库文档] Architecture.md" {
 			t.Fatalf("unexpected LastMessagePreview: %q", conv.LastMessagePreview)
 		}
 	}

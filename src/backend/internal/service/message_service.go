@@ -215,7 +215,7 @@ func (s *messageService) SendMessageReq(userID uint64, isSuperAdmin bool, convID
 			note = strings.TrimSpace(req.Content)
 		}
 		var err error
-		payloadJSON, preview, content, err = s.buildSanitizedAssetCard(userID, isSuperAdmin, cardReq.AssetID, cardReq.DocID, cardReq.RefDomainID, note)
+		payloadJSON, preview, content, err = s.buildSanitizedAssetCard(userID, isSuperAdmin, cardReq.AssetID, cardReq.DocID, cardReq.RefDomainID, cardReq.CrossRefID, note)
 		if err != nil {
 			return nil, err
 		}
@@ -275,7 +275,7 @@ func (s *messageService) ShareAssetCard(senderID uint64, isSuperAdmin bool, req 
 		return 0, NewBadRequest("at least one valid recipient is required")
 	}
 
-	payloadJSON, preview, content, err := s.buildSanitizedAssetCard(senderID, isSuperAdmin, req.AssetID, req.DocID, req.RefDomainID, req.Note)
+	payloadJSON, preview, content, err := s.buildSanitizedAssetCard(senderID, isSuperAdmin, req.AssetID, req.DocID, req.RefDomainID, req.CrossRefID, req.Note)
 	if err != nil {
 		return 0, err
 	}
@@ -320,7 +320,7 @@ func (s *messageService) ShareAssetCard(senderID uint64, isSuperAdmin bool, req 
 	return sentCount, nil
 }
 
-func (s *messageService) buildSanitizedAssetCard(senderID uint64, isSuperAdmin bool, assetID, docID, refDomainID uint64, rawNote string) (string, string, string, error) {
+func (s *messageService) buildSanitizedAssetCard(senderID uint64, isSuperAdmin bool, assetID, docID, refDomainID, crossRefID uint64, rawNote string) (string, string, string, error) {
 	if s.assetRepo == nil || s.domainRepo == nil {
 		return "", "", "", NewBadRequest("asset sharing is not configured")
 	}
@@ -350,6 +350,7 @@ func (s *messageService) buildSanitizedAssetCard(senderID uint64, isSuperAdmin b
 		DomainID:    res.Asset.DomainID,
 		DomainName:  res.Asset.DomainName,
 		RefDomainID: refDomainID,
+		CrossRefID:  crossRefID,
 		Note:        note,
 	}
 	if docID > 0 && res.Doc != nil {
@@ -365,7 +366,11 @@ func (s *messageService) buildSanitizedAssetCard(senderID uint64, isSuperAdmin b
 
 	var preview string
 	if card.DocID > 0 && card.DocName != "" {
-		preview = truncateRunes("[知识库卡片] "+card.DocName, 120)
+		if card.IsFolder {
+			preview = truncateRunes("[知识库文件夹] "+card.DocName, 120)
+		} else {
+			preview = truncateRunes("[知识库文档] "+card.DocName, 120)
+		}
 	} else {
 		preview = truncateRunes("[资产卡片] "+card.AssetName, 120)
 	}
