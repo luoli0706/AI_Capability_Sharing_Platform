@@ -15,6 +15,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -39,6 +40,12 @@ var allowedKBExts = map[string]bool{
 	".markdown": true,
 	".bili":     true,
 	".video":    true,
+	".douyin":   true,
+	".youtube":  true,
+	".niconico": true,
+	".vimeo":    true,
+	".qq":       true,
+	".youku":    true,
 }
 
 var textKBExts = map[string]bool{
@@ -47,6 +54,12 @@ var textKBExts = map[string]bool{
 	".txt":      true,
 	".bili":     true,
 	".video":    true,
+	".douyin":   true,
+	".youtube":  true,
+	".niconico": true,
+	".vimeo":    true,
+	".qq":       true,
+	".youku":    true,
 	".json":     true,
 	".yaml":     true,
 	".yml":      true,
@@ -80,6 +93,12 @@ var kbMIMETypes = map[string]string{
 	".txt":      "text/plain; charset=utf-8",
 	".bili":     "text/plain; charset=utf-8",
 	".video":    "text/plain; charset=utf-8",
+	".douyin":   "text/plain; charset=utf-8",
+	".youtube":  "text/plain; charset=utf-8",
+	".niconico": "text/plain; charset=utf-8",
+	".vimeo":    "text/plain; charset=utf-8",
+	".qq":       "text/plain; charset=utf-8",
+	".youku":    "text/plain; charset=utf-8",
 	".json":     "application/json; charset=utf-8",
 	".pdf":      "application/pdf",
 }
@@ -96,6 +115,7 @@ type KBService interface {
 	GetDocumentContent(userID uint64, isSuperAdmin bool, kbID, docID uint64, obf bool, refDomainID uint64) (map[string]interface{}, error)
 	GetDocumentRaw(userID uint64, isSuperAdmin bool, kbID, docID uint64, obf bool, refDomainID uint64) (fileName, mimeType string, isSVG bool, data []byte, err error)
 	GetBilibiliPreview(userID uint64, isSuperAdmin bool, kbID, docID, refDomainID uint64) (*model.KBBilibiliPreview, error)
+	ResolveExternalVideoURL(rawURL string) (string, error)
 	UpdateMarkdownContent(userID uint64, isSuperAdmin bool, kbID, docID uint64, req model.UpdateKBFileRequest) (*model.KBDocument, error)
 	ListChunks(userID uint64, isSuperAdmin bool, kbID, docID uint64, page, pageSize int, refDomainID uint64) ([]model.KBChunk, int64, error)
 	DeleteDocument(userID uint64, isSuperAdmin bool, kbID, docID uint64) error
@@ -1102,6 +1122,98 @@ func parseBilibiliHTMLMeta(htmlStr string) (title, cover string) {
 	title = strings.TrimSuffix(title, "_哔哩哔哩_bilibili")
 	title = strings.TrimSpace(title)
 	return title, cover
+}
+
+const (
+	externalVideoResolveUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+	errUnsupportedShortVideoURL   = "仅支持解析抖音 (v.douyin.com) 或 B站 (b23.tv) 短链接"
+)
+
+var allowedShortVideoHosts = map[string]bool{
+	"v.douyin.com": true,
+	"b23.tv":       true,
+}
+
+func isAllowedShortVideoURL(parsed *url.URL) bool {
+	if parsed == nil {
+		return false
+	}
+	scheme := strings.ToLower(strings.TrimSpace(parsed.Scheme))
+	if scheme != "http" && scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	return allowedShortVideoHosts[host]
+}
+
+// ResolveExternalVideoURL safely resolves allowlisted short video URLs (v.douyin.com, b23.tv)
+// with up to 2 redirect hops, stopping immediately once Location leaves the allowlist.
+func (s *kbService) ResolveExternalVideoURL(rawURL string) (string, error) {
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return "", NewBadRequest(errUnsupportedShortVideoURL)
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || !isAllowedShortVideoURL(parsed) {
+		return "", NewBadRequest(errUnsupportedShortVideoURL)
+	}
+
+	var clientCopy http.Client
+	if s.httpClient != nil {
+		clientCopy = *s.httpClient
+	}
+	clientCopy.Timeout = 5 * time.Second
+	clientCopy.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	client := &clientCopy
+
+	currentURL := parsed.String()
+	for hop := 0; hop < 2; hop++ {
+		req, reqErr := http.NewRequest(http.MethodGet, currentURL, nil)
+		if reqErr != nil {
+			return "", NewBadRequest("无效的短链接")
+		}
+		req.Header.Set("User-Agent", externalVideoResolveUserAgent)
+
+		resp, doErr := client.Do(req)
+		if doErr != nil {
+			return "", NewBadRequest(fmt.Sprintf("短链接解析失败: %v", doErr))
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			loc := strings.TrimSpace(resp.Header.Get("Location"))
+			if loc == "" {
+				return currentURL, nil
+			}
+			locParsed, locErr := url.Parse(loc)
+			if locErr != nil {
+				return "", NewBadRequest("短链接重定向目标无效")
+			}
+			if !locParsed.IsAbs() {
+				locParsed = req.URL.ResolveReference(locParsed)
+			}
+			locScheme := strings.ToLower(strings.TrimSpace(locParsed.Scheme))
+			if locScheme != "http" && locScheme != "https" {
+				return "", NewBadRequest("短链接重定向目标协议不支持")
+			}
+			locHost := strings.ToLower(strings.TrimSpace(locParsed.Hostname()))
+			if !allowedShortVideoHosts[locHost] {
+				return locParsed.String(), nil
+			}
+			currentURL = locParsed.String()
+			continue
+		}
+
+		if resp.StatusCode >= 400 {
+			return "", NewBadRequest(fmt.Sprintf("短链接解析失败 (HTTP %d)", resp.StatusCode))
+		}
+		return currentURL, nil
+	}
+
+	return currentURL, nil
 }
 
 func (s *kbService) ListChunks(userID uint64, isSuperAdmin bool, kbID, docID uint64, page, pageSize int, refDomainID uint64) ([]model.KBChunk, int64, error) {

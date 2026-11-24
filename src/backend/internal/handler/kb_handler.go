@@ -456,3 +456,14 @@ func (h *KBHandler) RenameDocument(c echo.Context) error {
 	}
 	return response.Success(c, doc)
 }
+
+func (h *KBHandler) ResolveExternalVideoURL(c echo.Context) error {
+	rawURL := strings.TrimSpace(c.QueryParam("url"))
+	resolved, err := h.kbSvc.ResolveExternalVideoURL(rawURL)
+	if err != nil {
+		return service.HandleError(c, err)
+	}
+	return response.Success(c, map[string]string{
+		"resolved_url": resolved,
+	})
+}

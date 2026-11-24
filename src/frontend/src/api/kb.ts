@@ -357,3 +357,9 @@ export function saveReadingProgress(
     { params: withRefDomainId(undefined, refDomainId) }
   )
 }
+
+export function resolveVideoShortUrl(url: string): Promise<{ resolved_url: string }> {
+  return apiGet<{ resolved_url: string }>('/tools/video-link/resolve', {
+    params: { url }
+  })
+}

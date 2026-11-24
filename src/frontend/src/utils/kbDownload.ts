@@ -58,10 +58,24 @@ function getBaseName(raw: string): string {
   return lastDot > 0 ? trimmed.slice(0, lastDot) : trimmed
 }
 
+function getExtension(raw: string): string {
+  const trimmed = raw.trim()
+  const lastDot = trimmed.lastIndexOf('.')
+  return lastDot > 0 ? trimmed.slice(lastDot).toLowerCase() : ''
+}
+
+export function extractResolvableShortVideoUrl(input: string): string | null {
+  const trimmed = input.trim()
+  if (!trimmed) return null
+  const match = trimmed.match(/https?:\/\/(?:v\.douyin\.com|b23\.tv)\/[A-Za-z0-9_-]+\/?/i)
+  return match ? match[0] : null
+}
+
 function parseSingleExternalVideoText(raw: string, fileNameMode: boolean): ExternalVideoSource | null {
   const trimmed = raw.trim()
   if (!trimmed) return null
   const baseName = getBaseName(trimmed)
+  const ext = getExtension(trimmed)
 
   // 1. Bilibili
   const biliUrlMatch = !fileNameMode
@@ -85,7 +99,9 @@ function parseSingleExternalVideoText(raw: string, fileNameMode: boolean): Exter
   const ytUrlMatch = !fileNameMode
     ? trimmed.match(/(?:youtube\.com\/(?:watch\?(?:[^#\s]*&)?v=|shorts\/|embed\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/i)
     : null
-  const ytFileMatch = baseName.match(/^(?:yt|youtube)-([A-Za-z0-9_-]{11})$/i)
+  const ytFileMatch =
+    baseName.match(/^(?:yt|youtube)-([A-Za-z0-9_-]{11})$/i) ||
+    (ext === '.youtube' ? baseName.match(/^([A-Za-z0-9_-]{11})$/) : null)
   const ytMatch = ytUrlMatch || ytFileMatch
   if (ytMatch) {
     const id = ytMatch[1]
@@ -93,7 +109,7 @@ function parseSingleExternalVideoText(raw: string, fileNameMode: boolean): Exter
       platform: 'youtube',
       platformLabel: 'YouTube',
       videoId: id,
-      suggestedFileName: `yt-${id}.video`,
+      suggestedFileName: `${id}.youtube`,
       embedUrl: `https://www.youtube.com/embed/${encodeURIComponent(id)}`,
       watchUrl: `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`,
       requiresMagic: true
@@ -112,7 +128,7 @@ function parseSingleExternalVideoText(raw: string, fileNameMode: boolean): Exter
       platform: 'niconico',
       platformLabel: 'Niconico',
       videoId: id,
-      suggestedFileName: `${id}.video`,
+      suggestedFileName: `${id}.niconico`,
       embedUrl: `https://embed.nicovideo.jp/watch/${encodeURIComponent(id)}`,
       watchUrl: `https://www.nicovideo.jp/watch/${encodeURIComponent(id)}`,
       requiresMagic: true
@@ -123,7 +139,8 @@ function parseSingleExternalVideoText(raw: string, fileNameMode: boolean): Exter
   const vimeoUrlMatch = !fileNameMode
     ? trimmed.match(/(?:player\.)?vimeo\.com\/(?:video\/)?(\d+)/i)
     : null
-  const vimeoFileMatch = baseName.match(/^vimeo-(\d+)$/i)
+  const vimeoFileMatch =
+    baseName.match(/^vimeo-(\d+)$/i) || (ext === '.vimeo' ? baseName.match(/^(\d+)$/) : null)
   const vimeoMatch = vimeoUrlMatch || vimeoFileMatch
   if (vimeoMatch) {
     const id = vimeoMatch[1]
@@ -131,7 +148,7 @@ function parseSingleExternalVideoText(raw: string, fileNameMode: boolean): Exter
       platform: 'vimeo',
       platformLabel: 'Vimeo',
       videoId: id,
-      suggestedFileName: `vimeo-${id}.video`,
+      suggestedFileName: `${id}.vimeo`,
       embedUrl: `https://player.vimeo.com/video/${encodeURIComponent(id)}`,
       watchUrl: `https://vimeo.com/${encodeURIComponent(id)}`,
       requiresMagic: true
@@ -140,19 +157,23 @@ function parseSingleExternalVideoText(raw: string, fileNameMode: boolean): Exter
 
   // 5. Douyin
   const douyinUrlMatch = !fileNameMode
-    ? trimmed.match(/douyin\.com\/video\/(\d+)/i)
+    ? trimmed.match(
+        /(?:douyin\.com\/video\/(\d+)|iesdouyin\.com\/share\/video\/(\d+)|douyin\.com\/[^\s]*[?&]modal_id=(\d+))/i
+      )
     : null
-  const douyinFileMatch = baseName.match(/^douyin-(\d+)$/i)
-  const douyinMatch = douyinUrlMatch || douyinFileMatch
-  if (douyinMatch) {
-    const id = douyinMatch[1]
+  const douyinFileMatch =
+    baseName.match(/^douyin-(\d+)$/i) || (ext === '.douyin' ? baseName.match(/^(\d+)$/) : null)
+  const douyinId = douyinUrlMatch
+    ? douyinUrlMatch[1] || douyinUrlMatch[2] || douyinUrlMatch[3]
+    : douyinFileMatch?.[1]
+  if (douyinId) {
     return {
       platform: 'douyin',
       platformLabel: '抖音',
-      videoId: id,
-      suggestedFileName: `douyin-${id}.video`,
-      embedUrl: `https://open.douyin.com/player/video?vid=${encodeURIComponent(id)}&autoplay=0`,
-      watchUrl: `https://www.douyin.com/video/${encodeURIComponent(id)}`,
+      videoId: douyinId,
+      suggestedFileName: `${douyinId}.douyin`,
+      embedUrl: `https://open.douyin.com/player/video?vid=${encodeURIComponent(douyinId)}&autoplay=0`,
+      watchUrl: `https://www.douyin.com/video/${encodeURIComponent(douyinId)}`,
       requiresMagic: false
     }
   }
@@ -161,7 +182,9 @@ function parseSingleExternalVideoText(raw: string, fileNameMode: boolean): Exter
   const tencentUrlMatch = !fileNameMode
     ? trimmed.match(/v\.qq\.com\/x\/(?:page|cover\/[^/]+)\/([A-Za-z0-9]+)\.html/i)
     : null
-  const tencentFileMatch = baseName.match(/^qq-([A-Za-z0-9]+)$/i)
+  const tencentFileMatch =
+    baseName.match(/^qq-([A-Za-z0-9]+)$/i) ||
+    (ext === '.qq' ? baseName.match(/^([A-Za-z0-9]+)$/) : null)
   const tencentMatch = tencentUrlMatch || tencentFileMatch
   if (tencentMatch) {
     const id = tencentMatch[1]
@@ -169,7 +192,7 @@ function parseSingleExternalVideoText(raw: string, fileNameMode: boolean): Exter
       platform: 'tencent',
       platformLabel: '腾讯视频',
       videoId: id,
-      suggestedFileName: `qq-${id}.video`,
+      suggestedFileName: `${id}.qq`,
       embedUrl: `https://v.qq.com/txp/iframe/player.html?vid=${encodeURIComponent(id)}`,
       watchUrl: `https://v.qq.com/x/page/${encodeURIComponent(id)}.html`,
       requiresMagic: false
@@ -180,7 +203,9 @@ function parseSingleExternalVideoText(raw: string, fileNameMode: boolean): Exter
   const youkuUrlMatch = !fileNameMode
     ? trimmed.match(/v\.youku\.com\/v_show\/id_([A-Za-z0-9=]+)/i)
     : null
-  const youkuFileMatch = baseName.match(/^youku-([A-Za-z0-9=]+)$/i)
+  const youkuFileMatch =
+    baseName.match(/^youku-([A-Za-z0-9=]+)$/i) ||
+    (ext === '.youku' ? baseName.match(/^([A-Za-z0-9=]+)$/) : null)
   const youkuMatch = youkuUrlMatch || youkuFileMatch
   if (youkuMatch) {
     const id = youkuMatch[1]
@@ -188,7 +213,7 @@ function parseSingleExternalVideoText(raw: string, fileNameMode: boolean): Exter
       platform: 'youku',
       platformLabel: '优酷',
       videoId: id,
-      suggestedFileName: `youku-${id}.video`,
+      suggestedFileName: `${id}.youku`,
       embedUrl: `https://player.youku.com/embed/${encodeURIComponent(id)}`,
       watchUrl: `https://v.youku.com/v_show/id_${encodeURIComponent(id)}.html`,
       requiresMagic: false
@@ -215,7 +240,7 @@ export function parseExternalVideoSource(
 export function isExternalVideoFile(fileName: string): boolean {
   const trimmed = fileName.trim()
   if (!trimmed) return false
-  if (/\.(bili|video)$/i.test(trimmed)) return true
+  if (/\.(bili|video|douyin|youtube|niconico|vimeo|qq|youku)$/i.test(trimmed)) return true
   return parseExternalVideoSource('', trimmed) !== null
 }
 

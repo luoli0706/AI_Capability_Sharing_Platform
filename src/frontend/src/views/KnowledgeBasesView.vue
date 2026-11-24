@@ -57,6 +57,7 @@ import {
   listDocumentComments,
   moveDocument,
   renameDocument,
+  resolveVideoShortUrl,
   restoreDocument,
   searchKB,
   toggleDocumentFavorite,
@@ -89,6 +90,7 @@ import {
   confirmAndDownloadKb,
   createLoadMoreSentinelNode,
   extractImmediateFiles,
+  extractResolvableShortVideoUrl,
   isExternalVideoFile,
   isImageFile,
   isMarkdownFile,
@@ -234,12 +236,81 @@ const createFileOpen = ref(false)
 const createFileMode = ref<'markdown' | 'video'>('markdown')
 const createVideoInput = ref('')
 const creatingFile = ref(false)
+const resolvedVideoSource = ref<ExternalVideoSource | null>(null)
+const resolvingVideoShortUrl = ref(false)
+const videoResolveError = ref('')
+let resolveShortUrlTimer: ReturnType<typeof setTimeout> | null = null
+let resolveShortUrlSeq = 0
 const createFileForm = reactive({
   file_name: '',
   content: ''
 })
 
-const parsedCreateVideo = computed(() => parseExternalVideoSource(createVideoInput.value))
+const parsedCreateVideo = computed(
+  () => parseExternalVideoSource(createVideoInput.value) || resolvedVideoSource.value
+)
+
+async function resolveShortVideoInput(rawInput: string): Promise<ExternalVideoSource | null> {
+  const direct = parseExternalVideoSource(rawInput)
+  if (direct) return direct
+  const shortUrl = extractResolvableShortVideoUrl(rawInput)
+  if (!shortUrl) return null
+
+  const seq = ++resolveShortUrlSeq
+  resolvingVideoShortUrl.value = true
+  videoResolveError.value = ''
+  try {
+    const res = await resolveVideoShortUrl(shortUrl)
+    const parsed = res?.resolved_url ? parseExternalVideoSource(res.resolved_url) : null
+    if (seq === resolveShortUrlSeq) {
+      resolvedVideoSource.value = parsed
+      if (!parsed) {
+        videoResolveError.value = '短链接已跳转，但未能识别为支持的视频播放页，请尝试复制播放页完整链接'
+      }
+    }
+    return parsed
+  } catch {
+    if (seq === resolveShortUrlSeq) {
+      resolvedVideoSource.value = null
+      videoResolveError.value = '短链接解析失败，请尝试复制播放页完整链接'
+    }
+    return null
+  } finally {
+    if (seq === resolveShortUrlSeq) {
+      resolvingVideoShortUrl.value = false
+    }
+  }
+}
+
+watch(createVideoInput, (val) => {
+  if (resolveShortUrlTimer) {
+    clearTimeout(resolveShortUrlTimer)
+    resolveShortUrlTimer = null
+  }
+  resolveShortUrlSeq += 1
+  resolvedVideoSource.value = null
+  videoResolveError.value = ''
+
+  if (createFileMode.value !== 'video') {
+    resolvingVideoShortUrl.value = false
+    return
+  }
+  if (parseExternalVideoSource(val)) {
+    resolvingVideoShortUrl.value = false
+    return
+  }
+  const shortUrl = extractResolvableShortVideoUrl(val)
+  if (!shortUrl) {
+    resolvingVideoShortUrl.value = false
+    return
+  }
+
+  resolvingVideoShortUrl.value = true
+  resolveShortUrlTimer = setTimeout(() => {
+    resolveShortUrlTimer = null
+    void resolveShortVideoInput(val)
+  }, 300)
+})
 
 // Right Pane Tabs & Preview / Editor
 const rightTab = ref<'preview' | 'search'>('preview')
@@ -961,20 +1032,35 @@ async function handleCreateFolder() {
 }
 
 function openCreateFileModal(mode: 'markdown' | 'video' = 'markdown') {
+  if (resolveShortUrlTimer) {
+    clearTimeout(resolveShortUrlTimer)
+    resolveShortUrlTimer = null
+  }
+  resolveShortUrlSeq += 1
   createFileMode.value = mode
   createFileForm.file_name = ''
   createFileForm.content = ''
   createVideoInput.value = ''
+  resolvedVideoSource.value = null
+  resolvingVideoShortUrl.value = false
+  videoResolveError.value = ''
   createFileOpen.value = true
 }
 
 async function handleCreateFile() {
   if (!selectedKbId.value) return
   if (createFileMode.value === 'video') {
-    const parsed = parseExternalVideoSource(createVideoInput.value)
+    let parsed = parsedCreateVideo.value
+    if (!parsed && extractResolvableShortVideoUrl(createVideoInput.value)) {
+      if (resolveShortUrlTimer) {
+        clearTimeout(resolveShortUrlTimer)
+        resolveShortUrlTimer = null
+      }
+      parsed = await resolveShortVideoInput(createVideoInput.value)
+    }
     if (!parsed) {
       ElMessage.warning(
-        '请输入有效的视频链接或视频 ID（支持 B站、YouTube、Niconico、Vimeo、抖音、腾讯视频、优酷）'
+        '未能识别有效的视频链接。若为抖音视频，请在抖音 App 点击「分享 → 复制链接」，或在 PC 网页端播放页复制地址栏中的 www.douyin.com/video/数字ID 或含 ?modal_id=数字ID 的链接。'
       )
       return
     }
@@ -3415,7 +3501,7 @@ onUnmounted(() => {
         <el-form-item label="文件类型">
           <el-radio-group v-model="createFileMode" size="small">
             <el-radio-button value="markdown">Markdown 文档</el-radio-button>
-            <el-radio-button value="video">外链视频 (.video / .bili)</el-radio-button>
+            <el-radio-button value="video">外链视频 (.bili / .douyin 等)</el-radio-button>
           </el-radio-group>
         </el-form-item>
         <el-form-item label="目标目录">
@@ -3429,10 +3515,20 @@ onUnmounted(() => {
           <el-form-item label="视频链接或视频 ID">
             <el-input
               v-model="createVideoInput"
-              placeholder="支持 B站 / YouTube / Niconico / Vimeo / 抖音 / 腾讯视频 / 优酷 链接或 ID"
+              placeholder="粘贴视频链接、分享文案（如抖音 v.douyin.com）或视频 ID"
               class="mono-text"
               clearable
             />
+            <div v-if="resolvingVideoShortUrl" class="video-resolve-status">
+              <el-icon class="is-loading"><Loading /></el-icon>
+              <span>正在解析短链接...</span>
+            </div>
+            <div
+              v-else-if="!parsedCreateVideo && videoResolveError"
+              class="video-resolve-error"
+            >
+              {{ videoResolveError }}
+            </div>
             <div v-if="parsedCreateVideo" class="bili-create-hint">
               <div class="video-create-meta">
                 <el-tag
@@ -3451,6 +3547,20 @@ onUnmounted(() => {
               </div>
             </div>
           </el-form-item>
+          <div class="video-guide-box">
+            <div class="video-guide-title">支持链接格式与获取指南</div>
+            <ul class="video-guide-list">
+              <li>
+                <strong>抖音</strong>：支持 App 分享短链（<span class="mono-text">v.douyin.com/...</span>，可直接粘贴含文案的完整分享内容）及网页版播放页链接（<span class="mono-text">www.douyin.com/video/数字ID</span> 或含 <span class="mono-text">modal_id=</span> 的地址栏链接）；获取方式：抖音 App 点「分享 → 复制链接」，或 PC 网页打开视频后复制浏览器地址栏链接。
+              </li>
+              <li>
+                <strong>B 站 / 腾讯 / 优酷</strong>：支持播放页链接、BV 号或 <span class="mono-text">b23.tv</span> 短链。
+              </li>
+              <li>
+                <strong>YouTube / Niconico / Vimeo（境外）</strong>：支持播放页或 <span class="mono-text">youtu.be</span> 分享链接（观看时需使用一些魔法）。
+              </li>
+            </ul>
+          </div>
         </template>
         <template v-else>
           <el-form-item label="文件名">
@@ -4895,6 +5005,46 @@ onUnmounted(() => {
 .video-create-magic-tip {
   color: #b45309;
   font-size: 12px;
+}
+
+.video-resolve-status {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #4f46e5;
+}
+
+.video-resolve-error {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #dc2626;
+}
+
+.video-guide-box {
+  margin-top: 4px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #475569;
+}
+
+.video-guide-title {
+  font-weight: 600;
+  color: #1e293b;
+  margin-bottom: 6px;
+}
+
+.video-guide-list {
+  margin: 0;
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .video-magic-alert {

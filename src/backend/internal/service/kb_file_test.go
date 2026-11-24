@@ -1562,3 +1562,134 @@ func TestKBDeleteAndRestoreDocument(t *testing.T) {
 		t.Fatal("expected sibling folder axb and its child NOT to be deleted when deleting a_b")
 	}
 }
+
+func TestResolveExternalVideoURL(t *testing.T) {
+	kbSvc := NewKBService(nil, nil, nil, nil, nil, t.TempDir(), "test-secret")
+	svcImpl := kbSvc.(*kbService)
+
+	callCount := 0
+	svcImpl.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			callCount++
+			if req.Header.Get("User-Agent") != externalVideoResolveUserAgent {
+				t.Fatalf("unexpected User-Agent: %s", req.Header.Get("User-Agent"))
+			}
+			switch req.URL.String() {
+			case "https://v.douyin.com/xyz/":
+				return &http.Response{
+					StatusCode: http.StatusFound,
+					Header:     http.Header{"Location": []string{"https://www.douyin.com/video/7123456789012345678"}},
+					Body:       io.NopCloser(strings.NewReader("")),
+					Request:    req,
+				}, nil
+			case "https://b23.tv/abc":
+				return &http.Response{
+					StatusCode: http.StatusFound,
+					Header:     http.Header{"Location": []string{"https://b23.tv/def"}},
+					Body:       io.NopCloser(strings.NewReader("")),
+					Request:    req,
+				}, nil
+			case "https://b23.tv/def":
+				return &http.Response{
+					StatusCode: http.StatusFound,
+					Header:     http.Header{"Location": []string{"https://www.bilibili.com/video/BV1xx411c7mD"}},
+					Body:       io.NopCloser(strings.NewReader("")),
+					Request:    req,
+				}, nil
+			case "https://b23.tv/direct":
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{},
+					Body:       io.NopCloser(strings.NewReader("ok")),
+					Request:    req,
+				}, nil
+			case "https://b23.tv/missing":
+				return &http.Response{
+					StatusCode: http.StatusNotFound,
+					Header:     http.Header{},
+					Body:       io.NopCloser(strings.NewReader("not found")),
+					Request:    req,
+				}, nil
+			default:
+				t.Fatalf("unexpected outbound request to %s", req.URL.String())
+				return nil, nil
+			}
+		}),
+	}
+
+	// SSRF guard & allowlist rejections (must not make any outbound calls)
+	rejected := []string{
+		"",
+		"http://127.0.0.1:8080/secret",
+		"http://localhost/admin",
+		"https://example.com/video",
+		"ftp://v.douyin.com/xyz",
+		"https://v.douyin.com.evil.com/xyz",
+	}
+	for _, raw := range rejected {
+		if _, err := kbSvc.ResolveExternalVideoURL(raw); err == nil {
+			t.Fatalf("expected error for rejected URL %q", raw)
+		} else {
+			assertAppErrStatus(t, err, http.StatusBadRequest)
+		}
+	}
+	if callCount != 0 {
+		t.Fatalf("expected 0 outbound calls for rejected URLs, got %d", callCount)
+	}
+
+	// 1-hop Douyin short link resolution
+	resolved, err := kbSvc.ResolveExternalVideoURL("https://v.douyin.com/xyz/")
+	if err != nil {
+		t.Fatalf("ResolveExternalVideoURL douyin failed: %v", err)
+	}
+	if resolved != "https://www.douyin.com/video/7123456789012345678" {
+		t.Fatalf("unexpected resolved douyin url: %s", resolved)
+	}
+	if callCount != 1 {
+		t.Fatalf("expected 1 call for douyin 1-hop redirect, got %d", callCount)
+	}
+
+	// 2-hop Bilibili short link resolution
+	callCount = 0
+	resolved, err = kbSvc.ResolveExternalVideoURL("https://b23.tv/abc")
+	if err != nil {
+		t.Fatalf("ResolveExternalVideoURL b23.tv 2-hop failed: %v", err)
+	}
+	if resolved != "https://www.bilibili.com/video/BV1xx411c7mD" {
+		t.Fatalf("unexpected resolved b23 url: %s", resolved)
+	}
+	if callCount != 2 {
+		t.Fatalf("expected 2 calls for b23.tv 2-hop redirect, got %d", callCount)
+	}
+
+	// 200 OK without Location returns final URL
+	resolved, err = kbSvc.ResolveExternalVideoURL("https://b23.tv/direct")
+	if err != nil {
+		t.Fatalf("ResolveExternalVideoURL 200 failed: %v", err)
+	}
+	if resolved != "https://b23.tv/direct" {
+		t.Fatalf("expected https://b23.tv/direct, got %s", resolved)
+	}
+
+	// >= 400 returns error
+	if _, err := kbSvc.ResolveExternalVideoURL("https://b23.tv/missing"); err == nil {
+		t.Fatal("expected error for 404 short link")
+	} else {
+		assertAppErrStatus(t, err, http.StatusBadRequest)
+	}
+}
+
+func TestVideoPlatformExtensionsAllowed(t *testing.T) {
+	exts := []string{".douyin", ".youtube", ".niconico", ".vimeo", ".qq", ".youku"}
+	for _, ext := range exts {
+		if !allowedKBExts[ext] {
+			t.Fatalf("expected %s to be in allowedKBExts", ext)
+		}
+		if !textKBExts[ext] {
+			t.Fatalf("expected %s to be in textKBExts", ext)
+		}
+		if got := kbMIMETypes[ext]; got != "text/plain; charset=utf-8" {
+			t.Fatalf("expected kbMIMETypes[%s] = text/plain; charset=utf-8, got %q", ext, got)
+		}
+	}
+}

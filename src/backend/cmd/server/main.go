@@ -258,6 +258,7 @@ func main() {
 	protected.POST("/tools/7o/encrypt", sevenOHandler.Encrypt)
 	protected.POST("/tools/7o/decrypt", sevenOHandler.Decrypt)
 	protected.POST("/tools/7o/inspect", sevenOHandler.Inspect)
+	protected.GET("/tools/video-link/resolve", kbHandler.ResolveExternalVideoURL)
 
 	// Unified invoke routes (JWT or X-API-Key + AssetGuardMiddleware)
 	invoke := v1.Group(
