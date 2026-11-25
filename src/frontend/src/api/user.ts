@@ -1,5 +1,19 @@
-import { apiGet } from './request'
-import type { PublicUserProfile, UserBrief, UserFavoriteItem } from '@/types/api'
+import { apiGet, apiPost, apiPut } from './request'
+import type {
+  BindEmailPayload,
+  PublicUserProfile,
+  UserBrief,
+  UserFavoriteItem,
+  UserInfo
+} from '@/types/api'
+
+export function sendBindEmailCode(email: string): Promise<null> {
+  return apiPost<null, { email: string }>('/user/email/send-code', { email })
+}
+
+export function bindEmail(payload: BindEmailPayload): Promise<UserInfo> {
+  return apiPut<UserInfo, BindEmailPayload>('/user/email', payload)
+}
 
 export function searchUsers(
   keyword: string

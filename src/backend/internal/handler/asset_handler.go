@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -342,7 +341,7 @@ func (h *AssetHandler) DownloadSkillPackage(c echo.Context) error {
 		return service.HandleError(c, err)
 	}
 
-	c.Response().Header().Set(echo.HeaderContentDisposition, fmt.Sprintf(`attachment; filename="%s"`, filename))
+	setContentDisposition(c, "attachment", filename)
 	return c.Blob(http.StatusOK, contentType, data)
 }
 
@@ -432,6 +431,6 @@ func (h *AssetHandler) DownloadAgentPackage(c echo.Context) error {
 		return service.HandleError(c, err)
 	}
 
-	c.Response().Header().Set(echo.HeaderContentDisposition, fmt.Sprintf(`attachment; filename="%s"`, filename))
+	setContentDisposition(c, "attachment", filename)
 	return c.Blob(http.StatusOK, contentType, data)
 }

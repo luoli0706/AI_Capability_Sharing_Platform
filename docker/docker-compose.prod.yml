@@ -38,6 +38,11 @@ services:
       MYSQL_PASSWORD: ${MYSQL_ROOT_PASSWORD:-ascp123456}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-ascp}
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production-ascp-jwt-secret}
+      SERVER_MODE: ${SERVER_MODE:-release}
+      STORAGE_SECRET: ${STORAGE_SECRET:-}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+      Aliyun_User_AK: ${Aliyun_User_AK:-}
+      Aliyun_User_SK: ${Aliyun_User_SK:-}
       SEVENO_BIN_PATH: /app/releases/seventhcv-7o-linux
       SEVENO_RELEASE_DIR: /app/releases
     volumes:

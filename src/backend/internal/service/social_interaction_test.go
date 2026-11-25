@@ -50,16 +50,25 @@ func (m *mockSocialUserRepo) GetUserRoles(userID uint64) ([]string, error) {
 	}
 	return []string{model.RoleDeveloper}, nil
 }
-func (m *mockSocialUserRepo) UpdateProfile(userID uint64, nickname string, email *string, avatar, bio string, favoritesPublic bool) error {
+func (m *mockSocialUserRepo) UpdateProfile(userID uint64, nickname, avatar, bio string, favoritesPublic bool) error {
 	u, ok := m.users[userID]
 	if !ok {
 		return gorm.ErrRecordNotFound
 	}
 	u.Nickname = nickname
-	u.Email = email
 	u.Avatar = avatar
 	u.Bio = bio
 	u.FavoritesPublic = favoritesPublic
+	return nil
+}
+func (m *mockSocialUserRepo) UpdateEmail(userID uint64, email string, verified bool) error {
+	u, ok := m.users[userID]
+	if !ok {
+		return gorm.ErrRecordNotFound
+	}
+	cp := email
+	u.Email = &cp
+	u.EmailVerified = verified
 	return nil
 }
 func (m *mockSocialUserRepo) UpdatePasswordAndTokenVersion(userID uint64, passwordHash string) error {
@@ -1236,5 +1245,68 @@ func TestKBReadingProgress_PerUserAndCrossRef(t *testing.T) {
 		t.Fatal("expected bad request on folder reading progress")
 	} else {
 		assertAppErrStatus(t, err, http.StatusBadRequest)
+	}
+}
+
+func TestMessageService_AssetCardNoContentFallbackAndPayloadLimit(t *testing.T) {
+	// 1. FlexiblePayload rejects payloads exceeding 16384 bytes
+	oversized := `{"note":"` + strings.Repeat("a", 16400) + `"}`
+	var p model.FlexiblePayload
+	if err := json.Unmarshal([]byte(oversized), &p); err == nil {
+		t.Fatal("expected error for oversized FlexiblePayload")
+	}
+
+	// 2. SendMessageReq with MessageTypeAssetCard does not fall back to req.Content when card.Note is empty
+	msgRepo := newMockMessageRepo()
+	assetRepo := &mockP1AssetRepo{
+		assets: map[uint64]*model.AIAsset{
+			50: {
+				ID:         50,
+				AssetCode:  "KB-50",
+				Name:       "Team KB",
+				AssetType:  model.AssetTypeKB,
+				DomainID:   10,
+				OwnerID:    1,
+				Visibility: model.VisibilityPublic,
+				Status:     model.AssetStatusPublished,
+			},
+		},
+	}
+	domainRepo := &mockP1DomainRepo{
+		domains: map[uint64]*model.BizDomain{
+			10: {ID: 10, DomainName: "Core Domain", Visibility: model.DomainVisibilityPublic, OwnerID: 1},
+		},
+		members: map[uint64]map[uint64]string{
+			10: {1: model.DomainRoleOwner, 2: model.DomainRoleMember},
+		},
+	}
+	userRepo := &mockSocialUserRepo{
+		users: map[uint64]*model.SysUser{
+			1: {ID: 1, Username: "alice", Status: model.UserStatusActive},
+			2: {ID: 2, Username: "bob", Status: model.UserStatusActive},
+		},
+	}
+	msgSvc := NewMessageService(msgRepo, userRepo)
+	msgSvc.SetAssetAccessRepos(assetRepo, newMockFileKBRepo(), domainRepo, nil, nil, nil)
+
+	conv, err := msgSvc.CreateOrGetConversation(1, 2)
+	if err != nil {
+		t.Fatalf("CreateOrGetConversation failed: %v", err)
+	}
+
+	sent, err := msgSvc.SendMessageReq(1, false, conv.ID, model.SendMessageRequest{
+		MsgType: model.MessageTypeAssetCard,
+		Content: "[资产卡片] Team KB",
+		Payload: model.FlexiblePayload(`{"asset_id":50}`),
+	})
+	if err != nil {
+		t.Fatalf("SendMessage failed: %v", err)
+	}
+	var card model.AssetCardPayload
+	if err := json.Unmarshal([]byte(sent.Payload), &card); err != nil {
+		t.Fatalf("unmarshal sent payload failed: %v", err)
+	}
+	if card.Note != "" {
+		t.Fatalf("expected empty card.Note without fallback to req.Content, got %q", card.Note)
 	}
 }

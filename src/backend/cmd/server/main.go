@@ -5,10 +5,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"ascp-backend/internal/config"
 	"ascp-backend/internal/handler"
 	ascpMiddleware "ascp-backend/internal/middleware"
+	"ascp-backend/internal/pkg/mailer"
 	"ascp-backend/internal/pkg/response"
 	"ascp-backend/internal/pkg/validator"
 	"ascp-backend/internal/repository"
@@ -31,6 +33,28 @@ func main() {
 	}
 	defer func() { _ = logger.Sync() }()
 
+	const defaultWeakJWTSecret = "change-me-in-production-ascp-jwt-secret"
+	if cfg.Server.Mode != "debug" {
+		if cfg.JWT.Secret == "" || cfg.JWT.Secret == defaultWeakJWTSecret {
+			logger.Fatal("JWT_SECRET must be set to a strong secret in non-debug mode")
+		}
+	}
+
+	storageSecret := cfg.Storage.Secret
+	if storageSecret == "" {
+		storageSecret = os.Getenv("STORAGE_SECRET")
+	}
+	if storageSecret == "" {
+		if cfg.Server.Mode == "debug" {
+			storageSecret = cfg.JWT.Secret
+		} else {
+			logger.Fatal("STORAGE_SECRET must be set in non-debug mode")
+		}
+	}
+	if cfg.Server.Mode != "debug" && storageSecret == defaultWeakJWTSecret {
+		logger.Fatal("STORAGE_SECRET must not use the default weak secret in non-debug mode")
+	}
+
 	db, err := repository.InitDB(cfg.Database, cfg.Server.Mode)
 	if err != nil {
 		logger.Fatal("failed to connect database", zap.Error(err))
@@ -45,6 +69,7 @@ func main() {
 
 	// Repositories
 	userRepo := repository.NewUserRepository(db)
+	emailRepo := repository.NewEmailRepository(db)
 	orgRepo := repository.NewOrgRepository(db)
 	domainRepo := repository.NewDomainRepository(db)
 	assetRepo := repository.NewAssetRepository(db)
@@ -58,16 +83,29 @@ func main() {
 	kbInteractionRepo := repository.NewKBInteractionRepository(db)
 
 	// Services
+	var mailSender mailer.Mailer
+	if cfg.Email.AliyunAK != "" && cfg.Email.AliyunSK != "" {
+		mailSender, err = mailer.NewAliyunDirectMailer(
+			cfg.Email.AliyunAK,
+			cfg.Email.AliyunSK,
+			cfg.Email.Endpoint,
+			cfg.Email.AccountName,
+		)
+		if err != nil {
+			logger.Warn("failed to initialize aliyun directmail client", zap.Error(err))
+		}
+	} else {
+		logger.Warn("aliyun directmail AK/SK not configured; email verification sending disabled")
+	}
+	emailSvc := service.NewEmailService(emailRepo, userRepo, mailSender, cfg.JWT.Secret)
+
 	authSvc := service.NewAuthService(userRepo, cfg.JWT)
+	authSvc.SetEmailService(emailSvc)
 	userSvc := service.NewUserService(userRepo, kbInteractionRepo, domainRepo, orgRepo, govRepo)
 	msgSvc := service.NewMessageService(msgRepo, userRepo)
 	orgSvc := service.NewOrgService(orgRepo, userRepo)
 	domainSvc := service.NewDomainService(domainRepo, userRepo, orgRepo)
 	assetSvc := service.NewAssetService(assetRepo, domainRepo, govRepo, orgRepo, cfg.Storage.UploadDir)
-	storageSecret := os.Getenv("STORAGE_SECRET")
-	if storageSecret == "" {
-		storageSecret = cfg.JWT.Secret
-	}
 	kbSvc := service.NewKBService(kbRepo, assetRepo, domainRepo, govRepo, orgRepo, cfg.Storage.UploadDir, storageSecret)
 	if encryptedCount, err := kbSvc.EncryptExistingPlainFiles(context.Background()); err != nil {
 		logger.Warn("failed to encrypt existing plain KB files at rest", zap.Error(err))
@@ -101,6 +139,7 @@ func main() {
 
 	// Handlers
 	authHandler := handler.NewAuthHandler(authSvc)
+	authHandler.SetEmailService(emailSvc)
 	userHandler := handler.NewUserHandler(userSvc)
 	msgHandler := handler.NewMessageHandler(msgSvc)
 	orgHandler := handler.NewOrgHandler(orgSvc, govSvc)
@@ -123,7 +162,13 @@ func main() {
 	e.Use(middleware.RequestID())
 	e.Use(ascpMiddleware.ZapLogger(logger))
 	e.Use(middleware.Recover())
-	e.Use(middleware.CORS())
+	if len(cfg.CORS.AllowedOrigins) > 0 {
+		e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
+			AllowOrigins: cfg.CORS.AllowedOrigins,
+		}))
+	} else {
+		e.Use(middleware.CORS())
+	}
 
 	v1 := e.Group("/api/v1")
 
@@ -141,6 +186,7 @@ func main() {
 	})
 
 	// Public auth routes
+	v1.POST("/auth/email/send-code", authHandler.SendRegisterEmailCode)
 	v1.POST("/auth/register", authHandler.Register)
 	v1.POST("/auth/login", authHandler.Login)
 
@@ -151,6 +197,8 @@ func main() {
 
 	protected.GET("/user/profile", authHandler.GetProfile)
 	protected.PUT("/user/profile", authHandler.UpdateProfile)
+	protected.POST("/user/email/send-code", authHandler.SendBindEmailCode)
+	protected.PUT("/user/email", authHandler.BindEmail)
 	protected.PUT("/user/password", authHandler.UpdatePassword)
 	protected.GET("/user/favorites", userHandler.GetMyFavorites)
 	protected.GET("/user/assets", assetHandler.ListUserAssets)
@@ -258,7 +306,7 @@ func main() {
 	protected.POST("/tools/7o/encrypt", sevenOHandler.Encrypt)
 	protected.POST("/tools/7o/decrypt", sevenOHandler.Decrypt)
 	protected.POST("/tools/7o/inspect", sevenOHandler.Inspect)
-	protected.GET("/tools/video-link/resolve", kbHandler.ResolveExternalVideoURL)
+	protected.GET("/tools/video-link/resolve", kbHandler.ResolveExternalVideoURL, ascpMiddleware.RateLimitByUserOrIP(20, time.Minute))
 
 	// Unified invoke routes (JWT or X-API-Key + AssetGuardMiddleware)
 	invoke := v1.Group(

@@ -36,7 +36,10 @@ func (m *mockP1UserRepo) FindByEmail(email string) (*model.SysUser, error) {
 func (m *mockP1UserRepo) GetUserRoles(userID uint64) ([]string, error) {
 	return []string{model.RoleDeveloper}, nil
 }
-func (m *mockP1UserRepo) UpdateProfile(userID uint64, nickname string, email *string, avatar, bio string, favoritesPublic bool) error {
+func (m *mockP1UserRepo) UpdateProfile(userID uint64, nickname, avatar, bio string, favoritesPublic bool) error {
+	return nil
+}
+func (m *mockP1UserRepo) UpdateEmail(userID uint64, email string, verified bool) error {
 	return nil
 }
 func (m *mockP1UserRepo) UpdatePasswordAndTokenVersion(userID uint64, passwordHash string) error {

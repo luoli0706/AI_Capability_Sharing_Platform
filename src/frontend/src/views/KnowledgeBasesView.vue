@@ -214,8 +214,11 @@ const loadedDocCount = computed(() =>
   Object.values(folderFilesCache.value).reduce((sum, list) => sum + list.length, 0)
 )
 const sentinelNodeByEl = new WeakMap<Element, KbTreeNode>()
+const sentinelElByKey = new Map<string, Element>()
 const loadingSentinelKeys = new Set<string>()
 let sentinelObserver: IntersectionObserver | null = null
+let treeRootLoadedSeed = -1
+const treeRootReadyWaiters = new Set<() => void>()
 
 const selectedFolderPath = ref('')
 const selectedFileNode = ref<KbTreeNode | null>(null)
@@ -334,6 +337,7 @@ type KbUndoAction =
       type: 'rename'
       kbId: number
       docId: number
+      isFolder?: boolean
       oldName: string
       newName: string
       parentFolder: string
@@ -626,6 +630,7 @@ async function applyRouteOrDefaultSelection() {
         const entryKey = `cross-kb:${targetRef.id}`
         if (kbSelectorEntries.value.some((e) => e.key === entryKey)) {
           handleSelectEntry(entryKey)
+          await waitForTreeRootReady()
           await tryOpenQueryDocument()
           return
         }
@@ -647,6 +652,7 @@ async function applyRouteOrDefaultSelection() {
       selectedEntryKey.value = ownKey
       selectedCrossFileRef.value = null
       refreshTree()
+      await waitForTreeRootReady()
       await tryOpenQueryDocument()
       return
     }
@@ -655,6 +661,7 @@ async function applyRouteOrDefaultSelection() {
       const entryKey = `cross-kb:${matchedCrossKb.id}`
       if (kbSelectorEntries.value.some((e) => e.key === entryKey)) {
         handleSelectEntry(entryKey)
+        await waitForTreeRootReady()
         await tryOpenQueryDocument()
         return
       }
@@ -675,6 +682,7 @@ async function applyRouteOrDefaultSelection() {
   }
   if (!isCrossFilesMode.value) {
     refreshTree()
+    await waitForTreeRootReady()
     await tryOpenQueryDocument()
   }
 }
@@ -823,13 +831,67 @@ async function refreshAfterMutation(affectedFolderPaths: string[]) {
   }
 }
 
+function invalidateLocalFolderPrefix(folderPath: string) {
+  const clean = folderPath.replace(/^\/+|\/+$/g, '')
+  if (!clean) {
+    folderFilesCache.value = {}
+    return
+  }
+  const next: Record<string, KbDocument[]> = {}
+  for (const [k, v] of Object.entries(folderFilesCache.value)) {
+    if (k !== clean && !k.startsWith(`${clean}/`)) {
+      next[k] = v
+    }
+  }
+  folderFilesCache.value = next
+}
+
+function resetSentinelObserver() {
+  sentinelObserver?.disconnect()
+  sentinelObserver = null
+  sentinelElByKey.clear()
+  loadingSentinelKeys.clear()
+}
+
+function notifyTreeRootReady(seed: number) {
+  treeRootLoadedSeed = seed
+  const waiters = Array.from(treeRootReadyWaiters)
+  treeRootReadyWaiters.clear()
+  for (const resolve of waiters) {
+    resolve()
+  }
+}
+
+async function waitForTreeRootReady() {
+  if (isCrossFilesMode.value || !selectedKbId.value) return
+  if (treeRootLoadedSeed === treeRefreshSeed.value) {
+    await nextTick()
+    return
+  }
+  await new Promise<void>((resolve) => {
+    let settled = false
+    const done = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      treeRootReadyWaiters.delete(done)
+      resolve()
+    }
+    const timer = setTimeout(done, 5000)
+    treeRootReadyWaiters.add(done)
+  })
+  await nextTick()
+}
+
 function refreshTree(preserveExpanded = false) {
   stopPolling()
+  resetSentinelObserver()
   folderFilesCache.value = {}
   rootEmpty.value = false
   if (!preserveExpanded) {
     expandedNodeKeys.value = new Set()
   }
+  treeRootLoadedSeed = -1
   treeRefreshSeed.value++
 }
 
@@ -861,8 +923,21 @@ function ensureSentinelObserver() {
 }
 
 function observeSentinelEl(el: HTMLElement | null, data: KbTreeNode) {
-  if (!el) return
+  const prevEl = sentinelElByKey.get(data.key)
+  if (!el) {
+    if (prevEl) {
+      sentinelObserver?.unobserve(prevEl)
+      sentinelNodeByEl.delete(prevEl)
+      sentinelElByKey.delete(data.key)
+    }
+    return
+  }
+  if (prevEl && prevEl !== el) {
+    sentinelObserver?.unobserve(prevEl)
+    sentinelNodeByEl.delete(prevEl)
+  }
   ensureSentinelObserver()
+  sentinelElByKey.set(data.key, el)
   sentinelNodeByEl.set(el, data)
   sentinelObserver?.observe(el)
 }
@@ -874,6 +949,7 @@ async function handleLoadMoreSentinel(sentinel: KbTreeNode) {
 
   const kbId = selectedKbId.value
   const refDomId = activeRefDomainId.value
+  const seedAtStart = treeRefreshSeed.value
   const folderPath = sentinel.sentinelFolderPath ?? sentinel.folderPath ?? ''
   const nextOffset = sentinel.sentinelNextOffset ?? 0
 
@@ -884,7 +960,13 @@ async function handleLoadMoreSentinel(sentinel: KbTreeNode) {
       offset: nextOffset,
       refDomainId: refDomId
     })
-    if (selectedKbId.value !== kbId) return
+    if (
+      selectedKbId.value !== kbId ||
+      isCrossFilesMode.value ||
+      treeRefreshSeed.value !== seedAtStart
+    ) {
+      return
+    }
     const files = extractImmediateFiles(entry.items, folderPath)
     folderFilesCache.value = { ...folderFilesCache.value, [folderPath]: files }
 
@@ -936,10 +1018,14 @@ async function loadKbTreeNode(
 ) {
   if (isCrossFilesMode.value || !selectedKbId.value) {
     resolve([])
+    if (node.level === 0) {
+      notifyTreeRootReady(treeRefreshSeed.value)
+    }
     return
   }
   const kbId = selectedKbId.value
   const refDomId = activeRefDomainId.value
+  const seedAtStart = treeRefreshSeed.value
   const folderPath = node.level === 0 ? '' : (node.data?.folderPath || '')
   if (node.level === 0) {
     loadingDocs.value = true
@@ -949,6 +1035,14 @@ async function loadKbTreeNode(
     const entry = await kbTreeCache.fetchFolderPage(kbId, folderPath, {
       refDomainId: refDomId
     })
+    if (
+      selectedKbId.value !== kbId ||
+      isCrossFilesMode.value ||
+      treeRefreshSeed.value !== seedAtStart
+    ) {
+      resolve([])
+      return
+    }
     const files = extractImmediateFiles(entry.items, folderPath)
     folderFilesCache.value = { ...folderFilesCache.value, [folderPath]: files }
     const nodes = buildPaginatedKbTreeNodes(entry.items, folderPath, {
@@ -960,13 +1054,17 @@ async function loadKbTreeNode(
       rootEmpty.value = nodes.length === 0
     }
     resolve(nodes)
-    if (node.level === 0 && expandedNodeKeys.value.size > 0) {
-      void nextTick(() => restoreExpandedFolders())
+    if (node.level === 0) {
+      if (expandedNodeKeys.value.size > 0) {
+        void nextTick(() => restoreExpandedFolders())
+      }
+      void nextTick(() => notifyTreeRootReady(seedAtStart))
     }
     startPollingIfNeeded()
   } catch {
     if (node.level === 0) {
       rootEmpty.value = true
+      notifyTreeRootReady(seedAtStart)
     }
     resolve([])
   } finally {
@@ -988,6 +1086,7 @@ function handleSelectEntry(key: string) {
   if (isCrossFilesMode.value) {
     rightTab.value = 'preview'
     stopPolling()
+    resetSentinelObserver()
     folderFilesCache.value = {}
     rootEmpty.value = crossFileRefs.value.length === 0
   } else {
@@ -1089,7 +1188,7 @@ async function handleCreateFile() {
       const created = await createKbFile(selectedKbId.value, {
         folder_path: parentFolder || undefined,
         file_name: parsed.suggestedFileName,
-        content: createVideoInput.value.trim() || parsed.watchUrl
+        content: parsed.watchUrl || createVideoInput.value.trim()
       })
       pushUndoAction({
         type: 'create',
@@ -1297,7 +1396,7 @@ async function loadPreviewDoc(
 }
 
 async function handleSaveEdit() {
-  if (!selectedKbId.value || !previewDoc.value) return
+  if (isReadOnlyKb.value || !selectedKbId.value || !previewDoc.value) return
   const trimmedName = editFileName.value.trim()
   if (!trimmedName) {
     ElMessage.warning('文件名不能为空')
@@ -1607,6 +1706,7 @@ const shareTarget = ref<{
   isFolder?: boolean
   refDomainId?: number
   crossRefId?: number
+  disableScopeSwitch?: boolean
 } | null>(null)
 
 async function loadMyFavorites() {
@@ -1718,7 +1818,8 @@ function openShareDialogForCrossFile(refItem: DomainCrossRefItem) {
     docName: refItem.title,
     isFolder: false,
     refDomainId: domainId.value,
-    crossRefId: refItem.id
+    crossRefId: refItem.id,
+    disableScopeSwitch: true
   }
   shareDialogOpen.value = true
 }
@@ -2042,6 +2143,10 @@ async function handleNodeDrop(
     ElMessage.success(
       targetFolderPath ? `已移动「${doc.file_name}」至 ${targetFolderPath}` : `已移动「${doc.file_name}」至根目录`
     )
+    if (doc.is_folder && rawFolderPath) {
+      kbTreeCache.invalidateFolderPrefix(selectedKbId.value, rawFolderPath, activeRefDomainId.value)
+      invalidateLocalFolderPrefix(rawFolderPath)
+    }
     await refreshAfterMutation([sourceParentFolder, targetFolderPath])
   } catch {
     await refreshAfterMutation([sourceParentFolder, targetFolderPath])
@@ -2059,7 +2164,7 @@ function setClipboard(node: KbTreeNode) {
 }
 
 async function handlePaste(targetFolder?: string) {
-  if (!clipboardFile.value || !selectedKbId.value) return
+  if (isReadOnlyKb.value || !clipboardFile.value || !selectedKbId.value) return
   const targetPath = typeof targetFolder === 'string' ? targetFolder : selectedFolderPath.value
   const cleanTarget = (targetPath || '').replace(/^\/+|\/+$/g, '')
   pasting.value = true
@@ -2155,6 +2260,7 @@ async function handleRenameNode(node: KbTreeNode) {
         type: 'rename',
         kbId: selectedKbId.value,
         docId: node.doc.id,
+        isFolder: true,
         oldName,
         newName: renamed.file_name,
         parentFolder
@@ -2168,6 +2274,8 @@ async function handleRenameNode(node: KbTreeNode) {
           folder_path: previewDoc.value.folder_path.replace(oldFolder, newFolder)
         }
       }
+      kbTreeCache.invalidateFolderPrefix(selectedKbId.value, oldFolder, activeRefDomainId.value)
+      invalidateLocalFolderPrefix(oldFolder)
       await refreshAfterMutation([parentFolder])
     } else {
       const parentFolder = (node.doc.folder_path || '').replace(/^\/+|\/+$/g, '')
@@ -2422,6 +2530,35 @@ async function handleUndo() {
     if (action.type === 'rename') {
       await renameDocument(kbId, action.docId, action.oldName)
       removeUndoEntry()
+      if (selectedKbId.value !== kbId) return
+      if (action.isFolder) {
+        const newFolder = action.parentFolder
+          ? `${action.parentFolder}/${action.newName}`
+          : action.newName
+        const oldFolder = action.parentFolder
+          ? `${action.parentFolder}/${action.oldName}`
+          : action.oldName
+        if (
+          selectedFolderPath.value === newFolder ||
+          selectedFolderPath.value.startsWith(`${newFolder}/`)
+        ) {
+          selectedFolderPath.value =
+            oldFolder + selectedFolderPath.value.slice(newFolder.length)
+        }
+        if (
+          previewDoc.value &&
+          (previewDoc.value.folder_path === newFolder ||
+            previewDoc.value.folder_path.startsWith(`${newFolder}/`))
+        ) {
+          previewDoc.value = {
+            ...previewDoc.value,
+            folder_path:
+              oldFolder + previewDoc.value.folder_path.slice(newFolder.length)
+          }
+        }
+        kbTreeCache.invalidateFolderPrefix(kbId, newFolder, activeRefDomainId.value)
+        invalidateLocalFolderPrefix(newFolder)
+      }
       if (previewDoc.value?.id === action.docId) {
         previewDoc.value = { ...previewDoc.value, file_name: action.oldName }
         editFileName.value = action.oldName
@@ -2441,17 +2578,26 @@ async function handleUndo() {
     } else if (action.type === 'move') {
       await moveDocument(kbId, action.docId, action.oldParentFolder)
       removeUndoEntry()
+      if (selectedKbId.value !== kbId) return
       if (selectedFileNode.value?.doc?.id === action.docId) {
         selectedFileNode.value.folderPath = action.oldParentFolder
       }
       if (previewDoc.value?.id === action.docId) {
         previewDoc.value = { ...previewDoc.value, folder_path: action.oldParentFolder }
       }
+      if (action.isFolder) {
+        const movedFolder = action.newParentFolder
+          ? `${action.newParentFolder}/${action.name}`
+          : action.name
+        kbTreeCache.invalidateFolderPrefix(kbId, movedFolder, activeRefDomainId.value)
+        invalidateLocalFolderPrefix(movedFolder)
+      }
       await refreshAfterMutation([action.newParentFolder, action.oldParentFolder])
       ElMessage.success(`已撤销：移动「${action.name}」`)
     } else if (action.type === 'create') {
       await deleteDocument(kbId, action.docId)
       removeUndoEntry()
+      if (selectedKbId.value !== kbId) return
       if (currentSelectedDoc.value?.id === action.docId) {
         resetPreviewState()
         selectedFileNode.value = null
@@ -2461,18 +2607,32 @@ async function handleUndo() {
     } else if (action.type === 'delete') {
       await restoreDocument(kbId, action.docId)
       removeUndoEntry()
+      if (selectedKbId.value !== kbId) return
+      if (action.isFolder) {
+        const restoredFolder = action.parentFolder
+          ? `${action.parentFolder}/${action.name}`
+          : action.name
+        kbTreeCache.invalidateFolderPrefix(kbId, restoredFolder, activeRefDomainId.value)
+        invalidateLocalFolderPrefix(restoredFolder)
+      }
       await refreshAfterMutation([action.parentFolder])
       ElMessage.success(`已撤销：删除「${action.name}」`)
     }
-  } catch {
-    // Handled by interceptor
+  } catch (err: unknown) {
+    removeUndoEntry()
+    const status = (err as { response?: { status?: number } })?.response?.status
+    if (status === 404 || status === 409) {
+      ElMessage.warning('目标已不存在或状态已变更，已移除该撤销记录')
+    } else {
+      ElMessage.warning('撤销操作失败，已移除该撤销记录')
+    }
   } finally {
     undoing.value = false
   }
 }
 
 async function handleDeleteNode(node: KbTreeNode) {
-  if (!selectedKbId.value || !node.doc) return
+  if (isReadOnlyKb.value || !selectedKbId.value || !node.doc) return
   const targetLabel = node.isFolder ? `文件夹「${node.label}」` : `文件「${node.label}」`
   try {
     await ElMessageBox.confirm(`确认删除${targetLabel}吗？`, '删除确认', {
@@ -2516,6 +2676,13 @@ async function handleDeleteNode(node: KbTreeNode) {
       name: node.label,
       parentFolder
     })
+    if (node.isFolder) {
+      const fp = node.folderPath.replace(/^\/+|\/+$/g, '')
+      if (fp) {
+        kbTreeCache.invalidateFolderPrefix(selectedKbId.value, fp, activeRefDomainId.value)
+        invalidateLocalFolderPrefix(fp)
+      }
+    }
     await refreshFolderInPlace(parentFolder)
   } catch {
     // Cancelled or failed
@@ -2587,9 +2754,9 @@ watch(domainId, () => {
 })
 
 watch(
-  () => route.query.crossRefId,
-  async (val) => {
-    if (!val || loadingKbs.value) return
+  [() => route.query.crossRefId, () => route.query.kbId, () => route.query.docId],
+  async ([crossRefId, kbId, docId]) => {
+    if ((!crossRefId && !kbId && !docId) || loadingKbs.value) return
     await applyRouteOrDefaultSelection()
   }
 )
@@ -2618,6 +2785,10 @@ onBeforeUnmount(() => {
 })
 
 onUnmounted(() => {
+  if (resolveShortUrlTimer) {
+    clearTimeout(resolveShortUrlTimer)
+    resolveShortUrlTimer = null
+  }
   imageLoadPromises.clear()
 })
 </script>
@@ -3255,6 +3426,7 @@ onUnmounted(() => {
                   <iframe
                     :src="videoPreview.embedUrl"
                     class="bili-player-iframe"
+                    sandbox="allow-scripts allow-same-origin allow-popups allow-presentation"
                     allow="autoplay; fullscreen; picture-in-picture"
                     allowfullscreen
                     referrerpolicy="no-referrer"
@@ -3548,6 +3720,7 @@ onUnmounted(() => {
       :is-folder="shareTarget.isFolder"
       :ref-domain-id="shareTarget.refDomainId"
       :cross-ref-id="shareTarget.crossRefId"
+      :disable-scope-switch="shareTarget.disableScopeSwitch"
     />
 
     <el-dialog v-model="createFolderOpen" title="新建文件夹" width="420px" destroy-on-close>

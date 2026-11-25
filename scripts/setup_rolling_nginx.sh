@@ -47,8 +47,26 @@ if [ ! -f "$NGINX_SITE_CONF" ]; then
   exit 1
 fi
 
+if ! grep -qE 'proxy_pass[[:space:]]+http://127\.0\.0\.1:6657' "$NGINX_SITE_CONF"; then
+  if grep -qE 'proxy_pass[[:space:]]+http://ascp_backend_pool' "$NGINX_SITE_CONF" && grep -qF "include ${UPSTREAM_INC};" "$NGINX_SITE_CONF"; then
+    log "Nginx site config ${NGINX_SITE_CONF} is already configured for rolling deployment."
+    exit 0
+  fi
+  printf 'ERROR: Target proxy_pass (http://127.0.0.1:6657) not found in %s; aborting without modifying config.\n' "$NGINX_SITE_CONF" >&2
+  exit 1
+fi
+
 BACKUP_FILE="${NGINX_SITE_CONF}.bak.$(date '+%Y%m%d%H%M%S')"
 CREATED_UPSTREAM=0
+
+rollback_nginx_changes() {
+  if [ -f "$BACKUP_FILE" ]; then
+    mv -f "$BACKUP_FILE" "$NGINX_SITE_CONF"
+  fi
+  if [ "$CREATED_UPSTREAM" -eq 1 ]; then
+    rm -f "$UPSTREAM_INC"
+  fi
+}
 
 if [ "$DRY_RUN" -eq 1 ]; then
   if [ ! -f "$UPSTREAM_INC" ]; then
@@ -109,13 +127,15 @@ mv -f "$tmp_conf" "$NGINX_SITE_CONF"
 log "Testing Nginx configuration..."
 if ! nginx -t; then
   log "ERROR: nginx -t failed! Restoring ${NGINX_SITE_CONF} from ${BACKUP_FILE}..."
-  mv -f "$BACKUP_FILE" "$NGINX_SITE_CONF"
-  if [ "$CREATED_UPSTREAM" -eq 1 ]; then
-    rm -f "$UPSTREAM_INC"
-  fi
+  rollback_nginx_changes
   exit 1
 fi
 
 log "Reloading Nginx..."
-nginx -s reload
+if ! nginx -s reload; then
+  log "ERROR: nginx -s reload failed! Restoring ${NGINX_SITE_CONF} from ${BACKUP_FILE}..."
+  rollback_nginx_changes
+  nginx -t >/dev/null 2>&1 && nginx -s reload >/dev/null 2>&1 || true
+  exit 1
+fi
 log "Nginx migration complete. Backup saved at ${BACKUP_FILE}."

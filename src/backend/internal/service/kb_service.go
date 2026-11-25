@@ -27,6 +27,7 @@ import (
 	"ascp-backend/internal/model"
 	"ascp-backend/internal/pkg/chunker"
 	"ascp-backend/internal/pkg/kbcodec"
+	"ascp-backend/internal/pkg/netguard"
 	"ascp-backend/internal/repository"
 
 	"gorm.io/gorm"
@@ -35,9 +36,28 @@ import (
 const maxKBFileSize = 10 << 20 // 10MB
 
 var allowedKBExts = map[string]bool{
+	// Text & documents
 	".txt":      true,
 	".md":       true,
 	".markdown": true,
+	".pdf":      true,
+	".doc":      true,
+	".docx":     true,
+	".xls":      true,
+	".xlsx":     true,
+	".ppt":      true,
+	".pptx":     true,
+	".rtf":      true,
+	".csv":      true,
+	".json":     true,
+	".yaml":     true,
+	".yml":      true,
+	".xml":      true,
+	".log":      true,
+	".ini":      true,
+	".conf":     true,
+	".toml":     true,
+	// Video link descriptors
 	".bili":     true,
 	".video":    true,
 	".douyin":   true,
@@ -46,6 +66,35 @@ var allowedKBExts = map[string]bool{
 	".vimeo":    true,
 	".qq":       true,
 	".youku":    true,
+	// Safe source code (excludes executable/web-script extensions like .js, .mjs, .sh, .php, .html, .svg)
+	".go":    true,
+	".py":    true,
+	".ts":    true,
+	".css":   true,
+	".sql":   true,
+	".java":  true,
+	".c":     true,
+	".cpp":   true,
+	".h":     true,
+	".hpp":   true,
+	".rs":    true,
+	".rb":    true,
+	".kt":    true,
+	".swift": true,
+	// Safe raster images (excludes .svg)
+	".png":  true,
+	".jpg":  true,
+	".jpeg": true,
+	".gif":  true,
+	".webp": true,
+	".bmp":  true,
+	".ico":  true,
+	".avif": true,
+	// Archives
+	".zip": true,
+	".tar": true,
+	".gz":  true,
+	".7z":  true,
 }
 
 var textKBExts = map[string]bool{
@@ -115,7 +164,7 @@ type KBService interface {
 	GetDocumentContent(userID uint64, isSuperAdmin bool, kbID, docID uint64, obf bool, refDomainID uint64) (map[string]interface{}, error)
 	GetDocumentRaw(userID uint64, isSuperAdmin bool, kbID, docID uint64, obf bool, refDomainID uint64) (fileName, mimeType string, isSVG bool, data []byte, err error)
 	GetBilibiliPreview(userID uint64, isSuperAdmin bool, kbID, docID, refDomainID uint64) (*model.KBBilibiliPreview, error)
-	ResolveExternalVideoURL(rawURL string) (string, error)
+	ResolveExternalVideoURL(ctx context.Context, rawURL string) (string, error)
 	UpdateMarkdownContent(userID uint64, isSuperAdmin bool, kbID, docID uint64, req model.UpdateKBFileRequest) (*model.KBDocument, error)
 	ListChunks(userID uint64, isSuperAdmin bool, kbID, docID uint64, page, pageSize int, refDomainID uint64) ([]model.KBChunk, int64, error)
 	DeleteDocument(userID uint64, isSuperAdmin bool, kbID, docID uint64) error
@@ -180,7 +229,11 @@ func NewKBService(
 		orgRepo:       orgRepo,
 		uploadDir:     uploadDir,
 		storageSecret: storageSecret,
-		httpClient:    &http.Client{Timeout: 8 * time.Second, CheckRedirect: bilibiliCheckRedirect},
+		httpClient: &http.Client{
+			Timeout:       8 * time.Second,
+			Transport:     netguard.NewSafeTransport(),
+			CheckRedirect: bilibiliCheckRedirect,
+		},
 	}
 }
 
@@ -305,7 +358,7 @@ func sanitizeMarkdownFileName(raw string) (string, string, error) {
 		ext = ".md"
 	}
 	if !allowedKBExts[ext] {
-		return "", "", NewBadRequest("unsupported file type; allowed: .md, .markdown, .txt")
+		return "", "", NewBadRequest("unsupported file type; allowed: .md, .markdown, .txt, .bili, .douyin, .youtube, .niconico, .vimeo, .qq, .youku, .video")
 	}
 	return name, ext, nil
 }
@@ -479,6 +532,9 @@ func (s *kbService) UploadDocuments(
 		}
 
 		ext := strings.ToLower(filepath.Ext(safeName))
+		if !allowedKBExts[ext] {
+			return nil, NewBadRequest(fmt.Sprintf("不支持上传该文件类型: %s", ext))
+		}
 		if fh.Size > maxKBFileSize {
 			return nil, NewBadRequest("单文件大小不能超过 10MB")
 		}
@@ -567,6 +623,7 @@ func (s *kbService) persistKBFileAndChunks(
 	}
 	if err := s.kbRepo.CompleteDocumentParsing(detail.ID, doc.ID, chunks); err != nil {
 		_ = s.kbRepo.FailDocumentParsing(doc.ID, err.Error())
+		_ = s.kbRepo.RecalculateKBCounts(detail.ID)
 	} else {
 		doc.ChunkCount = len(chunks)
 	}
@@ -1148,7 +1205,10 @@ func isAllowedShortVideoURL(parsed *url.URL) bool {
 
 // ResolveExternalVideoURL safely resolves allowlisted short video URLs (v.douyin.com, b23.tv)
 // with up to 2 redirect hops, stopping immediately once Location leaves the allowlist.
-func (s *kbService) ResolveExternalVideoURL(rawURL string) (string, error) {
+func (s *kbService) ResolveExternalVideoURL(ctx context.Context, rawURL string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	trimmed := strings.TrimSpace(rawURL)
 	if trimmed == "" {
 		return "", NewBadRequest(errUnsupportedShortVideoURL)
@@ -1162,6 +1222,9 @@ func (s *kbService) ResolveExternalVideoURL(rawURL string) (string, error) {
 	if s.httpClient != nil {
 		clientCopy = *s.httpClient
 	}
+	if clientCopy.Transport == nil {
+		clientCopy.Transport = netguard.NewSafeTransport()
+	}
 	clientCopy.Timeout = 5 * time.Second
 	clientCopy.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
@@ -1170,7 +1233,7 @@ func (s *kbService) ResolveExternalVideoURL(rawURL string) (string, error) {
 
 	currentURL := parsed.String()
 	for hop := 0; hop < 2; hop++ {
-		req, reqErr := http.NewRequest(http.MethodGet, currentURL, nil)
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, currentURL, nil)
 		if reqErr != nil {
 			return "", NewBadRequest("无效的短链接")
 		}
@@ -1213,7 +1276,7 @@ func (s *kbService) ResolveExternalVideoURL(rawURL string) (string, error) {
 		return currentURL, nil
 	}
 
-	return currentURL, nil
+	return "", NewBadRequest("短链重定向次数过多，请粘贴完整播放页链接")
 }
 
 func (s *kbService) ListChunks(userID uint64, isSuperAdmin bool, kbID, docID uint64, page, pageSize int, refDomainID uint64) ([]model.KBChunk, int64, error) {
@@ -1826,6 +1889,9 @@ func ensureKBViewAccessWithCrossRef(
 		}
 	}
 	if refDomainID > 0 && crossRefRepo != nil {
+		if detail.Status != model.AssetStatusPublished {
+			return nil, NewForbidden("no permission to access this knowledge base")
+		}
 		hasTargetAccess, err := hasDomainAccess(domainRepo, orgRepo, refDomainID, userID)
 		if err != nil {
 			return nil, err

@@ -5,13 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
+
+	"ascp-backend/internal/pkg/netguard"
 
 	"gopkg.in/yaml.v3"
 )
@@ -233,23 +234,27 @@ func parseAgentMarkdown(trimmed string, filename string) (AgentImportResult, err
 	return res, nil
 }
 
+func isDomainOrSubdomain(host, domain string) bool {
+	return host == domain || strings.HasSuffix(host, "."+domain)
+}
+
 // ImportAgentFromURL fetches and parses an Agent definition from GitHub, Agentverse, ModelScope, or raw URLs.
 func ImportAgentFromURL(ctx context.Context, rawURL string) (AgentImportResult, error) {
-	u, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return AgentImportResult{}, errors.New("invalid URL")
+	u, err := netguard.ValidateHTTPURL(rawURL)
+	if err != nil {
+		return AgentImportResult{}, err
 	}
 
-	host := strings.ToLower(u.Host)
-	client := &http.Client{Timeout: 10 * time.Second}
+	host := strings.ToLower(u.Hostname())
+	client := netguard.NewSafeHTTPClient(10 * time.Second)
 
 	// 1. Agentverse URL
-	if strings.Contains(host, "agentverse.ai") {
+	if isDomainOrSubdomain(host, "agentverse.ai") {
 		return importAgentverse(ctx, client, u, rawURL)
 	}
 
 	// 2. ModelScope URL
-	if strings.Contains(host, "modelscope.cn") {
+	if isDomainOrSubdomain(host, "modelscope.cn") {
 		return importModelScope(ctx, client, u, rawURL)
 	}
 
@@ -351,7 +356,7 @@ func httpGetText(ctx context.Context, client *http.Client, targetURL string) (st
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("HTTP %d from %s", resp.StatusCode, targetURL)
 	}
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	b, err := netguard.ReadBodyLimited(resp.Body, 2<<20)
 	if err != nil {
 		return "", err
 	}

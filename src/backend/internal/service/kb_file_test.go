@@ -20,6 +20,7 @@ import (
 
 	"ascp-backend/internal/model"
 	"ascp-backend/internal/pkg/kbcodec"
+	"ascp-backend/internal/pkg/netguard"
 
 	"gorm.io/gorm"
 )
@@ -269,6 +270,10 @@ func (m *mockFileKBRepo) CompleteDocumentParsing(kbAssetID, docID uint64, chunks
 	return nil
 }
 func (m *mockFileKBRepo) FailDocumentParsing(docID uint64, errMsg string) error { return nil }
+func (m *mockFileKBRepo) RecalculateKBCounts(kbAssetID uint64) error {
+	m.recalculateCounts(kbAssetID)
+	return nil
+}
 func (m *mockFileKBRepo) ListChunks(kbAssetID, docID uint64, page, pageSize int) ([]model.KBChunk, int64, error) {
 	return nil, 0, nil
 }
@@ -1627,7 +1632,7 @@ func TestResolveExternalVideoURL(t *testing.T) {
 		"https://v.douyin.com.evil.com/xyz",
 	}
 	for _, raw := range rejected {
-		if _, err := kbSvc.ResolveExternalVideoURL(raw); err == nil {
+		if _, err := kbSvc.ResolveExternalVideoURL(context.Background(), raw); err == nil {
 			t.Fatalf("expected error for rejected URL %q", raw)
 		} else {
 			assertAppErrStatus(t, err, http.StatusBadRequest)
@@ -1638,7 +1643,7 @@ func TestResolveExternalVideoURL(t *testing.T) {
 	}
 
 	// 1-hop Douyin short link resolution
-	resolved, err := kbSvc.ResolveExternalVideoURL("https://v.douyin.com/xyz/")
+	resolved, err := kbSvc.ResolveExternalVideoURL(context.Background(), "https://v.douyin.com/xyz/")
 	if err != nil {
 		t.Fatalf("ResolveExternalVideoURL douyin failed: %v", err)
 	}
@@ -1651,7 +1656,7 @@ func TestResolveExternalVideoURL(t *testing.T) {
 
 	// 2-hop Bilibili short link resolution
 	callCount = 0
-	resolved, err = kbSvc.ResolveExternalVideoURL("https://b23.tv/abc")
+	resolved, err = kbSvc.ResolveExternalVideoURL(context.Background(), "https://b23.tv/abc")
 	if err != nil {
 		t.Fatalf("ResolveExternalVideoURL b23.tv 2-hop failed: %v", err)
 	}
@@ -1663,7 +1668,7 @@ func TestResolveExternalVideoURL(t *testing.T) {
 	}
 
 	// 200 OK without Location returns final URL
-	resolved, err = kbSvc.ResolveExternalVideoURL("https://b23.tv/direct")
+	resolved, err = kbSvc.ResolveExternalVideoURL(context.Background(), "https://b23.tv/direct")
 	if err != nil {
 		t.Fatalf("ResolveExternalVideoURL 200 failed: %v", err)
 	}
@@ -1672,10 +1677,108 @@ func TestResolveExternalVideoURL(t *testing.T) {
 	}
 
 	// >= 400 returns error
-	if _, err := kbSvc.ResolveExternalVideoURL("https://b23.tv/missing"); err == nil {
+	if _, err := kbSvc.ResolveExternalVideoURL(context.Background(), "https://b23.tv/missing"); err == nil {
 		t.Fatal("expected error for 404 short link")
 	} else {
 		assertAppErrStatus(t, err, http.StatusBadRequest)
+	}
+
+	// Exceeding 2 allowlisted redirect hops without leaving allowlist returns 400
+	svcImpl.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusFound,
+				Header:     http.Header{"Location": []string{"https://b23.tv/loop"}},
+				Body:       io.NopCloser(strings.NewReader("")),
+				Request:    req,
+			}, nil
+		}),
+	}
+	if _, err := kbSvc.ResolveExternalVideoURL(context.Background(), "https://b23.tv/loop"); err == nil {
+		t.Fatal("expected error when exceeding 2 allowlisted redirect hops")
+	} else {
+		assertAppErrStatus(t, err, http.StatusBadRequest)
+		if !strings.Contains(err.Error(), "短链重定向次数过多") {
+			t.Fatalf("unexpected error message: %v", err)
+		}
+	}
+
+	// Safe transport blocks private/loopback/link-local/unspecified IPs at dial layer
+	safeTransport := netguard.NewSafeTransport()
+	for _, addr := range []string{"127.0.0.1:80", "10.0.0.1:80", "169.254.169.254:80", "0.0.0.0:80"} {
+		if _, err := safeTransport.DialContext(context.Background(), "tcp", addr); err == nil {
+			t.Fatalf("expected safeTransport to block non-public IP %s", addr)
+		}
+	}
+}
+
+func TestKBFolderWildcardCharactersNoCrossMatch(t *testing.T) {
+	kbRepo := newMockFileKBRepo()
+	assetRepo := &mockP1AssetRepo{
+		assets: map[uint64]*model.AIAsset{
+			1: {ID: 1, AssetCode: "kb-wild", Name: "Wildcard KB", AssetType: model.AssetTypeKB, DomainID: 5, OwnerID: 10, Visibility: model.VisibilityDomain, Status: model.AssetStatusPublished},
+		},
+	}
+	domainRepo := &mockP1DomainRepo{
+		members: map[uint64]map[uint64]string{
+			5: {10: model.DomainRoleOwner},
+		},
+	}
+	kbSvc := NewKBService(kbRepo, assetRepo, domainRepo, nil, nil, t.TempDir(), "test-storage-secret")
+
+	seed := []model.KBDocument{
+		{KBAssetID: 1, FolderPath: "a_b", IsFolder: true, FileName: "a_b", UploaderID: 10},
+		{KBAssetID: 1, FolderPath: "axb", IsFolder: true, FileName: "axb", UploaderID: 10},
+		{KBAssetID: 1, FolderPath: "100%", IsFolder: true, FileName: "100%", UploaderID: 10},
+		{KBAssetID: 1, FolderPath: "100abc", IsFolder: true, FileName: "100abc", UploaderID: 10},
+		{KBAssetID: 1, FolderPath: "a_b", IsFolder: false, FileName: "under.md", UploaderID: 10},
+		{KBAssetID: 1, FolderPath: "axb", IsFolder: false, FileName: "cross.md", UploaderID: 10},
+		{KBAssetID: 1, FolderPath: "100%", IsFolder: false, FileName: "pct.md", UploaderID: 10},
+		{KBAssetID: 1, FolderPath: "100abc", IsFolder: false, FileName: "other.md", UploaderID: 10},
+	}
+	for i := range seed {
+		if err := kbRepo.CreateDocument(&seed[i]); err != nil {
+			t.Fatalf("seed CreateDocument failed: %v", err)
+		}
+	}
+
+	// Listing "a_b" must only return "under.md", not "cross.md"
+	docsAB, err := kbSvc.ListDocumentsLazy(10, false, 1, "a_b", 0)
+	if err != nil {
+		t.Fatalf("ListDocumentsLazy a_b failed: %v", err)
+	}
+	if len(docsAB) != 1 || docsAB[0].FileName != "under.md" {
+		t.Fatalf("expected only under.md under a_b, got %+v", docsAB)
+	}
+
+	// Listing "100%" must only return "pct.md", not "other.md"
+	docsPct, err := kbSvc.ListDocumentsLazy(10, false, 1, "100%", 0)
+	if err != nil {
+		t.Fatalf("ListDocumentsLazy 100%% failed: %v", err)
+	}
+	if len(docsPct) != 1 || docsPct[0].FileName != "pct.md" {
+		t.Fatalf("expected only pct.md under 100%%, got %+v", docsPct)
+	}
+
+	// Download preview for folder "a_b" must only count 1 file
+	preview, err := kbSvc.GetDownloadPreview(10, false, 1, "folder", 0, "a_b", 0)
+	if err != nil {
+		t.Fatalf("GetDownloadPreview a_b failed: %v", err)
+	}
+	if preview.FileCount != 1 {
+		t.Fatalf("expected 1 file in folder a_b preview, got %d", preview.FileCount)
+	}
+
+	// Renaming folder "100%" -> "200%" must not affect "100abc"
+	if _, err := kbSvc.RenameDocument(10, false, 1, seed[2].ID, "200%"); err != nil {
+		t.Fatalf("RenameDocument 100%% failed: %v", err)
+	}
+	docs100abc, err := kbSvc.ListDocumentsLazy(10, false, 1, "100abc", 0)
+	if err != nil {
+		t.Fatalf("ListDocumentsLazy 100abc failed: %v", err)
+	}
+	if len(docs100abc) != 1 || docs100abc[0].FileName != "other.md" {
+		t.Fatalf("expected 100abc to remain untouched, got %+v", docs100abc)
 	}
 }
 
@@ -1691,5 +1794,54 @@ func TestVideoPlatformExtensionsAllowed(t *testing.T) {
 		if got := kbMIMETypes[ext]; got != "text/plain; charset=utf-8" {
 			t.Fatalf("expected kbMIMETypes[%s] = text/plain; charset=utf-8, got %q", ext, got)
 		}
+	}
+}
+
+func TestUploadDocuments_ExtensionWhitelist(t *testing.T) {
+	kbRepo := newMockFileKBRepo()
+	assetRepo := &mockP1AssetRepo{
+		assets: map[uint64]*model.AIAsset{
+			1: {ID: 1, AssetCode: "kb-ext", Name: "Ext KB", AssetType: model.AssetTypeKB, DomainID: 5, OwnerID: 10, Visibility: model.VisibilityDomain, Status: model.AssetStatusPublished},
+		},
+	}
+	domainRepo := &mockP1DomainRepo{
+		members: map[uint64]map[uint64]string{
+			5: {10: model.DomainRoleOwner},
+		},
+	}
+	kbSvc := NewKBService(kbRepo, assetRepo, domainRepo, nil, nil, t.TempDir(), "test-storage-secret")
+
+	blocked := []string{
+		"xss.html", "xss.htm", "xss.xhtml", "xss.svg",
+		"evil.js", "evil.mjs", "shell.php", "shell.jsp", "shell.asp", "shell.aspx",
+		"bin.exe", "run.bat", "run.cmd", "run.sh", "run.ps1", "lib.dll",
+		"noext",
+	}
+	for _, name := range blocked {
+		fh := makeSevenOTestFileHeader(t, "files", name, []byte("test"))
+		_, err := kbSvc.UploadDocuments(10, false, 1, "", "", []*multipart.FileHeader{fh})
+		if err == nil {
+			t.Fatalf("expected UploadDocuments to reject dangerous/unknown file %q", name)
+		}
+		assertAppErrStatus(t, err, http.StatusBadRequest)
+	}
+
+	allowed := []string{"readme.md", "notes.txt", "doc.pdf", "img.png", "main.go", "archive.zip", "vid.bili"}
+	for _, name := range allowed {
+		fh := makeSevenOTestFileHeader(t, "files", name, []byte("ok"))
+		docs, err := kbSvc.UploadDocuments(10, false, 1, "", "", []*multipart.FileHeader{fh})
+		if err != nil {
+			t.Fatalf("expected UploadDocuments to allow %q, got %v", name, err)
+		}
+		if len(docs) != 1 || docs[0].FileName != name {
+			t.Fatalf("unexpected uploaded doc for %q: %+v", name, docs)
+		}
+	}
+}
+
+func TestGenerateRequestNo_Format(t *testing.T) {
+	no := generateRequestNo()
+	if !strings.HasPrefix(no, "APR-") || len(no) != len("APR-20060102150405-0000") {
+		t.Fatalf("unexpected RequestNo format: %q", no)
 	}
 }

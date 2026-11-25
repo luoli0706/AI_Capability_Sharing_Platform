@@ -611,4 +611,15 @@ func TestCrossRefKBReadOnlyBrowsing(t *testing.T) {
 	assertForbidden(err, "DeleteDocument on cross-ref KB must be 403")
 	err = kbSvc.DeleteDocument(2, false, 201, docAllowed.ID)
 	assertForbidden(err, "DeleteDocument on cross-ref kb_file must be 403")
+
+	// Case D: Unpublished (draft / deprecated) KB cannot be accessed via cross-ref.
+	assetRepo.assets[200].Status = model.AssetStatusDeprecated
+	_, err = kbSvc.ListDocumentsLazy(2, false, 200, "", targetDom.ID)
+	assertForbidden(err, "deprecated KB must not be accessible via cross-ref")
+	_, _, _, err = kbSvc.DownloadKB(2, false, 200, "all", 0, "", targetDom.ID)
+	assertForbidden(err, "deprecated KB must not be downloadable via cross-ref")
+
+	assetRepo.assets[201].Status = model.AssetStatusDraft
+	_, err = kbSvc.GetDocumentContent(2, false, 201, docAllowed.ID, false, targetDom.ID)
+	assertForbidden(err, "draft KB file must not be accessible via cross-ref")
 }

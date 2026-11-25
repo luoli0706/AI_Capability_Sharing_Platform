@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"ascp-backend/internal/model"
+	"ascp-backend/internal/pkg/netguard"
 	"ascp-backend/internal/repository"
 
 	"gorm.io/gorm"
@@ -110,7 +111,7 @@ func NewInvokeService(
 		kbRepo:     kbRepo,
 		logRepo:    logRepo,
 		orgRepo:    orgRepo,
-		httpClient: &http.Client{Timeout: 8 * time.Second},
+		httpClient: netguard.NewSafeHTTPClient(8 * time.Second),
 	}
 }
 
@@ -248,20 +249,26 @@ func (s *invokeService) executeAsset(detail *model.AssetDetail, payload map[stri
 			endpoint = detail.MCPConfig.EndpointURL
 		}
 		if endpoint != "" {
-			bodyBytes, _ := json.Marshal(payload)
-			if req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(bodyBytes)); err == nil {
-				req.Header.Set("Content-Type", "application/json")
-				if resp, err := s.httpClient.Do(req); err == nil {
-					raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-					_ = resp.Body.Close()
-					var upstream interface{}
-					if json.Unmarshal(raw, &upstream) == nil && resp.StatusCode < 500 {
-						return map[string]interface{}{
-							"asset_code": detail.AssetCode,
-							"asset_type": detail.AssetType,
-							"proxied":    true,
-							"result":     upstream,
-						}, nil
+			if _, urlErr := netguard.ValidateHTTPURL(endpoint); urlErr == nil {
+				client := s.httpClient
+				if client == nil {
+					client = netguard.NewSafeHTTPClient(8 * time.Second)
+				}
+				bodyBytes, _ := json.Marshal(payload)
+				if req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(bodyBytes)); err == nil {
+					req.Header.Set("Content-Type", "application/json")
+					if resp, err := client.Do(req); err == nil {
+						raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+						_ = resp.Body.Close()
+						var upstream interface{}
+						if json.Unmarshal(raw, &upstream) == nil && resp.StatusCode < 500 {
+							return map[string]interface{}{
+								"asset_code": detail.AssetCode,
+								"asset_type": detail.AssetType,
+								"proxied":    true,
+								"result":     upstream,
+							}, nil
+						}
 					}
 				}
 			}

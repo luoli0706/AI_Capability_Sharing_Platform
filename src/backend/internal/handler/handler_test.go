@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"ascp-backend/internal/model"
 	"ascp-backend/internal/pkg/response"
 	"ascp-backend/internal/pkg/validator"
+	"ascp-backend/internal/repository"
 	"ascp-backend/internal/service"
 
 	"github.com/labstack/echo/v4"
@@ -72,13 +74,21 @@ func (m *memUserRepo) FindByEmail(email string) (*model.SysUser, error) {
 func (m *memUserRepo) GetUserRoles(userID uint64) ([]string, error) {
 	return m.roles[userID], nil
 }
-func (m *memUserRepo) UpdateProfile(userID uint64, nickname string, email *string, avatar, bio string, favoritesPublic bool) error {
+func (m *memUserRepo) UpdateProfile(userID uint64, nickname, avatar, bio string, favoritesPublic bool) error {
 	if u, ok := m.users[userID]; ok {
 		u.Nickname = nickname
-		u.Email = email
 		u.Avatar = avatar
 		u.Bio = bio
 		u.FavoritesPublic = favoritesPublic
+		return nil
+	}
+	return gorm.ErrRecordNotFound
+}
+func (m *memUserRepo) UpdateEmail(userID uint64, email string, verified bool) error {
+	if u, ok := m.users[userID]; ok {
+		cp := email
+		u.Email = &cp
+		u.EmailVerified = verified
 		return nil
 	}
 	return gorm.ErrRecordNotFound
@@ -355,17 +365,37 @@ func (m *memAssetRepo) IncrementInvokeCount(assetID uint64) error {
 	return nil
 }
 
+type mockHandlerEmailService struct{}
+
+func (m *mockHandlerEmailService) SendPublicRegisterCode(ctx context.Context, rawEmail, clientIP string) error {
+	return nil
+}
+func (m *mockHandlerEmailService) SendBindEmailCode(ctx context.Context, userID uint64, rawEmail, clientIP string) error {
+	return nil
+}
+func (m *mockHandlerEmailService) VerifyCode(rawEmail, purpose, code string) error {
+	if code != "123456" {
+		return service.NewBadRequest("invalid code")
+	}
+	return nil
+}
+
+var _ repository.UserRepository = (*memUserRepo)(nil)
+
 func setupTestEcho() *echo.Echo {
 	userRepo := newMemUserRepo()
 	domainRepo := newMemDomainRepo()
 	assetRepo := newMemAssetRepo()
 	jwtCfg := config.JWTConfig{Secret: "handler-test-secret", ExpireHours: 24}
 
+	emailSvc := &mockHandlerEmailService{}
 	authSvc := service.NewAuthService(userRepo, jwtCfg)
+	authSvc.SetEmailService(emailSvc)
 	domainSvc := service.NewDomainService(domainRepo, userRepo, nil)
 	assetSvc := service.NewAssetService(assetRepo, domainRepo, nil, nil, "")
 
 	authH := NewAuthHandler(authSvc)
+	authH.SetEmailService(emailSvc)
 	domainH := NewDomainHandler(domainSvc)
 	assetH := NewAssetHandler(assetSvc)
 
@@ -373,6 +403,7 @@ func setupTestEcho() *echo.Echo {
 	e.Validator = validator.New()
 
 	v1 := e.Group("/api/v1")
+	v1.POST("/auth/email/send-code", authH.SendRegisterEmailCode)
 	v1.POST("/auth/register", authH.Register)
 	v1.POST("/auth/login", authH.Login)
 
@@ -380,6 +411,8 @@ func setupTestEcho() *echo.Echo {
 	protected.POST("/auth/logout", authH.Logout)
 	protected.GET("/user/profile", authH.GetProfile)
 	protected.PUT("/user/profile", authH.UpdateProfile)
+	protected.POST("/user/email/send-code", authH.SendBindEmailCode)
+	protected.PUT("/user/email", authH.BindEmail)
 	protected.POST("/domains", domainH.CreateDomain)
 	protected.POST("/domains/:id/members", domainH.AddMember)
 	protected.POST("/assets", assetH.CreateAsset)
@@ -416,18 +449,20 @@ func TestP0EndToEndFlow(t *testing.T) {
 
 	// 1. Register user
 	rec := doJSON(e, http.MethodPost, "/api/v1/auth/register", "", map[string]string{
-		"username": "alice",
-		"password": "password123",
-		"nickname": "Alice",
-		"email":    "alice@example.com",
+		"username":   "alice",
+		"password":   "password123",
+		"nickname":   "Alice",
+		"email":      "alice@example.com",
+		"email_code": "123456",
 	})
 	assertStatus(t, rec.Code, http.StatusOK, rec.Body.String())
 
 	// Duplicate username -> 409
 	recDup := doJSON(e, http.MethodPost, "/api/v1/auth/register", "", map[string]string{
-		"username": "alice",
-		"password": "password123",
-		"email":    "alice2@example.com",
+		"username":   "alice",
+		"password":   "password123",
+		"email":      "alice2@example.com",
+		"email_code": "123456",
 	})
 	assertStatus(t, recDup.Code, http.StatusConflict, recDup.Body.String())
 
@@ -498,18 +533,21 @@ func TestP0EndToEndFlow(t *testing.T) {
 func TestOptionalEmailAndBioAvatarProfile(t *testing.T) {
 	e := setupTestEcho()
 
-	// Register two users without email (should not collide on NULL email)
+	// Register without email and email_code should fail validation
 	rec1 := doJSON(e, http.MethodPost, "/api/v1/auth/register", "", map[string]string{
 		"username": "noemail1",
 		"password": "password123",
 	})
-	assertStatus(t, rec1.Code, http.StatusOK, rec1.Body.String())
+	assertStatus(t, rec1.Code, http.StatusBadRequest, rec1.Body.String())
 
-	rec2 := doJSON(e, http.MethodPost, "/api/v1/auth/register", "", map[string]string{
-		"username": "noemail2",
-		"password": "password123",
+	// Register with email and verification code succeeds
+	recReg := doJSON(e, http.MethodPost, "/api/v1/auth/register", "", map[string]string{
+		"username":   "noemail1",
+		"password":   "password123",
+		"email":      "noemail1@example.com",
+		"email_code": "123456",
 	})
-	assertStatus(t, rec2.Code, http.StatusOK, rec2.Body.String())
+	assertStatus(t, recReg.Code, http.StatusOK, recReg.Body.String())
 
 	recLogin := doJSON(e, http.MethodPost, "/api/v1/auth/login", "", map[string]string{
 		"username": "noemail1",
@@ -539,7 +577,7 @@ func TestOptionalEmailAndBioAvatarProfile(t *testing.T) {
 	if err := json.Unmarshal(recUpd.Body.Bytes(), &profRes); err != nil {
 		t.Fatalf("unmarshal profile failed: %v", err)
 	}
-	if profRes.Data.Email != "" || profRes.Data.Bio != "Building AI capabilities" || profRes.Data.Avatar != avatarData {
+	if profRes.Data.Email != "noemail1@example.com" || !profRes.Data.EmailVerified || profRes.Data.Bio != "Building AI capabilities" || profRes.Data.Avatar != avatarData {
 		t.Fatalf("unexpected updated profile: %+v", profRes.Data)
 	}
 }

@@ -17,6 +17,7 @@ import (
 	"ascp-backend/internal/model"
 	"ascp-backend/internal/pkg/agentpkg"
 	"ascp-backend/internal/pkg/mcpregistry"
+	"ascp-backend/internal/pkg/netguard"
 	"ascp-backend/internal/pkg/response"
 	"ascp-backend/internal/pkg/skillpkg"
 	"ascp-backend/internal/repository"
@@ -99,7 +100,7 @@ func NewAssetService(assetRepo repository.AssetRepository, domainRepo repository
 		govRepo:    govRepo,
 		orgRepo:    orgRepo,
 		uploadDir:  uploadDir,
-		httpClient: &http.Client{Timeout: 5 * time.Second},
+		httpClient: netguard.NewSafeHTTPClient(5 * time.Second),
 	}
 }
 
@@ -364,7 +365,7 @@ func (s *assetService) PublishAsset(userID uint64, isSuperAdmin bool, id uint64,
 		return nil, err
 	}
 
-	requestNo := fmt.Sprintf("APR-%s-%04d", time.Now().Format("20060102150405"), time.Now().Nanosecond()%10000)
+	requestNo := generateRequestNo()
 	if err := s.assetRepo.SubmitPublishApproval(
 		id,
 		asset.DomainID,
@@ -474,13 +475,19 @@ func (s *assetService) CheckMCPHealth(userID uint64, isSuperAdmin bool, id uint6
 	}
 
 	status := "unhealthy"
-	req, err := http.NewRequest(http.MethodGet, detail.MCPConfig.EndpointURL, nil)
-	if err == nil {
-		resp, err := s.httpClient.Do(req)
+	if _, urlErr := netguard.ValidateHTTPURL(detail.MCPConfig.EndpointURL); urlErr == nil {
+		client := s.httpClient
+		if client == nil {
+			client = netguard.NewSafeHTTPClient(5 * time.Second)
+		}
+		req, err := http.NewRequest(http.MethodGet, detail.MCPConfig.EndpointURL, nil)
 		if err == nil {
-			_ = resp.Body.Close()
-			if resp.StatusCode < 500 {
-				status = "healthy"
+			resp, err := client.Do(req)
+			if err == nil {
+				_ = resp.Body.Close()
+				if resp.StatusCode < 500 {
+					status = "healthy"
+				}
 			}
 		}
 	}
@@ -506,25 +513,31 @@ func (s *assetService) SyncMCPTools(userID uint64, isSuperAdmin bool, id uint64)
 		return nil, NewBadRequest("asset is not an MCP server")
 	}
 
-	payload := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)
-	req, err := http.NewRequest(http.MethodPost, detail.MCPConfig.EndpointURL, bytes.NewReader(payload))
-	if err == nil {
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := s.httpClient.Do(req)
+	if _, urlErr := netguard.ValidateHTTPURL(detail.MCPConfig.EndpointURL); urlErr == nil {
+		client := s.httpClient
+		if client == nil {
+			client = netguard.NewSafeHTTPClient(5 * time.Second)
+		}
+		payload := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)
+		req, err := http.NewRequest(http.MethodPost, detail.MCPConfig.EndpointURL, bytes.NewReader(payload))
 		if err == nil {
-			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-			_ = resp.Body.Close()
-			var rpcResp struct {
-				Result struct {
-					Tools json.RawMessage `json:"tools"`
-				} `json:"result"`
-			}
-			if json.Unmarshal(body, &rpcResp) == nil && len(rpcResp.Result.Tools) > 0 {
-				tools := model.JSONRaw(rpcResp.Result.Tools)
-				if err := s.assetRepo.UpdateMCPTools(id, tools); err != nil {
-					return nil, err
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := client.Do(req)
+			if err == nil {
+				body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+				_ = resp.Body.Close()
+				var rpcResp struct {
+					Result struct {
+						Tools json.RawMessage `json:"tools"`
+					} `json:"result"`
 				}
-				detail.MCPConfig.ToolsSchema = tools
+				if json.Unmarshal(body, &rpcResp) == nil && len(rpcResp.Result.Tools) > 0 {
+					tools := model.JSONRaw(rpcResp.Result.Tools)
+					if err := s.assetRepo.UpdateMCPTools(id, tools); err != nil {
+						return nil, err
+					}
+					detail.MCPConfig.ToolsSchema = tools
+				}
 			}
 		}
 	}
@@ -565,7 +578,7 @@ func (s *assetService) ImportSkillFromURL(rawURL string) (*model.SkillImportResu
 		return nil, NewBadRequest(err.Error())
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := netguard.NewSafeHTTPClient(10 * time.Second)
 	var lastErr error
 	for _, candidate := range candidates {
 		req, err := http.NewRequest(http.MethodGet, candidate, nil)

@@ -237,6 +237,43 @@ export const useKbTreeCacheStore = defineStore('kbTreeCache', () => {
     extGroupMap.value = nextExt
   }
 
+  function invalidateFolderPrefix(kbId: number, folderPath: string, refDomainId?: number) {
+    const cleanPath = normalizeKbFolderPath(folderPath)
+    if (!cleanPath) {
+      invalidateKb(kbId)
+      return
+    }
+    const nextFolders: Record<string, KbFolderCacheEntry> = {}
+    const nextExt: Record<string, KbExtGroupCacheEntry> = {}
+    const kbPrefix = `${kbId}:`
+    const refPrefix = refDomainId !== undefined ? `${kbId}:${refDomainId}:` : null
+
+    const matchesFolder = (folderPart: string) =>
+      folderPart === cleanPath || folderPart.startsWith(`${cleanPath}/`)
+
+    for (const [k, v] of Object.entries(folderMap.value)) {
+      if (refPrefix ? k.startsWith(refPrefix) : k.startsWith(kbPrefix)) {
+        const parts = k.split(':')
+        const folderPart = parts.slice(2).join(':')
+        if (matchesFolder(folderPart)) continue
+      }
+      nextFolders[k] = v
+    }
+
+    for (const [k, v] of Object.entries(extGroupMap.value)) {
+      if (refPrefix ? k.startsWith(refPrefix) : k.startsWith(kbPrefix)) {
+        const withoutExt = k.replace(/:(image|txt)$/, '')
+        const parts = withoutExt.split(':')
+        const folderPart = parts.slice(2).join(':')
+        if (matchesFolder(folderPart)) continue
+      }
+      nextExt[k] = v
+    }
+
+    folderMap.value = nextFolders
+    extGroupMap.value = nextExt
+  }
+
   function invalidateKb(kbId: number) {
     const prefix = `${kbId}:`
     const nextFolders: Record<string, KbFolderCacheEntry> = {}
@@ -259,6 +296,7 @@ export const useKbTreeCacheStore = defineStore('kbTreeCache', () => {
     fetchFolderPage,
     fetchExtGroupIndex,
     invalidateFolder,
+    invalidateFolderPrefix,
     invalidateKb,
     resolveUser
   }

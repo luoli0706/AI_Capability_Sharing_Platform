@@ -1,9 +1,11 @@
 package handler
 
 import (
+	"errors"
 	"fmt"
 	"mime/multipart"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -63,14 +65,29 @@ func (h *KBHandler) CreateMarkdownFile(c echo.Context) error {
 	return response.Success(c, doc)
 }
 
+const (
+	maxKBUploadBodyBytes = 100 << 20 // 100MB
+	maxKBUploadFiles     = 50
+)
+
 func (h *KBHandler) UploadDocument(c echo.Context) error {
 	kbID, ok := parseUintParam(c, "id")
 	if !ok {
 		return nil
 	}
 
+	c.Request().Body = http.MaxBytesReader(c.Response(), c.Request().Body, maxKBUploadBodyBytes)
+
 	var files []*multipart.FileHeader
-	if form, err := c.MultipartForm(); err == nil && form != nil {
+	form, err := c.MultipartForm()
+	if err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			return service.HandleError(c, service.NewPayloadTooLarge("单次上传总大小不能超过 100MB"))
+		}
+		return response.BadRequest(c, "invalid multipart form")
+	}
+	if form != nil {
 		if multi := form.File["files"]; len(multi) > 0 {
 			files = append(files, multi...)
 		}
@@ -85,6 +102,9 @@ func (h *KBHandler) UploadDocument(c echo.Context) error {
 	}
 	if len(files) == 0 {
 		return response.BadRequest(c, "file is required")
+	}
+	if len(files) > maxKBUploadFiles {
+		return response.BadRequest(c, fmt.Sprintf("单次最多上传 %d 个文件", maxKBUploadFiles))
 	}
 
 	folderPath := c.FormValue("folder_path")
@@ -188,6 +208,15 @@ func (h *KBHandler) GetDocumentContent(c echo.Context) error {
 	return response.Success(c, res)
 }
 
+func isAttachmentOnlyRawExt(fileName string) bool {
+	switch strings.ToLower(filepath.Ext(fileName)) {
+	case ".html", ".htm", ".xhtml", ".svg", ".xml":
+		return true
+	default:
+		return false
+	}
+}
+
 func (h *KBHandler) GetDocumentRaw(c echo.Context) error {
 	kbID, ok := parseUintParam(c, "id")
 	if !ok {
@@ -207,10 +236,13 @@ func (h *KBHandler) GetDocumentRaw(c echo.Context) error {
 		return service.HandleError(c, err)
 	}
 
-	c.Response().Header().Set(echo.HeaderContentDisposition, fmt.Sprintf(`inline; filename="%s"`, fileName))
-	if isSVG {
-		c.Response().Header().Set("Content-Security-Policy", "sandbox")
+	c.Response().Header().Set("X-Content-Type-Options", "nosniff")
+	c.Response().Header().Set("Content-Security-Policy", "sandbox; default-src 'none'")
+	disposition := "inline"
+	if isSVG || isAttachmentOnlyRawExt(fileName) {
+		disposition = "attachment"
 	}
+	setContentDisposition(c, disposition, fileName)
 	if obf {
 		c.Response().Header().Set("X-ASCP-Obf", "1")
 	}
@@ -381,7 +413,7 @@ func (h *KBHandler) Download(c echo.Context) error {
 		return service.HandleError(c, err)
 	}
 
-	c.Response().Header().Set(echo.HeaderContentDisposition, fmt.Sprintf(`attachment; filename="%s"`, filename))
+	setContentDisposition(c, "attachment", filename)
 	return c.Blob(http.StatusOK, contentType, data)
 }
 
@@ -459,7 +491,7 @@ func (h *KBHandler) RenameDocument(c echo.Context) error {
 
 func (h *KBHandler) ResolveExternalVideoURL(c echo.Context) error {
 	rawURL := strings.TrimSpace(c.QueryParam("url"))
-	resolved, err := h.kbSvc.ResolveExternalVideoURL(rawURL)
+	resolved, err := h.kbSvc.ResolveExternalVideoURL(c.Request().Context(), rawURL)
 	if err != nil {
 		return service.HandleError(c, err)
 	}

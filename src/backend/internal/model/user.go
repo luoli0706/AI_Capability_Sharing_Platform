@@ -19,9 +19,10 @@ type SysUser struct {
 	ID           uint64         `gorm:"primaryKey;autoIncrement" json:"id"`
 	Username     string         `gorm:"type:varchar(64);uniqueIndex:uk_username;not null" json:"username"`
 	PasswordHash string         `gorm:"type:varchar(255);not null" json:"-"`
-	Nickname     string         `gorm:"type:varchar(64);not null;default:''" json:"nickname"`
-	Email        *string        `gorm:"type:varchar(128);uniqueIndex:uk_email" json:"email"`
-	Avatar       string         `gorm:"type:mediumtext;not null" json:"avatar"`
+	Nickname        string         `gorm:"type:varchar(64);not null;default:''" json:"nickname"`
+	Email           *string        `gorm:"type:varchar(128);uniqueIndex:uk_email" json:"email"`
+	EmailVerified   bool           `gorm:"type:tinyint(1);not null;default:0" json:"email_verified"`
+	Avatar          string         `gorm:"type:mediumtext;not null" json:"avatar"`
 	Bio             string         `gorm:"type:varchar(255);not null;default:''" json:"bio"`
 	FavoritesPublic bool           `gorm:"default:false;not null" json:"favorites_public"`
 	Status          int8           `gorm:"type:tinyint;not null;default:1" json:"status"`
@@ -67,6 +68,7 @@ type UserInfo struct {
 	Username        string    `json:"username"`
 	Nickname        string    `json:"nickname"`
 	Email           string    `json:"email"`
+	EmailVerified   bool      `json:"email_verified"`
 	Avatar          string    `json:"avatar"`
 	Bio             string    `json:"bio"`
 	FavoritesPublic bool      `json:"favorites_public"`
@@ -138,6 +140,7 @@ func ToUserInfo(u *SysUser, roles []string) UserInfo {
 		Username:        u.Username,
 		Nickname:        u.Nickname,
 		Email:           email,
+		EmailVerified:   u.EmailVerified,
 		Avatar:          u.Avatar,
 		Bio:             u.Bio,
 		FavoritesPublic: u.FavoritesPublic,
@@ -149,10 +152,11 @@ func ToUserInfo(u *SysUser, roles []string) UserInfo {
 
 // RegisterRequest represents POST /api/v1/auth/register payload.
 type RegisterRequest struct {
-	Username string `json:"username" validate:"required,min=3,max=64"`
-	Password string `json:"password" validate:"required,min=6,max=64"`
-	Nickname string `json:"nickname" validate:"max=64"`
-	Email    string `json:"email" validate:"omitempty,email,max=128"`
+	Username  string `json:"username" validate:"required,min=3,max=64"`
+	Password  string `json:"password" validate:"required,min=8,max=64"`
+	Nickname  string `json:"nickname" validate:"max=64"`
+	Email     string `json:"email" validate:"required,email,max=128"`
+	EmailCode string `json:"email_code" validate:"required,len=6"`
 }
 
 // LoginRequest represents POST /api/v1/auth/login payload.
@@ -171,10 +175,21 @@ type LoginResponse struct {
 // UpdateProfileRequest represents PUT /api/v1/user/profile payload.
 type UpdateProfileRequest struct {
 	Nickname        string  `json:"nickname" validate:"max=64"`
-	Email           string  `json:"email" validate:"omitempty,email,max=128"`
 	Avatar          *string `json:"avatar"`
 	Bio             *string `json:"bio" validate:"omitempty,max=255"`
 	FavoritesPublic *bool   `json:"favorites_public"`
+}
+
+// SendEmailCodeRequest represents POST /api/v1/auth/email/send-code and POST /api/v1/user/email/send-code payload.
+type SendEmailCodeRequest struct {
+	Email string `json:"email" validate:"required,email,max=128"`
+}
+
+// BindEmailRequest represents PUT /api/v1/user/email payload.
+type BindEmailRequest struct {
+	CurrentPassword string `json:"current_password" validate:"required"`
+	Email           string `json:"email" validate:"required,email,max=128"`
+	EmailCode       string `json:"email_code" validate:"required,len=6"`
 }
 
 // UpdatePasswordRequest represents PUT /api/v1/user/password payload.

@@ -18,6 +18,7 @@ const props = defineProps<{
   isFolder?: boolean
   refDomainId?: number
   crossRefId?: number
+  disableScopeSwitch?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -234,6 +235,9 @@ watch(
       sourceScopeFilter.value = 'all'
       specificSourceKey.value = 'all'
       shareScope.value = props.docId ? 'doc' : 'asset'
+      if (props.disableScopeSwitch && props.docId) {
+        shareScope.value = 'doc'
+      }
       selectedUserIds.value = []
       note.value = ''
       void fetchContacts()
@@ -274,7 +278,7 @@ watch(
             <el-radio-button value="doc">
               {{ isFolder ? '仅当前文件夹' : '仅当前文档' }}
             </el-radio-button>
-            <el-radio-button value="asset">整个知识库</el-radio-button>
+            <el-radio-button value="asset" :disabled="disableScopeSwitch">整个知识库</el-radio-button>
           </el-radio-group>
         </div>
 

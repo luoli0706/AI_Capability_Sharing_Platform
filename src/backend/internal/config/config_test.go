@@ -28,12 +28,18 @@ storage:
 	}
 
 	// 1. Fallback to config.yaml when no .env or env vars are set
-	for _, k := range []string{"MYSQL_USER", "MYSQL_PASSWORD", "MYSQL_HOST", "MYSQL_PORT", "MYSQL_DATABASE", "JWT_SECRET"} {
+	for _, k := range []string{
+		"MYSQL_USER", "MYSQL_PASSWORD", "MYSQL_HOST", "MYSQL_PORT", "MYSQL_DATABASE", "JWT_SECRET",
+		"SERVER_MODE", "STORAGE_SECRET", "Aliyun_User_AK", "Aliyun_User_SK", "ALIYUN_DM_ENDPOINT", "ALIYUN_DM_ACCOUNT_NAME", "CORS_ALLOWED_ORIGINS",
+	} {
 		t.Setenv(k, "")
 	}
 	cfg, err := loadFrom(yamlPath, dotEnvPath)
 	if err != nil {
 		t.Fatalf("loadFrom fallback failed: %v", err)
+	}
+	if cfg.Email.Endpoint != "dm.aliyuncs.com" || cfg.Email.AccountName != "verify@email.7thcv.cn" {
+		t.Fatalf("unexpected default email config: %+v", cfg.Email)
 	}
 	wantYAML := "yaml_user:yaml_pass@tcp(127.0.0.1:3306)/yaml_db?charset=utf8mb4&parseTime=True&loc=Local"
 	if cfg.Database.DSN != wantYAML {
@@ -71,6 +77,11 @@ JWT_SECRET=dotenv-jwt-secret
 	// 3. Process env overrides .env
 	t.Setenv("MYSQL_HOST", "db.internal")
 	t.Setenv("JWT_SECRET", "env-jwt-secret")
+	t.Setenv("SERVER_MODE", "release")
+	t.Setenv("STORAGE_SECRET", "env-storage-secret")
+	t.Setenv("Aliyun_User_AK", "test-ak")
+	t.Setenv("Aliyun_User_SK", "test-sk")
+	t.Setenv("CORS_ALLOWED_ORIGINS", "https://a.example.com, https://b.example.com")
 	cfg, err = loadFrom(yamlPath, dotEnvPath)
 	if err != nil {
 		t.Fatalf("loadFrom env override failed: %v", err)
@@ -81,5 +92,14 @@ JWT_SECRET=dotenv-jwt-secret
 	}
 	if cfg.JWT.Secret != "env-jwt-secret" {
 		t.Fatalf("expected JWT secret %q, got %q", "env-jwt-secret", cfg.JWT.Secret)
+	}
+	if cfg.Server.Mode != "release" || cfg.Storage.Secret != "env-storage-secret" {
+		t.Fatalf("unexpected server/storage config: mode=%q secret=%q", cfg.Server.Mode, cfg.Storage.Secret)
+	}
+	if cfg.Email.AliyunAK != "test-ak" || cfg.Email.AliyunSK != "test-sk" {
+		t.Fatalf("unexpected email AK/SK: %+v", cfg.Email)
+	}
+	if len(cfg.CORS.AllowedOrigins) != 2 || cfg.CORS.AllowedOrigins[0] != "https://a.example.com" || cfg.CORS.AllowedOrigins[1] != "https://b.example.com" {
+		t.Fatalf("unexpected CORS allowed origins: %+v", cfg.CORS.AllowedOrigins)
 	}
 }

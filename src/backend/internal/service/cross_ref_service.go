@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"ascp-backend/internal/model"
 	"ascp-backend/internal/repository"
@@ -178,7 +177,7 @@ func (s *crossRefService) CreateCrossRef(userID uint64, isSuperAdmin bool, targe
 		if reason == "" {
 			reason = fmt.Sprintf("申请跨域引用 %s", ref.Title)
 		}
-		requestNo := fmt.Sprintf("APR-%s-%04d", time.Now().Format("20060102150405"), time.Now().Nanosecond()%10000)
+		requestNo := generateRequestNo()
 		approvalReq := &model.ApprovalRequest{
 			RequestNo:         requestNo,
 			ApplicantID:       userID,

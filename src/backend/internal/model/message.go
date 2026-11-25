@@ -2,6 +2,7 @@ package model
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -67,11 +68,16 @@ type AssetCardPayload struct {
 	Note        string `json:"note,omitempty"`
 }
 
+const maxFlexiblePayloadBytes = 16384
+
 // FlexiblePayload accepts either a JSON string or a JSON object/value when unmarshaling.
 type FlexiblePayload string
 
 // UnmarshalJSON decodes a JSON string directly or preserves raw JSON object/array text.
 func (p *FlexiblePayload) UnmarshalJSON(data []byte) error {
+	if len(data) > maxFlexiblePayloadBytes {
+		return fmt.Errorf("payload exceeds maximum size of %d bytes", maxFlexiblePayloadBytes)
+	}
 	if len(data) == 0 || string(data) == "null" {
 		*p = ""
 		return nil
@@ -80,6 +86,9 @@ func (p *FlexiblePayload) UnmarshalJSON(data []byte) error {
 		var s string
 		if err := json.Unmarshal(data, &s); err != nil {
 			return err
+		}
+		if len(s) > maxFlexiblePayloadBytes {
+			return fmt.Errorf("payload exceeds maximum size of %d bytes", maxFlexiblePayloadBytes)
 		}
 		*p = FlexiblePayload(s)
 		return nil

@@ -71,6 +71,8 @@ func AutoMigrate(db *gorm.DB) error {
 		&model.SysUser{},
 		&model.SysRole{},
 		&model.SysUserRole{},
+		&model.EmailVerificationCode{},
+		&model.EmailDailyQuota{},
 		&model.UserAPIKey{},
 		&model.BizOrganization{},
 		&model.OrganizationMember{},

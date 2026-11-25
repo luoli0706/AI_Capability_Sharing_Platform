@@ -3,7 +3,9 @@ package service
 import (
 	"errors"
 	"strings"
+	"sync"
 	"time"
+	"unicode"
 
 	"ascp-backend/internal/config"
 	"ascp-backend/internal/model"
@@ -14,43 +16,77 @@ import (
 	"gorm.io/gorm"
 )
 
+const (
+	maxLoginFailures   = 5
+	loginLockDuration  = 15 * time.Minute
+)
+
 type AuthService interface {
+	SetEmailService(emailSvc EmailService)
 	Register(req model.RegisterRequest) (*model.UserInfo, error)
 	Login(req model.LoginRequest) (*model.LoginResponse, error)
+	LoginWithIP(req model.LoginRequest, clientIP string) (*model.LoginResponse, error)
 	Logout(userID uint64) error
 	GetProfile(userID uint64) (*model.UserInfo, error)
 	UpdateProfile(userID uint64, req model.UpdateProfileRequest) (*model.UserInfo, error)
+	BindEmail(userID uint64, req model.BindEmailRequest) (*model.UserInfo, error)
 	UpdatePassword(userID uint64, req model.UpdatePasswordRequest) error
 }
 
+type loginAttemptState struct {
+	failures    int
+	lockedUntil time.Time
+}
+
 type authService struct {
-	userRepo repository.UserRepository
-	jwtCfg   config.JWTConfig
+	userRepo      repository.UserRepository
+	jwtCfg        config.JWTConfig
+	emailSvc      EmailService
+	loginMu       sync.Mutex
+	loginAttempts map[string]*loginAttemptState
+	nowFn         func() time.Time
 }
 
 func NewAuthService(userRepo repository.UserRepository, jwtCfg config.JWTConfig) AuthService {
 	return &authService{
-		userRepo: userRepo,
-		jwtCfg:   jwtCfg,
+		userRepo:      userRepo,
+		jwtCfg:        jwtCfg,
+		loginAttempts: make(map[string]*loginAttemptState),
+		nowFn:         time.Now,
 	}
 }
 
+func (s *authService) SetEmailService(emailSvc EmailService) {
+	s.emailSvc = emailSvc
+}
+
 func (s *authService) Register(req model.RegisterRequest) (*model.UserInfo, error) {
+	if err := validatePasswordComplexity(req.Password); err != nil {
+		return nil, err
+	}
+
+	normalizedEmail, err := validateAndCheckDisposableEmail(req.Email)
+	if err != nil {
+		return nil, err
+	}
+
 	if _, err := s.userRepo.FindByUsername(req.Username); err == nil {
 		return nil, NewConflict("username already exists")
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, err
 	}
 
-	var emailPtr *string
-	trimmedEmail := strings.TrimSpace(req.Email)
-	if trimmedEmail != "" {
-		if _, err := s.userRepo.FindByEmail(trimmedEmail); err == nil {
-			return nil, NewConflict("email already exists")
-		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, err
-		}
-		emailPtr = &trimmedEmail
+	if _, err := s.userRepo.FindByEmail(normalizedEmail); err == nil {
+		return nil, NewConflict("email already exists")
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+
+	if s.emailSvc == nil {
+		return nil, &AppError{HTTPStatus: 503, Code: 50301, Message: "邮箱验证服务未初始化"}
+	}
+	if err := s.emailSvc.VerifyCode(normalizedEmail, model.EmailPurposeRegister, req.EmailCode); err != nil {
+		return nil, err
 	}
 
 	hash, err := password.Hash(req.Password)
@@ -64,12 +100,13 @@ func (s *authService) Register(req model.RegisterRequest) (*model.UserInfo, erro
 	}
 
 	user := &model.SysUser{
-		Username:     req.Username,
-		PasswordHash: hash,
-		Nickname:     nickname,
-		Email:        emailPtr,
-		Status:       model.UserStatusActive,
-		TokenVersion: 1,
+		Username:      req.Username,
+		PasswordHash:  hash,
+		Nickname:      nickname,
+		Email:         &normalizedEmail,
+		EmailVerified: true,
+		Status:        model.UserStatusActive,
+		TokenVersion:  1,
 	}
 
 	if err := s.userRepo.CreateWithRole(user, model.RoleDeveloper); err != nil {
@@ -81,9 +118,19 @@ func (s *authService) Register(req model.RegisterRequest) (*model.UserInfo, erro
 }
 
 func (s *authService) Login(req model.LoginRequest) (*model.LoginResponse, error) {
+	return s.LoginWithIP(req, "")
+}
+
+func (s *authService) LoginWithIP(req model.LoginRequest, clientIP string) (*model.LoginResponse, error) {
+	attemptKey := strings.ToLower(strings.TrimSpace(req.Username)) + "|" + strings.TrimSpace(clientIP)
+	if s.isLoginLocked(attemptKey) {
+		return nil, NewTooManyRequests("登录失败次数过多，请 15 分钟后再试")
+	}
+
 	user, err := s.userRepo.FindByUsername(req.Username)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			s.recordLoginFailure(attemptKey)
 			return nil, NewUnauthorized("invalid username or password")
 		}
 		return nil, err
@@ -94,8 +141,11 @@ func (s *authService) Login(req model.LoginRequest) (*model.LoginResponse, error
 	}
 
 	if !password.Verify(req.Password, user.PasswordHash) {
+		s.recordLoginFailure(attemptKey)
 		return nil, NewUnauthorized("invalid username or password")
 	}
+
+	s.clearLoginFailures(attemptKey)
 
 	roles, err := s.userRepo.GetUserRoles(user.ID)
 	if err != nil {
@@ -150,24 +200,6 @@ func (s *authService) UpdateProfile(userID uint64, req model.UpdateProfileReques
 		return nil, err
 	}
 
-	emailPtr := user.Email
-	trimmedEmail := strings.TrimSpace(req.Email)
-	if trimmedEmail != "" {
-		currentEmail := ""
-		if user.Email != nil {
-			currentEmail = *user.Email
-		}
-		if trimmedEmail != currentEmail {
-			existing, err := s.userRepo.FindByEmail(trimmedEmail)
-			if err == nil && existing.ID != userID {
-				return nil, NewConflict("email already in use")
-			} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil, err
-			}
-		}
-		emailPtr = &trimmedEmail
-	}
-
 	nickname := req.Nickname
 	if nickname == "" {
 		nickname = user.Nickname
@@ -185,14 +217,53 @@ func (s *authService) UpdateProfile(userID uint64, req model.UpdateProfileReques
 		favoritesPublic = *req.FavoritesPublic
 	}
 
-	if err := s.userRepo.UpdateProfile(userID, nickname, emailPtr, avatar, bio, favoritesPublic); err != nil {
+	if err := s.userRepo.UpdateProfile(userID, nickname, avatar, bio, favoritesPublic); err != nil {
 		return nil, err
 	}
 
 	return s.GetProfile(userID)
 }
 
+func (s *authService) BindEmail(userID uint64, req model.BindEmailRequest) (*model.UserInfo, error) {
+	user, err := s.userRepo.FindByID(userID)
+	if err != nil {
+		return nil, err
+	}
+
+	if !password.Verify(req.CurrentPassword, user.PasswordHash) {
+		return nil, NewBadRequest("current password is incorrect")
+	}
+
+	normalizedEmail, err := validateAndCheckDisposableEmail(req.Email)
+	if err != nil {
+		return nil, err
+	}
+
+	existing, err := s.userRepo.FindByEmail(normalizedEmail)
+	if err == nil && existing.ID != userID {
+		return nil, NewConflict("email already in use")
+	} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+
+	if s.emailSvc == nil {
+		return nil, &AppError{HTTPStatus: 503, Code: 50301, Message: "邮箱验证服务未初始化"}
+	}
+	if err := s.emailSvc.VerifyCode(normalizedEmail, model.EmailPurposeBindEmail, req.EmailCode); err != nil {
+		return nil, err
+	}
+
+	if err := s.userRepo.UpdateEmail(userID, normalizedEmail, true); err != nil {
+		return nil, err
+	}
+	return s.GetProfile(userID)
+}
+
 func (s *authService) UpdatePassword(userID uint64, req model.UpdatePasswordRequest) error {
+	if err := validatePasswordComplexity(req.NewPassword); err != nil {
+		return err
+	}
+
 	user, err := s.userRepo.FindByID(userID)
 	if err != nil {
 		return err
@@ -208,4 +279,60 @@ func (s *authService) UpdatePassword(userID uint64, req model.UpdatePasswordRequ
 	}
 
 	return s.userRepo.UpdatePasswordAndTokenVersion(userID, hash)
+}
+
+func validatePasswordComplexity(pw string) error {
+	if len(pw) < 8 || len(pw) > 64 {
+		return NewBadRequest("密码长度需在 8 到 64 位之间")
+	}
+	var hasLetter, hasDigit bool
+	for _, r := range pw {
+		if unicode.IsLetter(r) {
+			hasLetter = true
+		} else if unicode.IsDigit(r) {
+			hasDigit = true
+		}
+	}
+	if !hasLetter || !hasDigit {
+		return NewBadRequest("密码必须同时包含字母和数字")
+	}
+	return nil
+}
+
+func (s *authService) isLoginLocked(key string) bool {
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
+	state, ok := s.loginAttempts[key]
+	if !ok {
+		return false
+	}
+	now := s.nowFn()
+	if !state.lockedUntil.IsZero() && now.Before(state.lockedUntil) {
+		return true
+	}
+	if !state.lockedUntil.IsZero() && !now.Before(state.lockedUntil) {
+		delete(s.loginAttempts, key)
+	}
+	return false
+}
+
+func (s *authService) recordLoginFailure(key string) {
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
+	now := s.nowFn()
+	state, ok := s.loginAttempts[key]
+	if !ok || (!state.lockedUntil.IsZero() && !now.Before(state.lockedUntil)) {
+		state = &loginAttemptState{}
+		s.loginAttempts[key] = state
+	}
+	state.failures++
+	if state.failures >= maxLoginFailures {
+		state.lockedUntil = now.Add(loginLockDuration)
+	}
+}
+
+func (s *authService) clearLoginFailures(key string) {
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
+	delete(s.loginAttempts, key)
 }

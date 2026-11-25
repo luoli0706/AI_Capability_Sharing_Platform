@@ -108,6 +108,7 @@ function prefetchChapter(docId: number): Promise<void> {
       ])
       if (!props.visible || props.kbId !== targetKbId) return
       chapterCache.set(docId, { contentRes, progress })
+      pruneChapterCache(currentChapterIndex.value)
     } catch {
       // Ignore background prefetch errors
     } finally {
@@ -268,12 +269,12 @@ async function recomputePagination(preserveRatio = false) {
 }
 
 function applyChapterInitialPage(progress?: KbReadingProgress, targetEndPage?: boolean) {
-  if (progress && progress.total_pages > 0 && progress.current_page > 1) {
+  if (targetEndPage) {
+    currentPage.value = totalPages.value
+  } else if (progress && progress.total_pages > 0 && progress.current_page > 1) {
     const targetPage = Math.min(Math.max(1, progress.current_page), totalPages.value)
     currentPage.value = targetPage
     restoredHint.value = `已自动跳转至上次阅读进度：第 ${targetPage}/${totalPages.value} 页`
-  } else if (targetEndPage) {
-    currentPage.value = totalPages.value
   } else {
     currentPage.value = 1
   }
@@ -302,11 +303,22 @@ async function openChapter(doc: KbDocument, opts?: { targetEndPage?: boolean }) 
     drawerOpen.value = false
     return
   }
-  void flushPendingSave()
   const seq = ++sessionSeq
+  await flushPendingSave()
+  if (seq !== sessionSeq || !props.visible) return
   restoredHint.value = ''
 
-  const cached = chapterCache.get(doc.id)
+  let cached = chapterCache.get(doc.id)
+  if (!cached) {
+    const inFlightPrefetch = prefetchPromises.get(doc.id)
+    if (inFlightPrefetch) {
+      loadingChapter.value = true
+      await inFlightPrefetch
+      if (seq !== sessionSeq || !props.visible) return
+      cached = chapterCache.get(doc.id)
+    }
+  }
+
   if (cached) {
     loadingChapter.value = false
     currentDocId.value = doc.id
@@ -319,7 +331,7 @@ async function openChapter(doc: KbDocument, opts?: { targetEndPage?: boolean }) 
     if (pageViewportRef.value) {
       pageViewportRef.value.scrollTop = 0
     }
-    if (cached.progress === undefined) {
+    if (cached.progress === undefined && !opts?.targetEndPage) {
       void restoreProgressForDoc(doc.id, seq)
     }
     prefetchAdjacentChapters(currentChapterIndex.value)

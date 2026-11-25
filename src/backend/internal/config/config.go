@@ -15,6 +15,8 @@ type Config struct {
 	JWT      JWTConfig      `mapstructure:"jwt"`
 	Storage  StorageConfig  `mapstructure:"storage"`
 	SevenO   SevenOConfig   `mapstructure:"seveno"`
+	Email    EmailConfig    `mapstructure:"email"`
+	CORS     CORSConfig     `mapstructure:"cors"`
 }
 
 type ServerConfig struct {
@@ -35,6 +37,18 @@ type JWTConfig struct {
 
 type StorageConfig struct {
 	UploadDir string `mapstructure:"upload_dir"`
+	Secret    string `mapstructure:"secret"`
+}
+
+type EmailConfig struct {
+	AliyunAK    string `mapstructure:"aliyun_ak"`
+	AliyunSK    string `mapstructure:"aliyun_sk"`
+	Endpoint    string `mapstructure:"endpoint"`
+	AccountName string `mapstructure:"account_name"`
+}
+
+type CORSConfig struct {
+	AllowedOrigins []string `mapstructure:"allowed_origins"`
 }
 
 type SevenOConfig struct {
@@ -91,6 +105,44 @@ func loadFrom(path, dotEnvPath string) (*Config, error) {
 
 	if jwtSecret := getEnvValue(dotEnv, "JWT_SECRET"); jwtSecret != "" {
 		cfg.JWT.Secret = jwtSecret
+	}
+
+	if serverMode := getEnvValue(dotEnv, "SERVER_MODE"); serverMode != "" {
+		cfg.Server.Mode = serverMode
+	}
+
+	if storageSecret := getEnvValue(dotEnv, "STORAGE_SECRET"); storageSecret != "" {
+		cfg.Storage.Secret = storageSecret
+	}
+
+	if ak := getEnvValue(dotEnv, "Aliyun_User_AK"); ak != "" {
+		cfg.Email.AliyunAK = ak
+	}
+	if sk := getEnvValue(dotEnv, "Aliyun_User_SK"); sk != "" {
+		cfg.Email.AliyunSK = sk
+	}
+	if endpoint := getEnvValue(dotEnv, "ALIYUN_DM_ENDPOINT"); endpoint != "" {
+		cfg.Email.Endpoint = endpoint
+	}
+	if cfg.Email.Endpoint == "" {
+		cfg.Email.Endpoint = "dm.aliyuncs.com"
+	}
+	if accountName := getEnvValue(dotEnv, "ALIYUN_DM_ACCOUNT_NAME"); accountName != "" {
+		cfg.Email.AccountName = accountName
+	}
+	if cfg.Email.AccountName == "" {
+		cfg.Email.AccountName = "verify@email.7thcv.cn"
+	}
+
+	if corsOrigins := getEnvValue(dotEnv, "CORS_ALLOWED_ORIGINS"); corsOrigins != "" {
+		parts := strings.Split(corsOrigins, ",")
+		origins := make([]string, 0, len(parts))
+		for _, p := range parts {
+			if trimmed := strings.TrimSpace(p); trimmed != "" {
+				origins = append(origins, trimmed)
+			}
+		}
+		cfg.CORS.AllowedOrigins = origins
 	}
 
 	if binPath := getEnvValue(dotEnv, "SEVENO_BIN_PATH"); binPath != "" {

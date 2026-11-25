@@ -211,9 +211,6 @@ func (s *messageService) SendMessageReq(userID uint64, isSuperAdmin bool, convID
 			return nil, NewBadRequest("invalid asset card payload")
 		}
 		note := strings.TrimSpace(cardReq.Note)
-		if note == "" {
-			note = strings.TrimSpace(req.Content)
-		}
 		var err error
 		payloadJSON, preview, content, err = s.buildSanitizedAssetCard(userID, isSuperAdmin, cardReq.AssetID, cardReq.DocID, cardReq.RefDomainID, cardReq.CrossRefID, note)
 		if err != nil {

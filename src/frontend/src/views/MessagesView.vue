@@ -439,6 +439,14 @@ function parseAssetCardPayload(msg: UserMessageItem): AssetCardPayload | null {
   return null
 }
 
+const parsedCardByMsgId = computed(() => {
+  const map = new Map<number, AssetCardPayload | null>()
+  for (const msg of messages.value) {
+    map.set(msg.id, parseAssetCardPayload(msg))
+  }
+  return map
+})
+
 async function handleClickAssetCard(msg: UserMessageItem) {
   const card = parseAssetCardPayload(msg)
   if (!card || checkingCardMsgId.value === msg.id) return
@@ -670,45 +678,47 @@ onBeforeUnmount(() => {
               :class="{ 'is-mine': msg.sender_id === user?.id }"
             >
               <div class="msg-bubble-wrap">
-                <div
-                  v-if="parseAssetCardPayload(msg)"
-                  class="asset-card-msg"
-                  :class="{ 'is-checking': checkingCardMsgId === msg.id }"
-                  @click="handleClickAssetCard(msg)"
-                >
-                  <div class="asset-card-msg-top">
-                    <el-tag
-                      :type="getAssetTypeMeta(parseAssetCardPayload(msg)!.asset_type as AssetType).tagType"
-                      size="small"
-                      effect="light"
-                    >
-                      {{ getAssetTypeMeta(parseAssetCardPayload(msg)!.asset_type as AssetType).shortLabel }}
-                    </el-tag>
-                    <span v-if="parseAssetCardPayload(msg)!.domain_name" class="asset-card-domain">
-                      {{ parseAssetCardPayload(msg)!.domain_name }}
-                    </span>
+                <template v-for="card in [parsedCardByMsgId.get(msg.id)]" :key="`card-${msg.id}`">
+                  <div
+                    v-if="card"
+                    class="asset-card-msg"
+                    :class="{ 'is-checking': checkingCardMsgId === msg.id }"
+                    @click="handleClickAssetCard(msg)"
+                  >
+                    <div class="asset-card-msg-top">
+                      <el-tag
+                        :type="getAssetTypeMeta(card.asset_type as AssetType).tagType"
+                        size="small"
+                        effect="light"
+                      >
+                        {{ getAssetTypeMeta(card.asset_type as AssetType).shortLabel }}
+                      </el-tag>
+                      <span v-if="card.domain_name" class="asset-card-domain">
+                        {{ card.domain_name }}
+                      </span>
+                    </div>
+                    <div class="asset-card-msg-title">
+                      {{ card.asset_name }}
+                    </div>
+                    <div v-if="card.doc_name" class="asset-card-msg-doc">
+                      <el-tag
+                        size="small"
+                        :type="card.is_folder ? 'warning' : 'success'"
+                        effect="plain"
+                      >
+                        {{ card.is_folder ? '文件夹' : '文档' }}
+                      </el-tag>
+                      <span class="mono-text">{{ card.doc_name }}</span>
+                    </div>
+                    <div v-if="card.note" class="asset-card-msg-note">
+                      “{{ card.note }}”
+                    </div>
+                    <div class="asset-card-msg-footer">
+                      <span>点击校验权限并查看详情 →</span>
+                    </div>
                   </div>
-                  <div class="asset-card-msg-title">
-                    {{ parseAssetCardPayload(msg)!.asset_name }}
-                  </div>
-                  <div v-if="parseAssetCardPayload(msg)!.doc_name" class="asset-card-msg-doc">
-                    <el-tag
-                      size="small"
-                      :type="parseAssetCardPayload(msg)!.is_folder ? 'warning' : 'success'"
-                      effect="plain"
-                    >
-                      {{ parseAssetCardPayload(msg)!.is_folder ? '文件夹' : '文档' }}
-                    </el-tag>
-                    <span class="mono-text">{{ parseAssetCardPayload(msg)!.doc_name }}</span>
-                  </div>
-                  <div v-if="parseAssetCardPayload(msg)!.note" class="asset-card-msg-note">
-                    “{{ parseAssetCardPayload(msg)!.note }}”
-                  </div>
-                  <div class="asset-card-msg-footer">
-                    <span>点击校验权限并查看详情 →</span>
-                  </div>
-                </div>
-                <div v-else class="msg-bubble">{{ msg.content }}</div>
+                  <div v-else class="msg-bubble">{{ msg.content }}</div>
+                </template>
                 <div class="msg-time tabular-nums">{{ formatDateTime(msg.created_at) }}</div>
               </div>
             </div>
@@ -857,6 +867,8 @@ onBeforeUnmount(() => {
     >
       <el-input
         v-model="assetNote"
+        maxlength="500"
+        show-word-limit
         placeholder="附言（可选）：例如推荐查看这个能力/文件夹/文档..."
         clearable
         style="margin-bottom: 12px"

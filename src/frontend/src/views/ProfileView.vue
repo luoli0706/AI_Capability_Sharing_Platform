@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { CopyDocument, Document, Folder, Key, Plus, Refresh, Upload } from '@element-plus/icons-vue'
@@ -14,7 +14,7 @@ import {
 } from '@/api/auth'
 import { getInvokeLogs } from '@/api/invoke'
 import { toggleDocumentFavorite } from '@/api/kb'
-import { getMyFavorites } from '@/api/user'
+import { bindEmail, getMyFavorites, sendBindEmailCode } from '@/api/user'
 import AssetDetailDrawer from '@/components/AssetDetailDrawer.vue'
 import { useAuthStore } from '@/stores/auth'
 import type { AssetItem, InvokeLogItem, UserApiKey, UserFavoriteItem } from '@/types/api'
@@ -37,23 +37,41 @@ const savingProfile = ref(false)
 const avatarInputRef = ref<HTMLInputElement | null>(null)
 const profileForm = reactive({
   nickname: '',
-  email: '',
   bio: '',
   avatar: '',
   favorites_public: false
 })
 
 const profileRules: FormRules = {
-  nickname: [{ required: true, message: '请输入显示昵称', trigger: 'blur' }],
+  nickname: [{ required: true, message: '请输入显示昵称', trigger: 'blur' }]
+}
+
+// Bind / change email modal
+const bindEmailModalOpen = ref(false)
+const bindEmailFormRef = ref<FormInstance>()
+const sendingBindCode = ref(false)
+const submittingBindEmail = ref(false)
+const bindEmailCountdown = ref(0)
+let bindEmailTimer: ReturnType<typeof setInterval> | null = null
+
+const bindEmailForm = reactive({
+  email: '',
+  code: '',
+  password: ''
+})
+
+const bindEmailRules: FormRules = {
   email: [
     {
+      required: true,
       validator: (_rule: unknown, value: string, cb: (err?: Error) => void) => {
-        if (!value || !value.trim()) {
-          cb()
+        const trimmed = (value || '').trim()
+        if (!trimmed) {
+          cb(new Error('请输入新邮箱地址'))
           return
         }
         const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-        if (!emailRe.test(value.trim())) {
+        if (!emailRe.test(trimmed)) {
           cb(new Error('请输入有效的邮箱格式'))
           return
         }
@@ -61,8 +79,25 @@ const profileRules: FormRules = {
       },
       trigger: 'blur'
     }
-  ]
+  ],
+  code: [
+    { required: true, message: '请输入 6 位邮箱验证码', trigger: 'blur' },
+    { pattern: /^\d{6}$/, message: '验证码为 6 位数字', trigger: 'blur' }
+  ],
+  password: [{ required: true, message: '请输入当前登录密码', trigger: 'blur' }]
 }
+
+const emailStatusMeta = computed(() => {
+  if (!user.value?.email) {
+    return { label: '未绑定', tagType: 'info' as const }
+  }
+  if (user.value.email_verified) {
+    return { label: '已验证', tagType: 'success' as const }
+  }
+  return { label: '未验证', tagType: 'warning' as const }
+})
+
+const needsEmailGuide = computed(() => !user.value?.email || !user.value?.email_verified)
 
 // Password form
 const pwdFormRef = ref<FormInstance>()
@@ -89,7 +124,8 @@ const pwdRules: FormRules = {
   old_password: [{ required: true, message: '请输入原密码', trigger: 'blur' }],
   new_password: [
     { required: true, message: '请输入新密码', trigger: 'blur' },
-    { min: 6, max: 64, message: '新密码长度需在 6 到 64 个字符之间', trigger: 'blur' }
+    { min: 8, max: 64, message: '新密码长度需在 8 到 64 个字符之间', trigger: 'blur' },
+    { pattern: /^(?=.*[A-Za-z])(?=.*\d).+$/, message: '新密码必须同时包含字母和数字', trigger: 'blur' }
   ],
   confirm_password: [{ validator: validateConfirmPwd, trigger: 'blur' }]
 }
@@ -144,10 +180,76 @@ const isSuperAdmin = computed(() => Boolean(user.value?.roles?.includes('super_a
 
 function syncProfileForm() {
   profileForm.nickname = user.value?.nickname || ''
-  profileForm.email = user.value?.email || ''
   profileForm.bio = user.value?.bio || ''
   profileForm.avatar = user.value?.avatar || ''
   profileForm.favorites_public = Boolean(user.value?.favorites_public)
+}
+
+function startBindEmailCountdown() {
+  if (bindEmailTimer) clearInterval(bindEmailTimer)
+  bindEmailCountdown.value = 60
+  bindEmailTimer = setInterval(() => {
+    if (bindEmailCountdown.value <= 1) {
+      bindEmailCountdown.value = 0
+      if (bindEmailTimer) {
+        clearInterval(bindEmailTimer)
+        bindEmailTimer = null
+      }
+      return
+    }
+    bindEmailCountdown.value -= 1
+  }, 1000)
+}
+
+function openBindEmailModal() {
+  bindEmailForm.email = ''
+  bindEmailForm.code = ''
+  bindEmailForm.password = ''
+  bindEmailFormRef.value?.clearValidate()
+  bindEmailModalOpen.value = true
+}
+
+async function handleSendBindEmailCode() {
+  if (!bindEmailFormRef.value || sendingBindCode.value || bindEmailCountdown.value > 0) return
+  const valid = await bindEmailFormRef.value
+    .validateField('email')
+    .then(() => true)
+    .catch(() => false)
+  if (!valid) return
+
+  sendingBindCode.value = true
+  try {
+    await sendBindEmailCode(bindEmailForm.email.trim())
+    ElMessage.success('验证码已发送至新邮箱，请注意查收')
+    startBindEmailCountdown()
+  } catch {
+    // Handled by interceptor
+  } finally {
+    sendingBindCode.value = false
+  }
+}
+
+async function handleBindEmailSubmit() {
+  if (!bindEmailFormRef.value) return
+  const valid = await bindEmailFormRef.value.validate().catch(() => false)
+  if (!valid) return
+
+  submittingBindEmail.value = true
+  try {
+    await bindEmail({
+      email: bindEmailForm.email.trim(),
+      code: bindEmailForm.code.trim(),
+      password: bindEmailForm.password
+    })
+    await authStore.fetchProfile()
+    syncProfileForm()
+    bindEmailModalOpen.value = false
+    ElMessage.success(user.value?.email ? '邮箱绑定成功' : '邮箱已更新')
+  } catch {
+    // Handled by interceptor
+  } finally {
+    submittingBindEmail.value = false
+  }
 }
 
 function triggerAvatarUpload() {
@@ -218,7 +320,6 @@ async function handleSaveProfile() {
   try {
     const updated = await updateProfile({
       nickname: profileForm.nickname.trim(),
-      email: profileForm.email.trim() || undefined,
       bio: profileForm.bio.trim(),
       avatar: profileForm.avatar.trim(),
       favorites_public: profileForm.favorites_public
@@ -413,6 +514,13 @@ onMounted(async () => {
   fetchApiKeys()
   fetchInvokeLogs()
 })
+
+onUnmounted(() => {
+  if (bindEmailTimer) {
+    clearInterval(bindEmailTimer)
+    bindEmailTimer = null
+  }
+})
 </script>
 
 <template>
@@ -501,8 +609,27 @@ onMounted(async () => {
               <el-form-item label="显示昵称" prop="nickname">
                 <el-input v-model="profileForm.nickname" placeholder="请输入显示昵称" />
               </el-form-item>
-              <el-form-item label="邮箱（选填）" prop="email">
-                <el-input v-model="profileForm.email" placeholder="选填，例如 name@example.com" />
+              <el-form-item label="绑定邮箱">
+                <div class="email-display-row">
+                  <div class="email-display-info">
+                    <span class="email-value" :class="{ 'is-empty': !user?.email }">
+                      {{ user?.email || '暂未绑定邮箱' }}
+                    </span>
+                    <el-tag :type="emailStatusMeta.tagType" size="small" effect="light">
+                      {{ emailStatusMeta.label }}
+                    </el-tag>
+                  </div>
+                  <el-button size="small" type="primary" plain @click="openBindEmailModal">
+                    {{ user?.email ? '修改邮箱' : '绑定邮箱' }}
+                  </el-button>
+                </div>
+                <div v-if="needsEmailGuide" class="email-guide-tip">
+                  {{
+                    user?.email
+                      ? '当前邮箱尚未完成验证，建议点击「修改邮箱」重新验证以确保账号安全。'
+                      : '您尚未绑定邮箱，建议尽快绑定常用邮箱以便接收安全通知与找回密码。'
+                  }}
+                </div>
               </el-form-item>
               <el-form-item label="个性签名">
                 <el-input
@@ -548,7 +675,7 @@ onMounted(async () => {
                   v-model="pwdForm.new_password"
                   type="password"
                   show-password
-                  placeholder="至少 6 位字符"
+                  placeholder="至少 8 位，需同时包含字母和数字"
                 />
               </el-form-item>
               <el-form-item label="确认新密码" prop="confirm_password">
@@ -837,6 +964,62 @@ onMounted(async () => {
 
     <AssetDetailDrawer v-model="detailDrawerOpen" :asset-id="selectedAssetId" />
 
+    <!-- Bind / Change Email Dialog -->
+    <el-dialog
+      v-model="bindEmailModalOpen"
+      :title="user?.email ? '修改绑定邮箱' : '绑定邮箱'"
+      width="440px"
+      destroy-on-close
+    >
+      <el-form
+        ref="bindEmailFormRef"
+        :model="bindEmailForm"
+        :rules="bindEmailRules"
+        label-position="top"
+      >
+        <el-form-item label="新邮箱" prop="email">
+          <el-input
+            v-model="bindEmailForm.email"
+            placeholder="请输入常用邮箱（不支持临时邮箱）"
+            autocomplete="email"
+          />
+        </el-form-item>
+        <el-form-item label="邮箱验证码" prop="code">
+          <div class="bind-code-row">
+            <el-input
+              v-model="bindEmailForm.code"
+              maxlength="6"
+              placeholder="请输入 6 位验证码"
+              autocomplete="one-time-code"
+            />
+            <el-button
+              class="bind-send-btn"
+              :loading="sendingBindCode"
+              :disabled="sendingBindCode || bindEmailCountdown > 0"
+              @click="handleSendBindEmailCode"
+            >
+              {{ bindEmailCountdown > 0 ? `${bindEmailCountdown}s 后重试` : '发送验证码' }}
+            </el-button>
+          </div>
+        </el-form-item>
+        <el-form-item label="当前登录密码" prop="password">
+          <el-input
+            v-model="bindEmailForm.password"
+            type="password"
+            show-password
+            placeholder="请输入当前登录密码以验证身份"
+            autocomplete="current-password"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="bindEmailModalOpen = false">取消</el-button>
+        <el-button type="primary" :loading="submittingBindEmail" @click="handleBindEmailSubmit">
+          确认提交
+        </el-button>
+      </template>
+    </el-dialog>
+
     <!-- Create API Key Modal -->
     <el-dialog v-model="createKeyModalOpen" title="新建 API Key" width="420px" destroy-on-close>
       <el-form ref="keyFormRef" :model="keyForm" :rules="keyRules" label-position="top">
@@ -945,6 +1128,54 @@ onMounted(async () => {
 
 .narrow-form {
   max-width: 420px;
+}
+
+.email-display-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--ascp-border);
+  border-radius: 8px;
+  background-color: #f8fafc;
+}
+
+.email-display-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.email-value {
+  font-size: 13.5px;
+  color: var(--ascp-text-primary);
+  word-break: break-all;
+}
+
+.email-value.is-empty {
+  color: var(--ascp-text-muted);
+}
+
+.email-guide-tip {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #d97706;
+}
+
+.bind-code-row {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+}
+
+.bind-send-btn {
+  flex-shrink: 0;
+  min-width: 110px;
 }
 
 .avatar-editor {

@@ -15,7 +15,8 @@ type UserRepository interface {
 	FindByUsername(username string) (*model.SysUser, error)
 	FindByEmail(email string) (*model.SysUser, error)
 	GetUserRoles(userID uint64) ([]string, error)
-	UpdateProfile(userID uint64, nickname string, email *string, avatar, bio string, favoritesPublic bool) error
+	UpdateProfile(userID uint64, nickname, avatar, bio string, favoritesPublic bool) error
+	UpdateEmail(userID uint64, email string, verified bool) error
 	UpdatePasswordAndTokenVersion(userID uint64, passwordHash string) error
 	IncrementTokenVersion(userID uint64) error
 	UpdateLastLogin(userID uint64, t time.Time) error
@@ -90,15 +91,21 @@ func (r *userRepository) GetUserRoles(userID uint64) ([]string, error) {
 	return roles, nil
 }
 
-func (r *userRepository) UpdateProfile(userID uint64, nickname string, email *string, avatar, bio string, favoritesPublic bool) error {
+func (r *userRepository) UpdateProfile(userID uint64, nickname, avatar, bio string, favoritesPublic bool) error {
 	updates := map[string]interface{}{
 		"nickname":         nickname,
-		"email":            email,
 		"avatar":           avatar,
 		"bio":              bio,
 		"favorites_public": favoritesPublic,
 	}
 	return r.db.Model(&model.SysUser{}).Where("id = ?", userID).Updates(updates).Error
+}
+
+func (r *userRepository) UpdateEmail(userID uint64, email string, verified bool) error {
+	return r.db.Model(&model.SysUser{}).Where("id = ?", userID).Updates(map[string]interface{}{
+		"email":          email,
+		"email_verified": verified,
+	}).Error
 }
 
 func (r *userRepository) UpdatePasswordAndTokenVersion(userID uint64, passwordHash string) error {

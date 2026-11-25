@@ -1,12 +1,34 @@
 package handler
 
 import (
+	"mime"
 	"strconv"
+	"strings"
 
 	"ascp-backend/internal/pkg/response"
 
 	"github.com/labstack/echo/v4"
 )
+
+func setContentDisposition(c echo.Context, dispositionType, fileName string) {
+	if dispositionType != "inline" {
+		dispositionType = "attachment"
+	}
+	cleanName := strings.Map(func(r rune) rune {
+		if r == '\r' || r == '\n' || r == 0 {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(fileName))
+	if cleanName == "" {
+		cleanName = "download"
+	}
+	disp := mime.FormatMediaType(dispositionType, map[string]string{"filename": cleanName})
+	if disp == "" {
+		disp = dispositionType
+	}
+	c.Response().Header().Set(echo.HeaderContentDisposition, disp)
+}
 
 func bindAndValidate(c echo.Context, req interface{}) bool {
 	if err := c.Bind(req); err != nil {

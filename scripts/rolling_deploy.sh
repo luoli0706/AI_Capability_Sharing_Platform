@@ -16,6 +16,7 @@ DRAIN_SECONDS="${DRAIN_SECONDS:-5}"
 
 DRY_RUN=0
 SKIP_BUILD="${SKIP_BUILD:-0}"
+LOCK_FILE="${LOCK_FILE:-/tmp/ascp-rolling-deploy.lock}"
 
 usage() {
   cat <<'EOF'
@@ -53,6 +54,48 @@ done
 
 log() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
+}
+
+read_env_var() {
+  local key="$1"
+  local file="$2"
+  local line val=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    case "$line" in
+      ''|\#*) continue ;;
+      export\ *) line="${line#export }" ;;
+    esac
+    case "$line" in
+      "${key}="*)
+        val="${line#*=}"
+        if [[ "$val" =~ ^\"(.*)\"$ ]]; then
+          val="${BASH_REMATCH[1]}"
+        elif [[ "$val" =~ ^\'(.*)\'$ ]]; then
+          val="${BASH_REMATCH[1]}"
+        fi
+        ;;
+    esac
+  done < "$file"
+  printf '%s' "$val"
+}
+
+validate_env_file() {
+  local env_file="$1"
+  local mysql_root_password jwt_secret
+
+  mysql_root_password="$(read_env_var "MYSQL_ROOT_PASSWORD" "$env_file")"
+  jwt_secret="$(read_env_var "JWT_SECRET" "$env_file")"
+
+  if [ -z "$mysql_root_password" ] || [ "$mysql_root_password" = "ascp123456" ]; then
+    printf 'ERROR: MYSQL_ROOT_PASSWORD in %s must be non-empty and must not use the weak default from .env.example\n' "$env_file" >&2
+    return 1
+  fi
+
+  if [ -z "$jwt_secret" ] || [ "$jwt_secret" = "change-me-in-production-ascp-jwt-secret" ]; then
+    printf 'ERROR: JWT_SECRET in %s must be non-empty and must not use the weak default from .env.example\n' "$env_file" >&2
+    return 1
+  fi
 }
 
 detect_active_slot() {
@@ -133,11 +176,20 @@ EOF
     return 1
   fi
 
+  if ! nginx -s reload; then
+    log "ERROR: nginx -s reload failed after updating ${UPSTREAM_INC}; restoring previous config..."
+    if [ -n "$backup_file" ] && [ -f "$backup_file" ]; then
+      mv -f "$backup_file" "$UPSTREAM_INC"
+    else
+      rm -f "$UPSTREAM_INC"
+    fi
+    nginx -t >/dev/null 2>&1 && nginx -s reload >/dev/null 2>&1 || true
+    return 1
+  fi
+
   if [ -n "$backup_file" ]; then
     rm -f "$backup_file"
   fi
-
-  nginx -s reload
 }
 
 cleanup_old_slot() {
@@ -159,6 +211,14 @@ cleanup_old_slot() {
   done
 }
 
+if [ "$DRY_RUN" -eq 0 ]; then
+  exec 9>"$LOCK_FILE"
+  if ! flock -n 9; then
+    printf 'ERROR: Another rolling deployment is already in progress (lock: %s)\n' "$LOCK_FILE" >&2
+    exit 1
+  fi
+fi
+
 if [ ! -f "$COMPOSE_FILE" ]; then
   printf 'ERROR: Compose file not found: %s\n' "$COMPOSE_FILE" >&2
   exit 1
@@ -171,6 +231,8 @@ if [ ! -f "$ENV_FILE" ]; then
     printf 'ERROR: Env file not found: %s (create from docker/.env.example)\n' "$ENV_FILE" >&2
     exit 1
   fi
+else
+  validate_env_file "$ENV_FILE"
 fi
 
 detect_active_slot

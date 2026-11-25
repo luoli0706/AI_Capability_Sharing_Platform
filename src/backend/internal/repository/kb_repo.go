@@ -29,6 +29,7 @@ type KBRepository interface {
 	ReplaceDocumentChunks(kbAssetID uint64, doc *model.KBDocument, chunks []model.KBChunk) error
 	CompleteDocumentParsing(kbAssetID, docID uint64, chunks []model.KBChunk) error
 	FailDocumentParsing(docID uint64, errMsg string) error
+	RecalculateKBCounts(kbAssetID uint64) error
 	ListChunks(kbAssetID, docID uint64, page, pageSize int) ([]model.KBChunk, int64, error)
 	DeleteDocument(kbAssetID, docID uint64) error
 	DeleteFolderRecursive(kbAssetID uint64, folderPath string) ([]string, error)
@@ -106,14 +107,20 @@ func (r *kbRepository) ListDocuments(kbAssetID uint64) ([]model.KBDocument, erro
 	return docs, nil
 }
 
+func escapeLikePattern(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
+}
+
 func (r *kbRepository) buildParentFolderQuery(kbAssetID uint64, parentFolder, extGroup string) *gorm.DB {
 	tx := r.db.Model(&model.KBDocument{}).Where("kb_asset_id = ?", kbAssetID)
 	if parentFolder == "" {
 		tx = tx.Where("((is_folder = ? AND folder_path <> '' AND folder_path NOT LIKE ?) OR (is_folder = ? AND folder_path = ''))",
 			true, "%/%", false)
 	} else {
-		tx = tx.Where("((is_folder = ? AND folder_path LIKE ? AND folder_path NOT LIKE ?) OR (is_folder = ? AND folder_path = ?))",
-			true, parentFolder+"/%", parentFolder+"/%/%", false, parentFolder)
+		escaped := escapeLikePattern(parentFolder)
+		tx = tx.Where("((is_folder = ? AND folder_path LIKE ? ESCAPE '\\' AND folder_path NOT LIKE ? ESCAPE '\\') OR (is_folder = ? AND folder_path = ?))",
+			true, escaped+"/%", escaped+"/%/%", false, parentFolder)
 	}
 	switch strings.ToLower(strings.TrimSpace(extGroup)) {
 	case "image":
@@ -142,12 +149,12 @@ func (r *kbRepository) ListDocumentsByParent(kbAssetID uint64, parentFolder stri
 func (r *kbRepository) ListDocumentsByParentPaged(kbAssetID uint64, parentFolder string, offset, limit int, extGroup string) ([]model.KBDocument, int64, error) {
 	base := r.buildParentFolderQuery(kbAssetID, parentFolder, extGroup)
 	var total int64
-	if err := base.Count(&total).Error; err != nil {
+	if err := base.Session(&gorm.Session{}).Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
 
 	var docs []model.KBDocument
-	q := base.Select("id, kb_asset_id, folder_path, is_folder, file_name, file_ext, file_size, parse_status, uploader_id, updated_at").
+	q := base.Session(&gorm.Session{}).Select("id, kb_asset_id, folder_path, is_folder, file_name, file_ext, file_size, parse_status, uploader_id, updated_at").
 		Order("is_folder DESC, file_name ASC")
 	if offset > 0 {
 		q = q.Offset(offset)
@@ -196,7 +203,8 @@ func (r *kbRepository) ListMatchingFiles(kbAssetID uint64, scope string, docID u
 		tx = tx.Where("id = ?", docID)
 	case "folder":
 		if folderPath != "" {
-			tx = tx.Where("(folder_path = ? OR folder_path LIKE ?)", folderPath, folderPath+"/%")
+			escaped := escapeLikePattern(folderPath)
+			tx = tx.Where("(folder_path = ? OR folder_path LIKE ? ESCAPE '\\')", folderPath, escaped+"/%")
 		}
 	}
 	var docs []model.KBDocument
@@ -255,8 +263,9 @@ func (r *kbRepository) RenameFolder(kbAssetID, folderDocID uint64, oldPath, newN
 			return err
 		}
 		var descendants []model.KBDocument
-		if err := tx.Where("kb_asset_id = ? AND id <> ? AND (folder_path = ? OR folder_path LIKE ?)",
-			kbAssetID, folderDocID, oldPath, oldPath+"/%").Find(&descendants).Error; err != nil {
+		escapedOldPath := escapeLikePattern(oldPath)
+		if err := tx.Where("kb_asset_id = ? AND id <> ? AND (folder_path = ? OR folder_path LIKE ? ESCAPE '\\')",
+			kbAssetID, folderDocID, oldPath, escapedOldPath+"/%").Find(&descendants).Error; err != nil {
 			return err
 		}
 		oldPrefix := oldPath + "/"
@@ -339,6 +348,10 @@ func (r *kbRepository) FailDocumentParsing(docID uint64, errMsg string) error {
 		"parse_status": model.ParseStatusFailed,
 		"error_msg":    errMsg,
 	}).Error
+}
+
+func (r *kbRepository) RecalculateKBCounts(kbAssetID uint64) error {
+	return recalculateKBCounts(r.db, kbAssetID)
 }
 
 func (r *kbRepository) ListChunks(kbAssetID, docID uint64, page, pageSize int) ([]model.KBChunk, int64, error) {

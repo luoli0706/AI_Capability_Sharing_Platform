@@ -260,3 +260,24 @@ func TestSevenOService_ConcurrencyAndSizeLimits(t *testing.T) {
 		t.Fatalf("expected 413 PayloadTooLarge on InspectZip, got %v", err)
 	}
 }
+
+func TestSevenOService_RejectsEmptyPassword(t *testing.T) {
+	svc := NewSevenOService("", t.TempDir())
+	fh := makeSevenOTestFileHeader(t, "file", "doc.txt", []byte("secret"))
+
+	var appErr *AppError
+	_, _, err := svc.EncryptFiles(context.Background(), []*multipart.FileHeader{fh}, nil, "", 3)
+	if !errors.As(err, &appErr) || appErr.HTTPStatus != http.StatusBadRequest {
+		t.Fatalf("expected 400 BadRequest for empty password on EncryptFiles, got %v", err)
+	}
+
+	_, _, err = svc.EncryptFiles(context.Background(), []*multipart.FileHeader{fh}, nil, "   ", 3)
+	if !errors.As(err, &appErr) || appErr.HTTPStatus != http.StatusBadRequest {
+		t.Fatalf("expected 400 BadRequest for whitespace password on EncryptFiles, got %v", err)
+	}
+
+	_, err = svc.DecryptZip(context.Background(), bytes.NewReader([]byte("zip")), "")
+	if !errors.As(err, &appErr) || appErr.HTTPStatus != http.StatusBadRequest {
+		t.Fatalf("expected 400 BadRequest for empty password on DecryptZip, got %v", err)
+	}
+}

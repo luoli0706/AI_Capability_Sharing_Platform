@@ -18,6 +18,7 @@ export interface UserBrief {
   username: string
   nickname: string
   avatar: string
+  email_verified?: boolean
 }
 
 export interface PublicUserProfile {
@@ -27,6 +28,7 @@ export interface PublicUserProfile {
   avatar: string
   bio: string
   favorites_public: boolean
+  email_verified?: boolean
   created_at: string
 }
 
@@ -35,6 +37,7 @@ export interface UserInfo {
   username: string
   nickname: string
   email?: string
+  email_verified?: boolean
   avatar: string
   bio?: string
   favorites_public?: boolean
@@ -51,7 +54,8 @@ export interface LoginPayload {
 export interface RegisterPayload {
   username: string
   password: string
-  email?: string
+  email: string
+  email_code: string
   nickname?: string
 }
 
@@ -63,10 +67,15 @@ export interface LoginResult {
 
 export interface UpdateProfilePayload {
   nickname: string
-  email?: string
   avatar?: string
   bio?: string
   favorites_public?: boolean
+}
+
+export interface BindEmailPayload {
+  email: string
+  code: string
+  password: string
 }
 
 export interface UpdatePasswordPayload {

@@ -20,7 +20,9 @@ export function isTxtFile(fileName: string): boolean {
 export function isTextFile(fileName: string): boolean {
   return (
     isMarkdownFile(fileName) ||
-    /\.(txt|json|ya?ml|csv|xml|html?|css|js|ts|go|py|sql|sh|log|ini|conf)$/i.test(fileName)
+    /\.(txt|json|ya?ml|csv|xml|html?|css|js|ts|go|py|sql|sh|log|ini|conf|bili|douyin|youtube|niconico|vimeo|qq|youku|video)$/i.test(
+      fileName
+    )
   )
 }
 
@@ -71,154 +73,213 @@ export function extractResolvableShortVideoUrl(input: string): string | null {
   return match ? match[0] : null
 }
 
+const EXTERNAL_VIDEO_EXTENSIONS = new Set([
+  '.bili',
+  '.douyin',
+  '.youtube',
+  '.niconico',
+  '.vimeo',
+  '.qq',
+  '.youku',
+  '.video'
+])
+
+function makeBilibiliSource(bvid: string): ExternalVideoSource {
+  return {
+    platform: 'bilibili',
+    platformLabel: '哔哩哔哩',
+    videoId: bvid,
+    suggestedFileName: `${bvid}.bili`,
+    embedUrl: `https://player.bilibili.com/player.html?bvid=${encodeURIComponent(bvid)}&page=1&as_wide=1&high_quality=1&danmaku=0`,
+    watchUrl: `https://www.bilibili.com/video/${encodeURIComponent(bvid)}`,
+    requiresMagic: false
+  }
+}
+
+function makeYoutubeSource(id: string): ExternalVideoSource {
+  return {
+    platform: 'youtube',
+    platformLabel: 'YouTube',
+    videoId: id,
+    suggestedFileName: `${id}.youtube`,
+    embedUrl: `https://www.youtube.com/embed/${encodeURIComponent(id)}`,
+    watchUrl: `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`,
+    requiresMagic: true
+  }
+}
+
+function makeNiconicoSource(rawId: string): ExternalVideoSource {
+  const id = rawId.toLowerCase()
+  return {
+    platform: 'niconico',
+    platformLabel: 'Niconico',
+    videoId: id,
+    suggestedFileName: `${id}.niconico`,
+    embedUrl: `https://embed.nicovideo.jp/watch/${encodeURIComponent(id)}`,
+    watchUrl: `https://www.nicovideo.jp/watch/${encodeURIComponent(id)}`,
+    requiresMagic: true
+  }
+}
+
+function makeVimeoSource(id: string): ExternalVideoSource {
+  return {
+    platform: 'vimeo',
+    platformLabel: 'Vimeo',
+    videoId: id,
+    suggestedFileName: `${id}.vimeo`,
+    embedUrl: `https://player.vimeo.com/video/${encodeURIComponent(id)}`,
+    watchUrl: `https://vimeo.com/${encodeURIComponent(id)}`,
+    requiresMagic: true
+  }
+}
+
+function makeDouyinSource(douyinId: string): ExternalVideoSource {
+  return {
+    platform: 'douyin',
+    platformLabel: '抖音',
+    videoId: douyinId,
+    suggestedFileName: `${douyinId}.douyin`,
+    embedUrl: `https://open.douyin.com/player/video?vid=${encodeURIComponent(douyinId)}&autoplay=0`,
+    watchUrl: `https://www.douyin.com/video/${encodeURIComponent(douyinId)}`,
+    requiresMagic: false
+  }
+}
+
+function makeTencentSource(id: string): ExternalVideoSource {
+  return {
+    platform: 'tencent',
+    platformLabel: '腾讯视频',
+    videoId: id,
+    suggestedFileName: `${id}.qq`,
+    embedUrl: `https://v.qq.com/txp/iframe/player.html?vid=${encodeURIComponent(id)}`,
+    watchUrl: `https://v.qq.com/x/page/${encodeURIComponent(id)}.html`,
+    requiresMagic: false
+  }
+}
+
+function makeYoukuSource(id: string): ExternalVideoSource {
+  return {
+    platform: 'youku',
+    platformLabel: '优酷',
+    videoId: id,
+    suggestedFileName: `${id}.youku`,
+    embedUrl: `https://player.youku.com/embed/${encodeURIComponent(id)}`,
+    watchUrl: `https://v.youku.com/v_show/id_${encodeURIComponent(id)}.html`,
+    requiresMagic: false
+  }
+}
+
 function parseSingleExternalVideoText(raw: string, fileNameMode: boolean): ExternalVideoSource | null {
   const trimmed = raw.trim()
   if (!trimmed) return null
   const baseName = getBaseName(trimmed)
   const ext = getExtension(trimmed)
 
-  // 1. Bilibili
-  const biliUrlMatch = !fileNameMode
-    ? trimmed.match(/bilibili\.com\/video\/(BV[0-9A-Za-z]{10})/i)
-    : null
-  const biliIdMatch = biliUrlMatch || baseName.match(/^(BV[0-9A-Za-z]{10})$/) || (!fileNameMode ? trimmed.match(/\b(BV[0-9A-Za-z]{10})\b/) : null)
-  if (biliIdMatch) {
-    const bvid = biliIdMatch[1]
-    return {
-      platform: 'bilibili',
-      platformLabel: '哔哩哔哩',
-      videoId: bvid,
-      suggestedFileName: `${bvid}.bili`,
-      embedUrl: `https://player.bilibili.com/player.html?bvid=${encodeURIComponent(bvid)}&page=1&as_wide=1&high_quality=1&danmaku=0`,
-      watchUrl: `https://www.bilibili.com/video/${encodeURIComponent(bvid)}`,
-      requiresMagic: false
+  if (fileNameMode) {
+    if (!EXTERNAL_VIDEO_EXTENSIONS.has(ext)) {
+      return null
     }
+
+    if (ext === '.bili' || ext === '.video') {
+      const m = baseName.match(/^(BV[0-9A-Za-z]{10})$/)
+      if (m) return makeBilibiliSource(m[1])
+    }
+
+    if (ext === '.youtube' || ext === '.video') {
+      const m =
+        baseName.match(/^(?:yt|youtube)-([A-Za-z0-9_-]{11})$/i) ||
+        (ext === '.youtube' ? baseName.match(/^([A-Za-z0-9_-]{11})$/) : null)
+      if (m) return makeYoutubeSource(m[1])
+    }
+
+    if (ext === '.niconico' || ext === '.video') {
+      const m = baseName.match(/^((?:sm|nm|so)\d+)$/i)
+      if (m) return makeNiconicoSource(m[1])
+    }
+
+    if (ext === '.vimeo' || ext === '.video') {
+      const m =
+        baseName.match(/^vimeo-(\d+)$/i) ||
+        (ext === '.vimeo' ? baseName.match(/^(\d+)$/) : null)
+      if (m) return makeVimeoSource(m[1])
+    }
+
+    if (ext === '.douyin' || ext === '.video') {
+      const m =
+        baseName.match(/^douyin-(\d+)$/i) ||
+        (ext === '.douyin' ? baseName.match(/^(\d+)$/) : null)
+      if (m) return makeDouyinSource(m[1])
+    }
+
+    if (ext === '.qq' || ext === '.video') {
+      const m =
+        baseName.match(/^qq-([A-Za-z0-9]+)$/i) ||
+        (ext === '.qq' ? baseName.match(/^([A-Za-z0-9]+)$/) : null)
+      if (m) return makeTencentSource(m[1])
+    }
+
+    if (ext === '.youku' || ext === '.video') {
+      const m =
+        baseName.match(/^youku-([A-Za-z0-9=_-]+)$/i) ||
+        (ext === '.youku' ? baseName.match(/^([A-Za-z0-9=_-]+)$/) : null)
+      if (m) return makeYoukuSource(m[1])
+    }
+
+    return null
   }
 
-  // 2. YouTube
-  const ytUrlMatch = !fileNameMode
-    ? trimmed.match(/(?:youtube\.com\/(?:watch\?(?:[^#\s]*&)?v=|shorts\/|embed\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/i)
-    : null
-  const ytFileMatch =
-    baseName.match(/^(?:yt|youtube)-([A-Za-z0-9_-]{11})$/i) ||
-    (ext === '.youtube' ? baseName.match(/^([A-Za-z0-9_-]{11})$/) : null)
-  const ytMatch = ytUrlMatch || ytFileMatch
-  if (ytMatch) {
-    const id = ytMatch[1]
-    return {
-      platform: 'youtube',
-      platformLabel: 'YouTube',
-      videoId: id,
-      suggestedFileName: `${id}.youtube`,
-      embedUrl: `https://www.youtube.com/embed/${encodeURIComponent(id)}`,
-      watchUrl: `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`,
-      requiresMagic: true
-    }
+  // 文本输入模式：先尝试所有平台的完整 URL 正则
+  const biliUrlMatch = trimmed.match(/bilibili\.com\/video\/(BV[0-9A-Za-z]{10})/i)
+  if (biliUrlMatch) return makeBilibiliSource(biliUrlMatch[1])
+
+  const ytUrlMatch = trimmed.match(
+    /(?:youtube\.com\/(?:watch\?(?:[^#\s]*&)?v=|shorts\/|embed\/|live\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/i
+  )
+  if (ytUrlMatch) return makeYoutubeSource(ytUrlMatch[1])
+
+  const nicoUrlMatch = trimmed.match(/nicovideo\.jp\/watch\/((?:sm|nm|so)\d+)/i)
+  if (nicoUrlMatch) return makeNiconicoSource(nicoUrlMatch[1])
+
+  const vimeoUrlMatch = trimmed.match(/(?:player\.)?vimeo\.com\/(?:video\/)?(\d+)/i)
+  if (vimeoUrlMatch) return makeVimeoSource(vimeoUrlMatch[1])
+
+  const douyinUrlMatch = trimmed.match(
+    /(?:douyin\.com\/video\/(\d+)|iesdouyin\.com\/share\/video\/(\d+)|douyin\.com\/[^\s]*[?&]modal_id=(\d+))/i
+  )
+  if (douyinUrlMatch) {
+    const douyinId = douyinUrlMatch[1] || douyinUrlMatch[2] || douyinUrlMatch[3]
+    if (douyinId) return makeDouyinSource(douyinId)
   }
 
-  // 3. Niconico
-  const nicoUrlMatch = !fileNameMode
-    ? trimmed.match(/nicovideo\.jp\/watch\/((?:sm|nm|so)\d+)/i)
-    : null
-  const nicoFileMatch = baseName.match(/^((?:sm|nm|so)\d+)$/i)
-  const nicoMatch = nicoUrlMatch || nicoFileMatch
-  if (nicoMatch) {
-    const id = nicoMatch[1].toLowerCase()
-    return {
-      platform: 'niconico',
-      platformLabel: 'Niconico',
-      videoId: id,
-      suggestedFileName: `${id}.niconico`,
-      embedUrl: `https://embed.nicovideo.jp/watch/${encodeURIComponent(id)}`,
-      watchUrl: `https://www.nicovideo.jp/watch/${encodeURIComponent(id)}`,
-      requiresMagic: true
-    }
-  }
+  const tencentUrlMatch = trimmed.match(
+    /v\.qq\.com\/x\/(?:page|cover\/[^/]+)\/([A-Za-z0-9]+)\.html/i
+  )
+  if (tencentUrlMatch) return makeTencentSource(tencentUrlMatch[1])
 
-  // 4. Vimeo
-  const vimeoUrlMatch = !fileNameMode
-    ? trimmed.match(/(?:player\.)?vimeo\.com\/(?:video\/)?(\d+)/i)
-    : null
-  const vimeoFileMatch =
-    baseName.match(/^vimeo-(\d+)$/i) || (ext === '.vimeo' ? baseName.match(/^(\d+)$/) : null)
-  const vimeoMatch = vimeoUrlMatch || vimeoFileMatch
-  if (vimeoMatch) {
-    const id = vimeoMatch[1]
-    return {
-      platform: 'vimeo',
-      platformLabel: 'Vimeo',
-      videoId: id,
-      suggestedFileName: `${id}.vimeo`,
-      embedUrl: `https://player.vimeo.com/video/${encodeURIComponent(id)}`,
-      watchUrl: `https://vimeo.com/${encodeURIComponent(id)}`,
-      requiresMagic: true
-    }
-  }
+  const youkuUrlMatch = trimmed.match(/v\.youku\.com\/v_show\/id_([A-Za-z0-9=_-]+)/i)
+  if (youkuUrlMatch) return makeYoukuSource(youkuUrlMatch[1])
 
-  // 5. Douyin
-  const douyinUrlMatch = !fileNameMode
-    ? trimmed.match(
-        /(?:douyin\.com\/video\/(\d+)|iesdouyin\.com\/share\/video\/(\d+)|douyin\.com\/[^\s]*[?&]modal_id=(\d+))/i
-      )
-    : null
-  const douyinFileMatch =
-    baseName.match(/^douyin-(\d+)$/i) || (ext === '.douyin' ? baseName.match(/^(\d+)$/) : null)
-  const douyinId = douyinUrlMatch
-    ? douyinUrlMatch[1] || douyinUrlMatch[2] || douyinUrlMatch[3]
-    : douyinFileMatch?.[1]
-  if (douyinId) {
-    return {
-      platform: 'douyin',
-      platformLabel: '抖音',
-      videoId: douyinId,
-      suggestedFileName: `${douyinId}.douyin`,
-      embedUrl: `https://open.douyin.com/player/video?vid=${encodeURIComponent(douyinId)}&autoplay=0`,
-      watchUrl: `https://www.douyin.com/video/${encodeURIComponent(douyinId)}`,
-      requiresMagic: false
-    }
-  }
+  // 兜底：纯 ID 或平台前缀 ID 匹配（避免 \bBV...\b 误伤其他平台 URL）
+  const biliIdMatch = baseName.match(/^(BV[0-9A-Za-z]{10})$/) || trimmed.match(/\b(BV[0-9A-Za-z]{10})\b/)
+  if (biliIdMatch) return makeBilibiliSource(biliIdMatch[1])
 
-  // 6. Tencent Video
-  const tencentUrlMatch = !fileNameMode
-    ? trimmed.match(/v\.qq\.com\/x\/(?:page|cover\/[^/]+)\/([A-Za-z0-9]+)\.html/i)
-    : null
-  const tencentFileMatch =
-    baseName.match(/^qq-([A-Za-z0-9]+)$/i) ||
-    (ext === '.qq' ? baseName.match(/^([A-Za-z0-9]+)$/) : null)
-  const tencentMatch = tencentUrlMatch || tencentFileMatch
-  if (tencentMatch) {
-    const id = tencentMatch[1]
-    return {
-      platform: 'tencent',
-      platformLabel: '腾讯视频',
-      videoId: id,
-      suggestedFileName: `${id}.qq`,
-      embedUrl: `https://v.qq.com/txp/iframe/player.html?vid=${encodeURIComponent(id)}`,
-      watchUrl: `https://v.qq.com/x/page/${encodeURIComponent(id)}.html`,
-      requiresMagic: false
-    }
-  }
+  const ytIdMatch = baseName.match(/^(?:yt|youtube)-([A-Za-z0-9_-]{11})$/i)
+  if (ytIdMatch) return makeYoutubeSource(ytIdMatch[1])
 
-  // 7. Youku
-  const youkuUrlMatch = !fileNameMode
-    ? trimmed.match(/v\.youku\.com\/v_show\/id_([A-Za-z0-9=]+)/i)
-    : null
-  const youkuFileMatch =
-    baseName.match(/^youku-([A-Za-z0-9=]+)$/i) ||
-    (ext === '.youku' ? baseName.match(/^([A-Za-z0-9=]+)$/) : null)
-  const youkuMatch = youkuUrlMatch || youkuFileMatch
-  if (youkuMatch) {
-    const id = youkuMatch[1]
-    return {
-      platform: 'youku',
-      platformLabel: '优酷',
-      videoId: id,
-      suggestedFileName: `${id}.youku`,
-      embedUrl: `https://player.youku.com/embed/${encodeURIComponent(id)}`,
-      watchUrl: `https://v.youku.com/v_show/id_${encodeURIComponent(id)}.html`,
-      requiresMagic: false
-    }
-  }
+  const nicoIdMatch = baseName.match(/^((?:sm|nm|so)\d+)$/i)
+  if (nicoIdMatch) return makeNiconicoSource(nicoIdMatch[1])
+
+  const vimeoIdMatch = baseName.match(/^vimeo-(\d+)$/i)
+  if (vimeoIdMatch) return makeVimeoSource(vimeoIdMatch[1])
+
+  const douyinIdMatch = baseName.match(/^douyin-(\d+)$/i)
+  if (douyinIdMatch) return makeDouyinSource(douyinIdMatch[1])
+
+  const tencentIdMatch = baseName.match(/^qq-([A-Za-z0-9]+)$/i)
+  if (tencentIdMatch) return makeTencentSource(tencentIdMatch[1])
+
+  const youkuIdMatch = baseName.match(/^youku-([A-Za-z0-9=_-]+)$/i)
+  if (youkuIdMatch) return makeYoukuSource(youkuIdMatch[1])
 
   return null
 }

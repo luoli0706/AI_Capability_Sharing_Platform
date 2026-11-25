@@ -13,6 +13,10 @@ import type {
   UserInfo
 } from '@/types/api'
 
+export function sendRegisterEmailCode(email: string): Promise<null> {
+  return apiPost<null, { email: string }>('/auth/email/send-code', { email })
+}
+
 export function register(data: RegisterPayload): Promise<{ user: UserInfo }> {
   return apiPost<{ user: UserInfo }, RegisterPayload>('/auth/register', data)
 }

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"os"
 	"os/exec"
@@ -23,7 +24,6 @@ import (
 )
 
 const (
-	sevenODefaultPassword      = "7thcv"
 	sevenODefaultLevel         = 3
 	sevenOExecTimeout          = 60 * time.Second
 	sevenODefaultMaxConcurrent = 2
@@ -185,7 +185,7 @@ func (s *SevenOService) EncryptFiles(ctx context.Context, files []*multipart.Fil
 		return nil, "", NewBadRequest("at least one file is required")
 	}
 	if strings.TrimSpace(password) == "" {
-		password = sevenODefaultPassword
+		return nil, "", NewBadRequest("password is required")
 	}
 	if level == 0 {
 		level = sevenODefaultLevel
@@ -263,7 +263,8 @@ func (s *SevenOService) EncryptFiles(ctx context.Context, files []*multipart.Fil
 		if errors.Is(err, context.DeadlineExceeded) {
 			return nil, "", NewBadRequest("7o 加密执行超时")
 		}
-		return nil, "", fmt.Errorf("7o encrypt failed: %w: %s", err, stderr)
+		log.Printf("[7o] encrypt failed: err=%v stderr=%s", err, stderr)
+		return nil, "", NewBadRequest("7o 加密执行失败，请检查输入文件后重试")
 	}
 
 	zipBytes, err := os.ReadFile(outZip)
@@ -279,7 +280,7 @@ func (s *SevenOService) DecryptZip(ctx context.Context, zipReader io.Reader, pas
 		return nil, NewBadRequest("file is required")
 	}
 	if strings.TrimSpace(password) == "" {
-		password = sevenODefaultPassword
+		return nil, NewBadRequest("password is required")
 	}
 
 	if err := s.acquireSlot(); err != nil {
@@ -314,7 +315,8 @@ func (s *SevenOService) DecryptZip(ctx context.Context, zipReader io.Reader, pas
 		if isWrongKeyError(stderr) {
 			return nil, NewBadRequest("密钥错误，无法解密该 7o 压缩包")
 		}
-		return nil, fmt.Errorf("7o decrypt failed: %w: %s", err, stderr)
+		log.Printf("[7o] decrypt failed: err=%v stderr=%s", err, stderr)
+		return nil, NewBadRequest("7o 解密执行失败，请确认压缩包格式正确")
 	}
 
 	return packDirToZip(extractDir)
@@ -350,7 +352,8 @@ func (s *SevenOService) InspectZip(ctx context.Context, zipReader io.Reader) (ma
 		if errors.Is(err, context.DeadlineExceeded) {
 			return nil, NewBadRequest("7o 解析执行超时")
 		}
-		return nil, fmt.Errorf("7o inspect failed: %w: %s", err, stderr)
+		log.Printf("[7o] inspect failed: err=%v stderr=%s", err, stderr)
+		return nil, NewBadRequest("7o 解析执行失败，请确认压缩包格式正确")
 	}
 
 	var result map[string]interface{}

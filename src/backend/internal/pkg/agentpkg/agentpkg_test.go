@@ -1,6 +1,7 @@
 package agentpkg
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -100,5 +101,33 @@ func TestBuildAgentMarkdown(t *testing.T) {
 	}
 	if parsed.Slug != "qa-bot" || parsed.Name != "QA Bot" || parsed.ModelProvider != "openai" || parsed.SystemPrompt != "Be concise." {
 		t.Fatalf("unexpected roundtrip result: %+v", parsed)
+	}
+}
+
+func TestIsDomainOrSubdomain(t *testing.T) {
+	if !isDomainOrSubdomain("agentverse.ai", "agentverse.ai") {
+		t.Fatal("exact domain should match")
+	}
+	if !isDomainOrSubdomain("sub.agentverse.ai", "agentverse.ai") {
+		t.Fatal("subdomain should match")
+	}
+	if isDomainOrSubdomain("agentverse.ai.evil.com", "agentverse.ai") {
+		t.Fatal("suffix bypass domain should NOT match")
+	}
+	if isDomainOrSubdomain("evilagentverse.ai", "agentverse.ai") {
+		t.Fatal("prefix bypass domain should NOT match")
+	}
+}
+
+func TestImportAgentFromURL_RejectsUnsafeSchemesAndLoopback(t *testing.T) {
+	for _, bad := range []string{
+		"file:///etc/passwd",
+		"gopher://127.0.0.1:6379/_INFO",
+		"http://127.0.0.1:8080/agent.md",
+		"http://169.254.169.254/latest/meta-data/",
+	} {
+		if _, err := ImportAgentFromURL(context.Background(), bad); err == nil {
+			t.Fatalf("expected ImportAgentFromURL to reject %q", bad)
+		}
 	}
 }

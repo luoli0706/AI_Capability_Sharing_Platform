@@ -1,8 +1,10 @@
 package service
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
+	"math/big"
 	"time"
 
 	"ascp-backend/internal/model"
@@ -54,6 +56,15 @@ func NewGovernanceService(
 		domainRepo: domainRepo,
 		orgRepo:    orgRepo,
 	}
+}
+
+func generateRequestNo() string {
+	n, err := rand.Int(rand.Reader, big.NewInt(10000))
+	suffix := 0
+	if err == nil {
+		suffix = int(n.Int64())
+	}
+	return fmt.Sprintf("APR-%s-%04d", time.Now().Format("20060102150405"), suffix)
 }
 
 func (s *governanceService) SubscribeAsset(userID, assetID uint64) (*model.AssetPermission, error) {
@@ -128,7 +139,7 @@ func (s *governanceService) CreateApproval(userID uint64, req model.CreateApprov
 		applicantDomainID = domainIDs[0]
 	}
 
-	requestNo := fmt.Sprintf("APR-%s-%04d", time.Now().Format("20060102150405"), time.Now().Nanosecond()%10000)
+	requestNo := generateRequestNo()
 	approvalReq := &model.ApprovalRequest{
 		RequestNo:         requestNo,
 		ApplicantID:       userID,
@@ -198,7 +209,7 @@ func (s *governanceService) RequestJoinOrg(userID, orgID uint64, reason string) 
 	if reason == "" {
 		reason = "申请加入组织 " + org.OrgName
 	}
-	requestNo := fmt.Sprintf("APR-%s-%04d", time.Now().Format("20060102150405"), time.Now().Nanosecond()%10000)
+	requestNo := generateRequestNo()
 	approvalReq := &model.ApprovalRequest{
 		RequestNo:     requestNo,
 		ApplicantID:   userID,
