@@ -5,12 +5,15 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"ascp-backend/internal/config"
 	"ascp-backend/internal/handler"
 	ascpMiddleware "ascp-backend/internal/middleware"
 	"ascp-backend/internal/pkg/mailer"
+	"ascp-backend/internal/pkg/ossstore"
 	"ascp-backend/internal/pkg/response"
 	"ascp-backend/internal/pkg/validator"
 	"ascp-backend/internal/repository"
@@ -111,6 +114,39 @@ func main() {
 		logger.Warn("failed to encrypt existing plain KB files at rest", zap.Error(err))
 	} else if encryptedCount > 0 {
 		logger.Info("encrypted existing plain KB files at rest", zap.Int("count", encryptedCount))
+	}
+
+	tierCtx, tierCancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer tierCancel()
+	if cfg.OSS.AccessKeyID != "" && cfg.OSS.AccessKeySecret != "" {
+		ossStore, ossErr := ossstore.NewAliyunOSSStore(
+			cfg.OSS.Endpoint,
+			cfg.OSS.AccessKeyID,
+			cfg.OSS.AccessKeySecret,
+			cfg.OSS.Bucket,
+		)
+		if ossErr != nil {
+			logger.Warn("failed to initialize aliyun OSS store; tiered storage disabled", zap.Error(ossErr))
+		} else {
+			tierSvc := service.NewStorageTierService(
+				kbRepo,
+				ossStore,
+				cfg.Storage.UploadDir,
+				cfg.OSS.RetentionHours,
+				cfg.OSS.MaxLocalMB,
+				logger,
+			)
+			kbSvc.SetStorageTierService(tierSvc)
+			tierSvc.Start(tierCtx)
+			logger.Info("ECS <-> OSS tiered storage service started",
+				zap.String("bucket", cfg.OSS.Bucket),
+				zap.String("endpoint", ossstore.NormalizeEndpoint(cfg.OSS.Endpoint, cfg.OSS.Bucket)),
+				zap.Int("retention_hours", cfg.OSS.RetentionHours),
+				zap.Int64("max_local_mb", cfg.OSS.MaxLocalMB),
+			)
+		}
+	} else {
+		logger.Info("OSS AK/SK not configured; tiered storage disabled (local-only mode)")
 	}
 	govSvc := service.NewGovernanceService(govRepo, assetRepo, domainRepo, orgRepo)
 	keySvc := service.NewAPIKeyService(keyRepo)
@@ -320,6 +356,12 @@ func main() {
 	invoke.POST("/kb/:assetCode/query", invokeHandler.InvokeKB)
 
 	logger.Info("starting ASCP backend server", zap.String("port", cfg.Server.Port))
+	go func() {
+		<-tierCtx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = e.Shutdown(shutdownCtx)
+	}()
 	if err := e.Start(cfg.Server.Port); err != nil && err != http.ErrServerClosed {
 		logger.Fatal("server exited with error", zap.Error(err))
 	}

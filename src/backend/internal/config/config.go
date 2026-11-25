@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -14,6 +15,7 @@ type Config struct {
 	Database DatabaseConfig `mapstructure:"database"`
 	JWT      JWTConfig      `mapstructure:"jwt"`
 	Storage  StorageConfig  `mapstructure:"storage"`
+	OSS      OSSConfig      `mapstructure:"oss"`
 	SevenO   SevenOConfig   `mapstructure:"seveno"`
 	Email    EmailConfig    `mapstructure:"email"`
 	CORS     CORSConfig     `mapstructure:"cors"`
@@ -38,6 +40,15 @@ type JWTConfig struct {
 type StorageConfig struct {
 	UploadDir string `mapstructure:"upload_dir"`
 	Secret    string `mapstructure:"secret"`
+}
+
+type OSSConfig struct {
+	AccessKeyID     string `mapstructure:"access_key_id"`
+	AccessKeySecret string `mapstructure:"access_key_secret"`
+	Bucket          string `mapstructure:"bucket"`
+	Endpoint        string `mapstructure:"endpoint"`
+	RetentionHours  int    `mapstructure:"retention_hours"`
+	MaxLocalMB      int64  `mapstructure:"max_local_mb"`
 }
 
 type EmailConfig struct {
@@ -157,6 +168,41 @@ func loadFrom(path, dotEnvPath string) (*Config, error) {
 	}
 	if cfg.SevenO.ReleaseDir == "" {
 		cfg.SevenO.ReleaseDir = "./releases"
+	}
+
+	if ossAK := getEnvValue(dotEnv, "OSS_AK"); ossAK != "" {
+		cfg.OSS.AccessKeyID = ossAK
+	}
+	if ossSK := getEnvValue(dotEnv, "OSS_SK"); ossSK != "" {
+		cfg.OSS.AccessKeySecret = ossSK
+	}
+	if ossBucket := getEnvValue(dotEnv, "OSS_BUCKET"); ossBucket != "" {
+		cfg.OSS.Bucket = ossBucket
+	}
+	if cfg.OSS.Bucket == "" {
+		cfg.OSS.Bucket = "ascp-7thcv-sh"
+	}
+	if ossEndpoint := getEnvValue(dotEnv, "OSS_ENDPOINT"); ossEndpoint != "" {
+		cfg.OSS.Endpoint = ossEndpoint
+	}
+	if cfg.OSS.Endpoint == "" {
+		cfg.OSS.Endpoint = "oss-cn-shanghai-internal.aliyuncs.com"
+	}
+	if retentionStr := getEnvValue(dotEnv, "OSS_LOCAL_RETENTION_HOURS"); retentionStr != "" {
+		if v, err := strconv.Atoi(retentionStr); err == nil && v > 0 {
+			cfg.OSS.RetentionHours = v
+		}
+	}
+	if cfg.OSS.RetentionHours <= 0 {
+		cfg.OSS.RetentionHours = 48
+	}
+	if maxMBStr := getEnvValue(dotEnv, "OSS_LOCAL_MAX_MB"); maxMBStr != "" {
+		if v, err := strconv.ParseInt(maxMBStr, 10, 64); err == nil && v > 0 {
+			cfg.OSS.MaxLocalMB = v
+		}
+	}
+	if cfg.OSS.MaxLocalMB <= 0 {
+		cfg.OSS.MaxLocalMB = 8192
 	}
 
 	return &cfg, nil

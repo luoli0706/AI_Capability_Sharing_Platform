@@ -36,6 +36,13 @@ type KBRepository interface {
 	RestoreDocument(kbAssetID, docID uint64) error
 	RestoreFolderRecursive(kbAssetID, folderDocID uint64, folderPath string, deletedAt time.Time) error
 	SearchChunks(kbAssetID uint64, query string, topK int) ([]model.KBSearchHit, error)
+	FindDocumentByFilePath(filePath string) (*model.KBDocument, error)
+	UpdateStorageSyncState(docID uint64, tier, ossKey string, syncedAt, lastAccessedAt *time.Time) error
+	TouchLastAccessed(docID uint64, accessedAt time.Time) error
+	ListUnsyncedLocalDocs(limit int) ([]model.KBDocument, error)
+	ListEvictableSyncedDocs(cutoff time.Time, limit int) ([]model.KBDocument, error)
+	ListLRUSyncedDocs(limit int) ([]model.KBDocument, error)
+	TryMarkOSSOnly(docID uint64, cutoff *time.Time) (bool, error)
 }
 
 type kbRepository struct {
@@ -557,4 +564,93 @@ func (r *kbRepository) SearchChunks(kbAssetID uint64, query string, topK int) ([
 		hits = []model.KBSearchHit{}
 	}
 	return hits, nil
+}
+
+func (r *kbRepository) FindDocumentByFilePath(filePath string) (*model.KBDocument, error) {
+	var doc model.KBDocument
+	if err := r.db.Where("is_folder = ? AND file_path = ?", false, filePath).First(&doc).Error; err != nil {
+		return nil, err
+	}
+	return &doc, nil
+}
+
+func (r *kbRepository) UpdateStorageSyncState(docID uint64, tier, ossKey string, syncedAt, lastAccessedAt *time.Time) error {
+	updates := map[string]interface{}{
+		"storage_tier": tier,
+		"oss_key":      ossKey,
+	}
+	if syncedAt != nil {
+		updates["oss_synced_at"] = syncedAt
+	}
+	if lastAccessedAt != nil {
+		updates["last_accessed_at"] = lastAccessedAt
+	}
+	return r.db.Model(&model.KBDocument{}).Where("id = ?", docID).Updates(updates).Error
+}
+
+func (r *kbRepository) TouchLastAccessed(docID uint64, accessedAt time.Time) error {
+	return r.db.Model(&model.KBDocument{}).Where("id = ?", docID).Update("last_accessed_at", accessedAt).Error
+}
+
+func (r *kbRepository) ListUnsyncedLocalDocs(limit int) ([]model.KBDocument, error) {
+	tx := r.db.Where("is_folder = ? AND file_path <> '' AND (storage_tier = ? OR storage_tier = '')", false, model.StorageTierLocal).
+		Order("id ASC")
+	if limit > 0 {
+		tx = tx.Limit(limit)
+	}
+	var docs []model.KBDocument
+	if err := tx.Find(&docs).Error; err != nil {
+		return nil, err
+	}
+	if docs == nil {
+		docs = []model.KBDocument{}
+	}
+	return docs, nil
+}
+
+func (r *kbRepository) ListEvictableSyncedDocs(cutoff time.Time, limit int) ([]model.KBDocument, error) {
+	tx := r.db.Where(
+		"is_folder = ? AND file_path <> '' AND storage_tier = ? AND ((last_accessed_at IS NOT NULL AND last_accessed_at < ?) OR (last_accessed_at IS NULL AND updated_at < ?))",
+		false, model.StorageTierSynced, cutoff, cutoff,
+	).Order("COALESCE(last_accessed_at, updated_at) ASC, id ASC")
+	if limit > 0 {
+		tx = tx.Limit(limit)
+	}
+	var docs []model.KBDocument
+	if err := tx.Find(&docs).Error; err != nil {
+		return nil, err
+	}
+	if docs == nil {
+		docs = []model.KBDocument{}
+	}
+	return docs, nil
+}
+
+func (r *kbRepository) ListLRUSyncedDocs(limit int) ([]model.KBDocument, error) {
+	tx := r.db.Where("is_folder = ? AND file_path <> '' AND storage_tier = ?", false, model.StorageTierSynced).
+		Order("COALESCE(last_accessed_at, updated_at) ASC, id ASC")
+	if limit > 0 {
+		tx = tx.Limit(limit)
+	}
+	var docs []model.KBDocument
+	if err := tx.Find(&docs).Error; err != nil {
+		return nil, err
+	}
+	if docs == nil {
+		docs = []model.KBDocument{}
+	}
+	return docs, nil
+}
+
+func (r *kbRepository) TryMarkOSSOnly(docID uint64, cutoff *time.Time) (bool, error) {
+	tx := r.db.Model(&model.KBDocument{}).
+		Where("id = ? AND storage_tier = ?", docID, model.StorageTierSynced)
+	if cutoff != nil {
+		tx = tx.Where("((last_accessed_at IS NOT NULL AND last_accessed_at < ?) OR (last_accessed_at IS NULL AND updated_at < ?))", *cutoff, *cutoff)
+	}
+	res := tx.Update("storage_tier", model.StorageTierOSSOnly)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
 }

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 )
 
 type mockFileKBRepo struct {
+	mu          sync.RWMutex
 	nextID      uint64
 	docs        map[uint64]*model.KBDocument
 	chunks      map[uint64][]model.KBChunk
@@ -375,6 +377,150 @@ func (m *mockFileKBRepo) SearchChunks(kbAssetID uint64, query string, topK int) 
 		}
 	}
 	return hits, nil
+}
+
+func (m *mockFileKBRepo) FindDocumentByFilePath(filePath string) (*model.KBDocument, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, d := range m.docs {
+		if !d.DeletedAt.Valid && !d.IsFolder && d.FilePath == filePath {
+			cp := *d
+			return &cp, nil
+		}
+	}
+	return nil, gorm.ErrRecordNotFound
+}
+
+func (m *mockFileKBRepo) UpdateStorageSyncState(docID uint64, tier, ossKey string, syncedAt, lastAccessedAt *time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	d, ok := m.docs[docID]
+	if !ok || d.DeletedAt.Valid {
+		return gorm.ErrRecordNotFound
+	}
+	d.StorageTier = tier
+	d.OSSKey = ossKey
+	if syncedAt != nil {
+		t := *syncedAt
+		d.OSSSyncedAt = &t
+	}
+	if lastAccessedAt != nil {
+		t := *lastAccessedAt
+		d.LastAccessedAt = &t
+	}
+	return nil
+}
+
+func (m *mockFileKBRepo) TouchLastAccessed(docID uint64, accessedAt time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	d, ok := m.docs[docID]
+	if !ok || d.DeletedAt.Valid {
+		return gorm.ErrRecordNotFound
+	}
+	t := accessedAt
+	d.LastAccessedAt = &t
+	return nil
+}
+
+func (m *mockFileKBRepo) ListUnsyncedLocalDocs(limit int) ([]model.KBDocument, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []model.KBDocument
+	for _, d := range m.docs {
+		if !d.DeletedAt.Valid && !d.IsFolder && d.FilePath != "" &&
+			(d.StorageTier == model.StorageTierLocal || d.StorageTier == "") {
+			out = append(out, *d)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (m *mockFileKBRepo) ListEvictableSyncedDocs(cutoff time.Time, limit int) ([]model.KBDocument, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []model.KBDocument
+	for _, d := range m.docs {
+		if d.DeletedAt.Valid || d.IsFolder || d.FilePath == "" || d.StorageTier != model.StorageTierSynced {
+			continue
+		}
+		acc := d.UpdatedAt
+		if d.LastAccessedAt != nil {
+			acc = *d.LastAccessedAt
+		}
+		if acc.Before(cutoff) {
+			out = append(out, *d)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		ti, tj := out[i].UpdatedAt, out[j].UpdatedAt
+		if out[i].LastAccessedAt != nil {
+			ti = *out[i].LastAccessedAt
+		}
+		if out[j].LastAccessedAt != nil {
+			tj = *out[j].LastAccessedAt
+		}
+		if ti.Equal(tj) {
+			return out[i].ID < out[j].ID
+		}
+		return ti.Before(tj)
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (m *mockFileKBRepo) ListLRUSyncedDocs(limit int) ([]model.KBDocument, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []model.KBDocument
+	for _, d := range m.docs {
+		if !d.DeletedAt.Valid && !d.IsFolder && d.FilePath != "" && d.StorageTier == model.StorageTierSynced {
+			out = append(out, *d)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		ti, tj := out[i].UpdatedAt, out[j].UpdatedAt
+		if out[i].LastAccessedAt != nil {
+			ti = *out[i].LastAccessedAt
+		}
+		if out[j].LastAccessedAt != nil {
+			tj = *out[j].LastAccessedAt
+		}
+		if ti.Equal(tj) {
+			return out[i].ID < out[j].ID
+		}
+		return ti.Before(tj)
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (m *mockFileKBRepo) TryMarkOSSOnly(docID uint64, cutoff *time.Time) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	d, ok := m.docs[docID]
+	if !ok || d.DeletedAt.Valid || d.StorageTier != model.StorageTierSynced {
+		return false, nil
+	}
+	if cutoff != nil {
+		acc := d.UpdatedAt
+		if d.LastAccessedAt != nil {
+			acc = *d.LastAccessedAt
+		}
+		if !acc.Before(*cutoff) {
+			return false, nil
+		}
+	}
+	d.StorageTier = model.StorageTierOSSOnly
+	return true, nil
 }
 
 func TestNormalizeFolderPath(t *testing.T) {

@@ -179,6 +179,7 @@ type KBService interface {
 	SetAuditRepos(auditRepo repository.AuditLogRepository, userRepo repository.UserRepository)
 	SetCrossRefRepo(crossRefRepo repository.CrossRefRepository)
 	SetInteractionRepo(interactionRepo repository.KBInteractionRepository)
+	SetStorageTierService(tierSvc *StorageTierService)
 }
 
 type kbService struct {
@@ -191,6 +192,7 @@ type kbService struct {
 	interactionRepo repository.KBInteractionRepository
 	auditRepo       repository.AuditLogRepository
 	userRepo        repository.UserRepository
+	tierSvc         *StorageTierService
 	uploadDir       string
 	storageSecret   string
 	httpClient      *http.Client
@@ -207,6 +209,10 @@ func (s *kbService) SetCrossRefRepo(crossRefRepo repository.CrossRefRepository) 
 
 func (s *kbService) SetInteractionRepo(interactionRepo repository.KBInteractionRepository) {
 	s.interactionRepo = interactionRepo
+}
+
+func (s *kbService) SetStorageTierService(tierSvc *StorageTierService) {
+	s.tierSvc = tierSvc
 }
 
 func NewKBService(
@@ -246,6 +252,11 @@ func (s *kbService) encryptAndWriteFile(filePath string, plain []byte) error {
 }
 
 func (s *kbService) readAndDecryptFile(filePath string) ([]byte, error) {
+	if s.tierSvc != nil {
+		if err := s.tierSvc.EnsureLocalFile(context.Background(), filePath); err != nil {
+			return nil, err
+		}
+	}
 	diskBytes, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, err
@@ -484,6 +495,9 @@ func (s *kbService) UpdateMarkdownContent(userID uint64, isSuperAdmin bool, kbID
 	if err := s.kbRepo.ReplaceDocumentChunks(kbID, doc, chunks); err != nil {
 		return nil, err
 	}
+	if s.tierSvc != nil && doc.FilePath != "" {
+		s.tierSvc.MarkLocalAndEnqueueSync(doc.ID, doc.FilePath)
+	}
 
 	recordAudit(s.auditRepo, s.userRepo, userID, detail.DomainID, detail.DomainName, detail.ID, detail.AssetCode, detail.Name, detail.AssetType, model.AuditActionKBFileUpdate, relativeDocPath(*doc), "编辑文档 "+relativeDocPath(*doc))
 	return doc, nil
@@ -626,6 +640,9 @@ func (s *kbService) persistKBFileAndChunks(
 		_ = s.kbRepo.RecalculateKBCounts(detail.ID)
 	} else {
 		doc.ChunkCount = len(chunks)
+	}
+	if s.tierSvc != nil && doc.FilePath != "" {
+		s.tierSvc.MarkLocalAndEnqueueSync(doc.ID, doc.FilePath)
 	}
 	return doc, nil
 }

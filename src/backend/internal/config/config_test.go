@@ -31,6 +31,7 @@ storage:
 	for _, k := range []string{
 		"MYSQL_USER", "MYSQL_PASSWORD", "MYSQL_HOST", "MYSQL_PORT", "MYSQL_DATABASE", "JWT_SECRET",
 		"SERVER_MODE", "STORAGE_SECRET", "Aliyun_User_AK", "Aliyun_User_SK", "ALIYUN_DM_ENDPOINT", "ALIYUN_DM_ACCOUNT_NAME", "CORS_ALLOWED_ORIGINS",
+		"OSS_AK", "OSS_SK", "OSS_BUCKET", "OSS_ENDPOINT", "OSS_LOCAL_RETENTION_HOURS", "OSS_LOCAL_MAX_MB",
 	} {
 		t.Setenv(k, "")
 	}
@@ -40,6 +41,9 @@ storage:
 	}
 	if cfg.Email.Endpoint != "dm.aliyuncs.com" || cfg.Email.AccountName != "verify@email.7thcv.cn" {
 		t.Fatalf("unexpected default email config: %+v", cfg.Email)
+	}
+	if cfg.OSS.Bucket != "ascp-7thcv-sh" || cfg.OSS.Endpoint != "oss-cn-shanghai-internal.aliyuncs.com" || cfg.OSS.RetentionHours != 48 || cfg.OSS.MaxLocalMB != 8192 {
+		t.Fatalf("unexpected default OSS config: %+v", cfg.OSS)
 	}
 	wantYAML := "yaml_user:yaml_pass@tcp(127.0.0.1:3306)/yaml_db?charset=utf8mb4&parseTime=True&loc=Local"
 	if cfg.Database.DSN != wantYAML {

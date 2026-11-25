@@ -43,6 +43,12 @@ services:
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
       Aliyun_User_AK: ${Aliyun_User_AK:-}
       Aliyun_User_SK: ${Aliyun_User_SK:-}
+      OSS_AK: ${OSS_AK:-}
+      OSS_SK: ${OSS_SK:-}
+      OSS_BUCKET: ${OSS_BUCKET:-ascp-7thcv-sh}
+      OSS_ENDPOINT: ${OSS_ENDPOINT:-oss-cn-shanghai-internal.aliyuncs.com}
+      OSS_LOCAL_RETENTION_HOURS: ${OSS_LOCAL_RETENTION_HOURS:-48}
+      OSS_LOCAL_MAX_MB: ${OSS_LOCAL_MAX_MB:-8192}
       SEVENO_BIN_PATH: /app/releases/seventhcv-7o-linux
       SEVENO_RELEASE_DIR: /app/releases
     volumes:

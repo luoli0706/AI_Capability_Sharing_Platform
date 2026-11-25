@@ -42,6 +42,10 @@ const (
 
 	AuthModeJWT    = "jwt"
 	AuthModeAPIKey = "api_key"
+
+	StorageTierLocal   = "local"
+	StorageTierSynced  = "synced"
+	StorageTierOSSOnly = "oss_only"
 )
 
 type UserAPIKey struct {
@@ -87,10 +91,14 @@ type KBDocument struct {
 	FileSize    uint64         `gorm:"not null;default:0" json:"file_size"`
 	FilePath    string         `gorm:"type:varchar(512);not null" json:"file_path"`
 	FileHash    string         `gorm:"type:varchar(128);not null;default:''" json:"file_hash"`
-	ParseStatus string         `gorm:"type:varchar(32);not null;default:'pending'" json:"parse_status"`
-	ErrorMsg    string         `gorm:"type:varchar(512);not null;default:''" json:"error_msg"`
-	ChunkCount  int            `gorm:"type:int;not null;default:0" json:"chunk_count"`
-	UploaderID  uint64         `gorm:"not null" json:"uploader_id"`
+	ParseStatus    string         `gorm:"type:varchar(32);not null;default:'pending'" json:"parse_status"`
+	ErrorMsg       string         `gorm:"type:varchar(512);not null;default:''" json:"error_msg"`
+	ChunkCount     int            `gorm:"type:int;not null;default:0" json:"chunk_count"`
+	StorageTier    string         `gorm:"type:varchar(16);not null;default:'local';index:idx_kb_tier_access" json:"storage_tier"`
+	OSSKey         string         `gorm:"type:varchar(512);not null;default:''" json:"-"`
+	OSSSyncedAt    *time.Time     `gorm:"type:datetime" json:"oss_synced_at,omitempty"`
+	LastAccessedAt *time.Time     `gorm:"type:datetime;index:idx_kb_tier_access" json:"last_accessed_at,omitempty"`
+	UploaderID     uint64         `gorm:"not null" json:"uploader_id"`
 	Uploader    *UserBrief     `gorm:"-" json:"uploader,omitempty"`
 	CreatedAt   time.Time      `gorm:"autoCreateTime" json:"created_at"`
 	UpdatedAt   time.Time      `gorm:"autoUpdateTime" json:"updated_at"`
