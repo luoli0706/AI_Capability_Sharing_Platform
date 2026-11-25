@@ -8,10 +8,10 @@ func TestEscapeLikePattern(t *testing.T) {
 		want string
 	}{
 		{"normal/folder", "normal/folder"},
-		{"a_b", `a\_b`},
-		{"100%", `100\%`},
-		{`a\b`, `a\\b`},
-		{`mix_%\_test`, `mix\_\%\\\_test`},
+		{"a_b", "a!_b"},
+		{"100%", "100!%"},
+		{"a!b", "a!!b"},
+		{"mix_%!_test", "mix!_!%!!!_test"},
 	}
 	for _, tc := range cases {
 		if got := escapeLikePattern(tc.in); got != tc.want {

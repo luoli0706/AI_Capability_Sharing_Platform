@@ -108,7 +108,7 @@ func (r *kbRepository) ListDocuments(kbAssetID uint64) ([]model.KBDocument, erro
 }
 
 func escapeLikePattern(s string) string {
-	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	r := strings.NewReplacer("!", "!!", "%", "!%", "_", "!_")
 	return r.Replace(s)
 }
 
@@ -119,7 +119,7 @@ func (r *kbRepository) buildParentFolderQuery(kbAssetID uint64, parentFolder, ex
 			true, "%/%", false)
 	} else {
 		escaped := escapeLikePattern(parentFolder)
-		tx = tx.Where("((is_folder = ? AND folder_path LIKE ? ESCAPE '\\' AND folder_path NOT LIKE ? ESCAPE '\\') OR (is_folder = ? AND folder_path = ?))",
+		tx = tx.Where("((is_folder = ? AND folder_path LIKE ? ESCAPE '!' AND folder_path NOT LIKE ? ESCAPE '!') OR (is_folder = ? AND folder_path = ?))",
 			true, escaped+"/%", escaped+"/%/%", false, parentFolder)
 	}
 	switch strings.ToLower(strings.TrimSpace(extGroup)) {
@@ -204,7 +204,7 @@ func (r *kbRepository) ListMatchingFiles(kbAssetID uint64, scope string, docID u
 	case "folder":
 		if folderPath != "" {
 			escaped := escapeLikePattern(folderPath)
-			tx = tx.Where("(folder_path = ? OR folder_path LIKE ? ESCAPE '\\')", folderPath, escaped+"/%")
+			tx = tx.Where("(folder_path = ? OR folder_path LIKE ? ESCAPE '!')", folderPath, escaped+"/%")
 		}
 	}
 	var docs []model.KBDocument
@@ -264,7 +264,7 @@ func (r *kbRepository) RenameFolder(kbAssetID, folderDocID uint64, oldPath, newN
 		}
 		var descendants []model.KBDocument
 		escapedOldPath := escapeLikePattern(oldPath)
-		if err := tx.Where("kb_asset_id = ? AND id <> ? AND (folder_path = ? OR folder_path LIKE ? ESCAPE '\\')",
+		if err := tx.Where("kb_asset_id = ? AND id <> ? AND (folder_path = ? OR folder_path LIKE ? ESCAPE '!')",
 			kbAssetID, folderDocID, oldPath, escapedOldPath+"/%").Find(&descendants).Error; err != nil {
 			return err
 		}
