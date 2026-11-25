@@ -74,8 +74,8 @@ export interface UpdateProfilePayload {
 
 export interface BindEmailPayload {
   email: string
-  code: string
-  password: string
+  email_code: string
+  current_password: string
 }
 
 export interface UpdatePasswordPayload {

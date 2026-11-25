@@ -238,8 +238,8 @@ async function handleBindEmailSubmit() {
   try {
     await bindEmail({
       email: bindEmailForm.email.trim(),
-      code: bindEmailForm.code.trim(),
-      password: bindEmailForm.password
+      email_code: bindEmailForm.code.trim(),
+      current_password: bindEmailForm.password
     })
     await authStore.fetchProfile()
     syncProfileForm()
