@@ -1847,6 +1847,7 @@ func (s *kbService) ListEditableKBTargets(userID uint64, isSuperAdmin bool) ([]m
 	}
 
 	targets := []model.EditableKBTarget{}
+	seenKBIDs := make(map[uint64]bool)
 	const pageSize = 100
 	for page := 1; ; page++ {
 		items, total, err := s.assetRepo.ListAssets(model.AssetQuery{
@@ -1859,6 +1860,10 @@ func (s *kbService) ListEditableKBTargets(userID uint64, isSuperAdmin bool) ([]m
 			return nil, err
 		}
 		for _, item := range items {
+			if seenKBIDs[item.ID] {
+				continue
+			}
+			seenKBIDs[item.ID] = true
 			targets = append(targets, model.EditableKBTarget{
 				DomainID:   item.DomainID,
 				DomainName: item.DomainName,
@@ -1868,6 +1873,53 @@ func (s *kbService) ListEditableKBTargets(userID uint64, isSuperAdmin bool) ([]m
 		}
 		if len(items) == 0 || int64(len(targets)) >= total {
 			break
+		}
+	}
+
+	if !isSuperAdmin {
+		memberDomainIDs, err := s.domainRepo.GetUserDomainIDs(userID)
+		if err == nil && len(memberDomainIDs) > 0 {
+			adminSet := make(map[uint64]bool, len(adminDomainIDs))
+			for _, id := range adminDomainIDs {
+				adminSet[id] = true
+			}
+			writableMemberDomains := make(map[uint64]bool)
+			for _, domID := range memberDomainIDs {
+				if adminSet[domID] {
+					continue
+				}
+				if dom, domErr := s.domainRepo.FindByID(domID); domErr == nil && dom != nil && dom.AllowMemberKBWrite {
+					writableMemberDomains[domID] = true
+				}
+			}
+			for domID := range writableMemberDomains {
+				for page := 1; ; page++ {
+					items, total, err := s.assetRepo.ListAssets(model.AssetQuery{
+						DomainID:  domID,
+						AssetType: model.AssetTypeKB,
+						Page:      page,
+						PageSize:  pageSize,
+					}, userID, false, memberDomainIDs, adminDomainIDs, nil)
+					if err != nil {
+						return nil, err
+					}
+					for _, item := range items {
+						if seenKBIDs[item.ID] {
+							continue
+						}
+						seenKBIDs[item.ID] = true
+						targets = append(targets, model.EditableKBTarget{
+							DomainID:   item.DomainID,
+							DomainName: item.DomainName,
+							KBID:       item.ID,
+							KBName:     item.Name,
+						})
+					}
+					if len(items) == 0 || int64(page*pageSize) >= total {
+						break
+					}
+				}
+			}
 		}
 	}
 
@@ -2081,10 +2133,16 @@ func (s *kbService) ensureKBEditPermission(userID uint64, isSuperAdmin bool, kbI
 	if err != nil {
 		return nil, err
 	}
-	if role != model.DomainRoleOwner && role != model.DomainRoleAdmin {
-		return nil, NewForbidden("only owner or domain admin can manage knowledge base documents")
+	if role == model.DomainRoleOwner || role == model.DomainRoleAdmin {
+		return detail, nil
 	}
-	return detail, nil
+	if role == model.DomainRoleMember && detail.Status == model.AssetStatusPublished {
+		domain, domErr := s.domainRepo.FindByID(detail.DomainID)
+		if domErr == nil && domain != nil && domain.AllowMemberKBWrite {
+			return detail, nil
+		}
+	}
+	return nil, NewForbidden("only owner or domain admin can manage knowledge base documents")
 }
 
 func (s *kbService) ensureKBViewPermission(userID uint64, isSuperAdmin bool, kbID, refDomainID, docID uint64) (*model.AssetDetail, error) {

@@ -27,9 +27,10 @@ type BizDomain struct {
 	Description    string         `gorm:"type:varchar(512);not null;default:''" json:"description"`
 	Visibility     string         `gorm:"type:varchar(16);not null;default:'public'" json:"visibility"`
 	JoinMode       string         `gorm:"type:varchar(24);not null;default:'approval_only'" json:"join_mode"`
-	JoinQuestion   string         `gorm:"type:varchar(512);not null;default:''" json:"join_question"`
-	JoinAnswerHash string         `gorm:"type:varchar(128);not null;default:''" json:"-"`
-	OrgID          uint64         `gorm:"index:idx_org_id;not null;default:0" json:"org_id"`
+	JoinQuestion       string         `gorm:"type:varchar(512);not null;default:''" json:"join_question"`
+	JoinAnswerHash     string         `gorm:"type:varchar(128);not null;default:''" json:"-"`
+	AllowMemberKBWrite bool           `gorm:"not null;default:false" json:"allow_member_kb_write"`
+	OrgID              uint64         `gorm:"index:idx_org_id;not null;default:0" json:"org_id"`
 	OrgName        string         `gorm:"type:varchar(64);not null;default:'个人'" json:"org_name"`
 	OwnerID        uint64         `gorm:"not null" json:"owner_id"`
 	Status         int8           `gorm:"type:tinyint;not null;default:1" json:"status"`
@@ -64,9 +65,10 @@ type DomainListItem struct {
 	DomainName   string    `json:"domain_name"`
 	Description  string    `json:"description"`
 	Visibility   string    `json:"visibility"`
-	JoinMode     string    `json:"join_mode"`
-	JoinQuestion string    `json:"join_question"`
-	OrgID        uint64    `json:"org_id"`
+	JoinMode           string    `json:"join_mode"`
+	JoinQuestion       string    `json:"join_question"`
+	AllowMemberKBWrite bool      `json:"allow_member_kb_write"`
+	OrgID              uint64    `json:"org_id"`
 	OrgName      string    `json:"org_name"`
 	OwnerID      uint64    `json:"owner_id"`
 	Status       int8      `json:"status"`
@@ -128,9 +130,10 @@ type JoinDomainByQuizRequest struct {
 
 // UpdateDomainRequest represents PUT /api/v1/domains/:id payload.
 type UpdateDomainRequest struct {
-	DomainName  string  `json:"domain_name" validate:"omitempty,min=2,max=128"`
-	Description *string `json:"description" validate:"omitempty,max=512"`
-	Visibility  string  `json:"visibility" validate:"omitempty,oneof=public private org_private"`
+	DomainName         string  `json:"domain_name" validate:"omitempty,min=2,max=128"`
+	Description        *string `json:"description" validate:"omitempty,max=512"`
+	Visibility         string  `json:"visibility" validate:"omitempty,oneof=public private org_private"`
+	AllowMemberKBWrite *bool   `json:"allow_member_kb_write"`
 }
 
 // AddDomainMemberRequest represents POST /api/v1/domains/:id/members payload.

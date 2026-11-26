@@ -193,7 +193,11 @@ const isReadOnlyKb = computed(() => {
   if (isCrossKbMode.value || isCrossFilesMode.value) return true
   if (!selectedKb.value) return false
   if (canManageCurrentDomain.value) return false
-  return selectedKb.value.owner_id !== authStore.user?.id
+  if (selectedKb.value.owner_id === authStore.user?.id) return false
+  if (currentDomain.value?.my_role === 'member' && currentDomain.value?.allow_member_kb_write) {
+    return false
+  }
+  return true
 })
 const activeRefDomainId = computed(() =>
   isCrossKbMode.value || isCrossFilesMode.value ? domainId.value : undefined

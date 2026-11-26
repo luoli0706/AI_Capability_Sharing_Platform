@@ -97,6 +97,7 @@ export interface DomainItem {
   join_mode?: DomainJoinMode
   join_question?: string
   has_join_answer?: boolean
+  allow_member_kb_write?: boolean
   org_id: number
   org_name: string
   owner_id: number
@@ -130,6 +131,7 @@ export interface UpdateDomainPayload {
   domain_name: string
   description: string
   visibility: DomainVisibility
+  allow_member_kb_write?: boolean
 }
 
 export type OrgVisibility = 'public' | 'private'

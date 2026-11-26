@@ -121,10 +121,12 @@ const editForm = reactive<{
   domain_name: string
   description: string
   visibility: DomainVisibility
+  allow_member_kb_write: boolean
 }>({
   domain_name: '',
   description: '',
-  visibility: 'public'
+  visibility: 'public',
+  allow_member_kb_write: false
 })
 
 const canEditOrgPrivate = computed(() => {
@@ -280,6 +282,7 @@ function openEditModal(domain: DomainItem) {
   editForm.domain_name = domain.domain_name
   editForm.description = domain.description || ''
   editForm.visibility = domain.visibility || 'public'
+  editForm.allow_member_kb_write = Boolean(domain.allow_member_kb_write)
   editFormRef.value?.clearValidate()
   fetchMyOrgs()
   editModalOpen.value = true
@@ -295,7 +298,8 @@ async function handleUpdateDomain() {
     await updateDomain(editDomainId.value, {
       domain_name: editForm.domain_name.trim(),
       description: editForm.description.trim(),
-      visibility: editForm.visibility
+      visibility: editForm.visibility,
+      allow_member_kb_write: editForm.allow_member_kb_write
     })
     ElMessage.success('域信息已更新')
     editModalOpen.value = false
@@ -753,6 +757,13 @@ onMounted(() => {
         </el-form-item>
         <el-form-item label="描述说明" prop="description">
           <el-input v-model="editForm.description" type="textarea" :rows="3" />
+        </el-form-item>
+        <el-form-item label="成员知识库写权限">
+          <el-switch
+            v-model="editForm.allow_member_kb_write"
+            active-text="允许普通成员编辑域内知识库"
+            inactive-text="普通成员仅只读浏览"
+          />
         </el-form-item>
       </el-form>
       <template #footer>

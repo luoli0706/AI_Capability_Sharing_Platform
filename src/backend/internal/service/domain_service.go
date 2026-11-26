@@ -189,6 +189,9 @@ func (s *domainService) UpdateDomain(operatorID uint64, domainID uint64, req mod
 	if req.Visibility != "" {
 		domain.Visibility = req.Visibility
 	}
+	if req.AllowMemberKBWrite != nil {
+		domain.AllowMemberKBWrite = *req.AllowMemberKBWrite
+	}
 
 	if err := s.domainRepo.UpdateDomain(domain); err != nil {
 		return nil, err
@@ -263,9 +266,10 @@ func buildDomainListItem(domain *model.BizDomain, myRole string, canManage, hasO
 		DomainName:   domain.DomainName,
 		Description:  domain.Description,
 		Visibility:   domain.Visibility,
-		JoinMode:     joinMode,
-		JoinQuestion: joinQuestion,
-		OrgID:        domain.OrgID,
+		JoinMode:           joinMode,
+		JoinQuestion:       joinQuestion,
+		AllowMemberKBWrite: domain.AllowMemberKBWrite,
+		OrgID:              domain.OrgID,
 		OrgName:      domain.OrgName,
 		OwnerID:      domain.OwnerID,
 		Status:       domain.Status,

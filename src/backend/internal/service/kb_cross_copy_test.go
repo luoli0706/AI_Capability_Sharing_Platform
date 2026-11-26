@@ -141,6 +141,20 @@ func (m *crossCopyDomainRepo) GetUserAdminDomainIDs(userID uint64) ([]uint64, er
 	return ids, nil
 }
 
+func (m *crossCopyDomainRepo) GetUserDomainIDs(userID uint64) ([]uint64, error) {
+	var ids []uint64
+	for domainID, users := range m.roles {
+		if users[userID] != "" {
+			ids = append(ids, domainID)
+		}
+	}
+	return ids, nil
+}
+
+func (m *crossCopyDomainRepo) FindByID(id uint64) (*model.BizDomain, error) {
+	return nil, gorm.ErrRecordNotFound
+}
+
 func setupCrossCopyTestEnv(t *testing.T) (*kbService, *crossCopyKBRepo) {
 	t.Helper()
 	kbRepo := newCrossCopyKBRepo()
@@ -397,5 +411,41 @@ func TestKBService_ListEditableKBTargets(t *testing.T) {
 	}
 	if len(allTargets) != 4 {
 		t.Fatalf("expected 4 editable targets for superAdmin, got %d", len(allTargets))
+	}
+}
+
+func TestKBService_AllowMemberKBWrite(t *testing.T) {
+	kbRepo := newMockFileKBRepo()
+	assetRepo := &mockP1AssetRepo{
+		assets: map[uint64]*model.AIAsset{
+			1: {ID: 1, AssetCode: "kb-1", Name: "Domain KB", AssetType: model.AssetTypeKB, DomainID: 8, OwnerID: 1, Visibility: model.VisibilityDomain, Status: model.AssetStatusPublished},
+		},
+	}
+	domainRepo := &mockP1DomainRepo{
+		domains: map[uint64]*model.BizDomain{
+			8: {ID: 8, DomainName: "Test Domain", OwnerID: 1, Visibility: model.DomainVisibilityPublic, AllowMemberKBWrite: false},
+		},
+		members: map[uint64]map[uint64]string{
+			8: {1: model.DomainRoleOwner, 2: model.DomainRoleMember},
+		},
+	}
+	svc := NewKBService(kbRepo, assetRepo, domainRepo, nil, nil, t.TempDir(), "test-secret")
+
+	// When AllowMemberKBWrite is false, member 2 cannot create folder.
+	if _, err := svc.CreateFolder(2, false, 1, "notes"); err == nil {
+		t.Fatalf("expected 403 Forbidden when allow_member_kb_write is false")
+	} else {
+		assertAppErrStatus(t, err, 403)
+	}
+
+	// Enable AllowMemberKBWrite on domain 8.
+	domainRepo.domains[8].AllowMemberKBWrite = true
+
+	folder, err := svc.CreateFolder(2, false, 1, "notes")
+	if err != nil {
+		t.Fatalf("expected member 2 to create folder when allow_member_kb_write is true, got %v", err)
+	}
+	if folder == nil || folder.FolderPath != "notes" {
+		t.Fatalf("unexpected folder created: %+v", folder)
 	}
 }
