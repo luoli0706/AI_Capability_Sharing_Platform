@@ -288,7 +288,23 @@ func (m *mockSquareDomainRepo) RemoveMember(domainID, userID uint64) error {
 }
 func (m *mockSquareDomainRepo) GetUserDomainIDs(userID uint64) ([]uint64, error) { return nil, nil }
 func (m *mockSquareDomainRepo) GetUserAdminDomainIDs(userID uint64) ([]uint64, error) {
-	return nil, nil
+	seen := make(map[uint64]bool)
+	var ids []uint64
+	for did, roles := range m.members {
+		if r := roles[userID]; r == model.DomainRoleOwner || r == model.DomainRoleAdmin {
+			if !seen[did] {
+				seen[did] = true
+				ids = append(ids, did)
+			}
+		}
+	}
+	for id, d := range m.domains {
+		if d.OwnerID == userID && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
 }
 func (m *mockSquareDomainRepo) GetAccessibleDomainIDs(userID uint64, userOrgIDs, adminOrgIDs []uint64) ([]uint64, error) {
 	return nil, nil

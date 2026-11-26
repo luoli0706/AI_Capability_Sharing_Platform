@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 
 	"ascp-backend/internal/model"
+	"ascp-backend/internal/pkg/password"
 	"ascp-backend/internal/repository"
 
 	"gorm.io/gorm"
@@ -16,6 +18,7 @@ type DomainService interface {
 	ListDomains(userID uint64, q model.DomainQuery) ([]model.DomainListItem, int64, error)
 	CreateDomain(userID uint64, req model.CreateDomainRequest) (*model.DomainListItem, error)
 	UpdateDomain(operatorID uint64, domainID uint64, req model.UpdateDomainRequest) (*model.DomainListItem, error)
+	UpdateJoinSettings(operatorID uint64, domainID uint64, req model.UpdateDomainJoinSettingsRequest) (*model.DomainListItem, error)
 	DeleteDomain(operatorID uint64, domainID uint64) error
 	ListMembers(domainID uint64) ([]model.DomainMemberItem, error)
 	AddMember(operatorID uint64, domainID uint64, req model.AddDomainMemberRequest) error
@@ -117,16 +120,40 @@ func (s *domainService) CreateDomain(userID uint64, req model.CreateDomainReques
 		return nil, err
 	}
 
+	joinMode := strings.TrimSpace(req.JoinMode)
+	if joinMode == "" {
+		joinMode = model.DomainJoinModeApprovalOnly
+	}
+	var joinQuestion, joinAnswerHash string
+	if joinMode == model.DomainJoinModeApprovalOrQuiz {
+		joinQuestion = strings.TrimSpace(req.JoinQuestion)
+		if joinQuestion == "" {
+			return nil, NewBadRequest("答题加入模式必须填写验证问题")
+		}
+		normalizedAns := normalizeJoinAnswer(req.JoinAnswer)
+		if normalizedAns == "" {
+			return nil, NewBadRequest("答题加入模式必须设置验证答案")
+		}
+		hash, err := password.Hash(normalizedAns)
+		if err != nil {
+			return nil, err
+		}
+		joinAnswerHash = hash
+	}
+
 	domain := &model.BizDomain{
-		DomainUID:   uid,
-		DomainCode:  req.DomainCode,
-		DomainName:  req.DomainName,
-		Description: req.Description,
-		Visibility:  visibility,
-		OrgID:       orgID,
-		OrgName:     orgName,
-		OwnerID:     userID,
-		Status:      1,
+		DomainUID:      uid,
+		DomainCode:     req.DomainCode,
+		DomainName:     req.DomainName,
+		Description:    req.Description,
+		Visibility:     visibility,
+		JoinMode:       joinMode,
+		JoinQuestion:   joinQuestion,
+		JoinAnswerHash: joinAnswerHash,
+		OrgID:          orgID,
+		OrgName:        orgName,
+		OwnerID:        userID,
+		Status:         1,
 	}
 
 	if err := s.domainRepo.CreateWithOwner(domain); err != nil {
@@ -135,23 +162,7 @@ func (s *domainService) CreateDomain(userID uint64, req model.CreateDomainReques
 
 	recordAudit(s.auditRepo, s.userRepo, userID, domain.ID, domain.DomainName, domain.ID, domain.DomainCode, domain.DomainName, "domain", model.AuditActionDomainCreate, domain.DomainName, fmt.Sprintf("创建域 %s (%s)", domain.DomainName, domain.Visibility))
 
-	return &model.DomainListItem{
-		ID:           domain.ID,
-		DomainUID:    domain.DomainUID,
-		DomainCode:   domain.DomainCode,
-		DomainName:   domain.DomainName,
-		Description:  domain.Description,
-		Visibility:   domain.Visibility,
-		OrgID:        domain.OrgID,
-		OrgName:      domain.OrgName,
-		OwnerID:      domain.OwnerID,
-		Status:       domain.Status,
-		MyRole:       model.DomainRoleOwner,
-		CanManage:    true,
-		HasOrgAccess: domain.Visibility == model.DomainVisibilityPublic && domain.OrgID > 0,
-		MemberCount:  1,
-		CreatedAt:    domain.CreatedAt,
-	}, nil
+	return buildDomainListItem(domain, model.DomainRoleOwner, true, domain.Visibility == model.DomainVisibilityPublic && domain.OrgID > 0, 1), nil
 }
 
 func (s *domainService) UpdateDomain(operatorID uint64, domainID uint64, req model.UpdateDomainRequest) (*model.DomainListItem, error) {
@@ -186,22 +197,84 @@ func (s *domainService) UpdateDomain(operatorID uint64, domainID uint64, req mod
 	recordAudit(s.auditRepo, s.userRepo, operatorID, domain.ID, domain.DomainName, domain.ID, domain.DomainCode, domain.DomainName, "domain", model.AuditActionDomainUpdate, domain.DomainName, "更新域信息 "+domain.DomainName)
 
 	members, _ := s.domainRepo.ListMembers(domainID)
+	return buildDomainListItem(domain, myRole, true, false, int64(len(members))), nil
+}
+
+func (s *domainService) UpdateJoinSettings(operatorID uint64, domainID uint64, req model.UpdateDomainJoinSettingsRequest) (*model.DomainListItem, error) {
+	allowed, domain, myRole, err := s.CanManageDomain(domainID, operatorID)
+	if err != nil {
+		return nil, err
+	}
+	if !allowed {
+		return nil, NewForbidden("no permission to manage this domain")
+	}
+
+	switch req.JoinMode {
+	case model.DomainJoinModeApprovalOrQuiz:
+		q := strings.TrimSpace(req.JoinQuestion)
+		if q == "" {
+			return nil, NewBadRequest("切换为答题加入模式时，必须填写验证问题")
+		}
+		ans := normalizeJoinAnswer(req.JoinAnswer)
+		if ans != "" {
+			hash, err := password.Hash(ans)
+			if err != nil {
+				return nil, err
+			}
+			domain.JoinAnswerHash = hash
+		} else if domain.JoinAnswerHash == "" {
+			return nil, NewBadRequest("切换为答题加入模式时，必须设置验证答案")
+		}
+		domain.JoinMode = model.DomainJoinModeApprovalOrQuiz
+		domain.JoinQuestion = q
+	case model.DomainJoinModeApprovalOnly:
+		domain.JoinMode = model.DomainJoinModeApprovalOnly
+	default:
+		return nil, NewBadRequest("invalid join_mode")
+	}
+
+	if err := s.domainRepo.UpdateDomain(domain); err != nil {
+		return nil, err
+	}
+
+	recordAudit(s.auditRepo, s.userRepo, operatorID, domain.ID, domain.DomainName, domain.ID, domain.DomainCode, domain.DomainName, "domain", model.AuditActionDomainUpdate, domain.DomainName, "更新域准入设置 "+domain.JoinMode)
+
+	members, _ := s.domainRepo.ListMembers(domainID)
+	return buildDomainListItem(domain, myRole, true, false, int64(len(members))), nil
+}
+
+func normalizeJoinAnswer(ans string) string {
+	return strings.ToLower(strings.TrimSpace(ans))
+}
+
+func buildDomainListItem(domain *model.BizDomain, myRole string, canManage, hasOrgAccess bool, memberCount int64) *model.DomainListItem {
+	joinMode := domain.JoinMode
+	if joinMode == "" {
+		joinMode = model.DomainJoinModeApprovalOnly
+	}
+	joinQuestion := ""
+	if joinMode == model.DomainJoinModeApprovalOrQuiz {
+		joinQuestion = domain.JoinQuestion
+	}
 	return &model.DomainListItem{
-		ID:          domain.ID,
-		DomainUID:   domain.DomainUID,
-		DomainCode:  domain.DomainCode,
-		DomainName:  domain.DomainName,
-		Description: domain.Description,
-		Visibility:  domain.Visibility,
-		OrgID:       domain.OrgID,
-		OrgName:     domain.OrgName,
-		OwnerID:     domain.OwnerID,
-		Status:      domain.Status,
-		MyRole:      myRole,
-		CanManage:   true,
-		MemberCount: int64(len(members)),
-		CreatedAt:   domain.CreatedAt,
-	}, nil
+		ID:           domain.ID,
+		DomainUID:    domain.DomainUID,
+		DomainCode:   domain.DomainCode,
+		DomainName:   domain.DomainName,
+		Description:  domain.Description,
+		Visibility:   domain.Visibility,
+		JoinMode:     joinMode,
+		JoinQuestion: joinQuestion,
+		OrgID:        domain.OrgID,
+		OrgName:      domain.OrgName,
+		OwnerID:      domain.OwnerID,
+		Status:       domain.Status,
+		MyRole:       myRole,
+		CanManage:    canManage,
+		HasOrgAccess: hasOrgAccess,
+		MemberCount:  memberCount,
+		CreatedAt:    domain.CreatedAt,
+	}
 }
 
 func (s *domainService) DeleteDomain(operatorID uint64, domainID uint64) error {

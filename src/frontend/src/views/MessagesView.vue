@@ -5,12 +5,14 @@ import { storeToRefs } from 'pinia'
 import { useMediaQuery } from '@vueuse/core'
 import {
   ArrowLeft,
+  Bell,
   ChatDotRound,
   Document,
   Folder,
   FolderOpened,
   Plus,
   Promotion,
+  Right,
   Search,
   Share,
   User
@@ -36,6 +38,7 @@ import type {
   ConversationItem,
   KbDocument,
   MessageContactItem,
+  SystemNoticePayload,
   UserBrief,
   UserMessageItem
 } from '@/types/api'
@@ -55,6 +58,18 @@ const activeConversationId = ref<number | null>(null)
 const activeConversation = computed(
   () => conversations.value.find((c) => c.id === activeConversationId.value) ?? null
 )
+
+function isSystemConversation(conv?: ConversationItem | null): boolean {
+  return conv?.peer?.username === 'system'
+}
+
+const sortedConversations = computed(() => {
+  return [...conversations.value].sort((a, b) => {
+    const aSys = isSystemConversation(a) ? 1 : 0
+    const bSys = isSystemConversation(b) ? 1 : 0
+    return bSys - aSys
+  })
+})
 
 const loadingMessages = ref(false)
 const loadingMore = ref(false)
@@ -447,6 +462,33 @@ const parsedCardByMsgId = computed(() => {
   return map
 })
 
+function parseSystemNoticePayload(msg: UserMessageItem): SystemNoticePayload | null {
+  if (msg.msg_type !== 'system_notice') return null
+  let raw: unknown = msg.payload
+  if (typeof raw === 'string') {
+    try {
+      raw = JSON.parse(raw)
+    } catch {
+      raw = null
+    }
+  }
+  if (typeof raw === 'object' && raw !== null) {
+    return raw as SystemNoticePayload
+  }
+  return {
+    title: '系统通知',
+    content: msg.content
+  }
+}
+
+const parsedNoticeByMsgId = computed(() => {
+  const map = new Map<number, SystemNoticePayload | null>()
+  for (const msg of messages.value) {
+    map.set(msg.id, parseSystemNoticePayload(msg))
+  }
+  return map
+})
+
 async function handleClickAssetCard(msg: UserMessageItem) {
   const card = parseAssetCardPayload(msg)
   if (!card || checkingCardMsgId.value === msg.id) return
@@ -534,8 +576,8 @@ watch(
 onMounted(async () => {
   await fetchConversations()
   await applyQueryConversation()
-  if (!activeConversationId.value && conversations.value.length > 0 && !isMobile.value) {
-    await selectConversation(conversations.value[0])
+  if (!activeConversationId.value && sortedConversations.value.length > 0 && !isMobile.value) {
+    await selectConversation(sortedConversations.value[0])
   }
   pollTimer = setInterval(async () => {
     await fetchConversations(true)
@@ -594,19 +636,41 @@ onBeforeUnmount(() => {
           </el-empty>
 
           <button
-            v-for="conv in conversations"
+            v-for="conv in sortedConversations"
             :key="conv.id"
             type="button"
             class="conv-item"
-            :class="{ 'is-active': conv.id === activeConversationId }"
+            :class="{
+              'is-active': conv.id === activeConversationId,
+              'is-system': isSystemConversation(conv)
+            }"
             @click="selectConversation(conv)"
           >
-            <el-avatar :size="40" :src="conv.peer?.avatar || undefined" class="conv-avatar">
-              {{ getUserInitial(conv.peer) }}
+            <el-avatar
+              :size="40"
+              :src="!isSystemConversation(conv) ? conv.peer?.avatar || undefined : undefined"
+              class="conv-avatar"
+              :class="{ 'is-system-avatar': isSystemConversation(conv) }"
+            >
+              <el-icon v-if="isSystemConversation(conv)" :size="18"><Bell /></el-icon>
+              <template v-else>{{ getUserInitial(conv.peer) }}</template>
             </el-avatar>
             <div class="conv-body">
               <div class="conv-top-row">
-                <span class="conv-peer-name">{{ getUserDisplay(conv.peer) }}</span>
+                <div class="conv-peer-wrap">
+                  <span class="conv-peer-name">
+                    {{ isSystemConversation(conv) ? conv.peer?.nickname || '系统通知' : getUserDisplay(conv.peer) }}
+                  </span>
+                  <el-tag
+                    v-if="isSystemConversation(conv)"
+                    size="small"
+                    type="warning"
+                    effect="light"
+                    class="system-badge"
+                  >
+                    系统
+                  </el-tag>
+                </div>
                 <span class="conv-time tabular-nums">
                   {{ formatShortTime(conv.last_message_at || conv.updated_at) }}
                 </span>
@@ -636,7 +700,24 @@ onBeforeUnmount(() => {
               >
                 列表
               </el-button>
+              <div v-if="isSystemConversation(activeConversation)" class="peer-profile-link is-static">
+                <el-avatar :size="36" class="conv-avatar is-system-avatar">
+                  <el-icon :size="16"><Bell /></el-icon>
+                </el-avatar>
+                <div class="peer-meta">
+                  <div class="conv-peer-wrap">
+                    <span class="peer-name">
+                      {{ activeConversation.peer?.nickname || '系统通知' }}
+                    </span>
+                    <el-tag size="small" type="warning" effect="light" class="system-badge">
+                      系统
+                    </el-tag>
+                  </div>
+                  <span class="peer-username">平台系统通知与审批结果推送</span>
+                </div>
+              </div>
               <button
+                v-else
                 type="button"
                 class="peer-profile-link"
                 @click="router.push(`/users/${activeConversation.peer.id}`)"
@@ -651,6 +732,7 @@ onBeforeUnmount(() => {
               </button>
             </div>
             <el-button
+              v-if="!isSystemConversation(activeConversation)"
               size="small"
               plain
               :icon="User"
@@ -678,53 +760,78 @@ onBeforeUnmount(() => {
               :class="{ 'is-mine': msg.sender_id === user?.id }"
             >
               <div class="msg-bubble-wrap">
-                <template v-for="card in [parsedCardByMsgId.get(msg.id)]" :key="`card-${msg.id}`">
-                  <div
-                    v-if="card"
-                    class="asset-card-msg"
-                    :class="{ 'is-checking': checkingCardMsgId === msg.id }"
-                    @click="handleClickAssetCard(msg)"
-                  >
-                    <div class="asset-card-msg-top">
-                      <el-tag
-                        :type="getAssetTypeMeta(card.asset_type as AssetType).tagType"
+                <template v-for="notice in [parsedNoticeByMsgId.get(msg.id)]" :key="`notice-${msg.id}`">
+                  <div v-if="notice" class="system-notice-card">
+                    <div class="system-notice-head">
+                      <el-tag size="small" type="warning" effect="light">系统通知</el-tag>
+                      <span class="system-notice-title">{{ notice.title || '系统通知' }}</span>
+                    </div>
+                    <div class="system-notice-body">
+                      {{ notice.content || notice.body || msg.content }}
+                    </div>
+                    <div v-if="notice.action_path" class="system-notice-footer">
+                      <el-button
+                        type="primary"
                         size="small"
-                        effect="light"
+                        plain
+                        @click="router.push(notice.action_path)"
                       >
-                        {{ getAssetTypeMeta(card.asset_type as AssetType).shortLabel }}
-                      </el-tag>
-                      <span v-if="card.domain_name" class="asset-card-domain">
-                        {{ card.domain_name }}
-                      </span>
-                    </div>
-                    <div class="asset-card-msg-title">
-                      {{ card.asset_name }}
-                    </div>
-                    <div v-if="card.doc_name" class="asset-card-msg-doc">
-                      <el-tag
-                        size="small"
-                        :type="card.is_folder ? 'warning' : 'success'"
-                        effect="plain"
-                      >
-                        {{ card.is_folder ? '文件夹' : '文档' }}
-                      </el-tag>
-                      <span class="mono-text">{{ card.doc_name }}</span>
-                    </div>
-                    <div v-if="card.note" class="asset-card-msg-note">
-                      “{{ card.note }}”
-                    </div>
-                    <div class="asset-card-msg-footer">
-                      <span>点击校验权限并查看详情 →</span>
+                        <span>{{ notice.action_label || '进入域空间' }}</span>
+                        <el-icon class="el-icon--right"><Right /></el-icon>
+                      </el-button>
                     </div>
                   </div>
-                  <div v-else class="msg-bubble">{{ msg.content }}</div>
+                  <template v-else v-for="card in [parsedCardByMsgId.get(msg.id)]" :key="`card-${msg.id}`">
+                    <div
+                      v-if="card"
+                      class="asset-card-msg"
+                      :class="{ 'is-checking': checkingCardMsgId === msg.id }"
+                      @click="handleClickAssetCard(msg)"
+                    >
+                      <div class="asset-card-msg-top">
+                        <el-tag
+                          :type="getAssetTypeMeta(card.asset_type as AssetType).tagType"
+                          size="small"
+                          effect="light"
+                        >
+                          {{ getAssetTypeMeta(card.asset_type as AssetType).shortLabel }}
+                        </el-tag>
+                        <span v-if="card.domain_name" class="asset-card-domain">
+                          {{ card.domain_name }}
+                        </span>
+                      </div>
+                      <div class="asset-card-msg-title">
+                        {{ card.asset_name }}
+                      </div>
+                      <div v-if="card.doc_name" class="asset-card-msg-doc">
+                        <el-tag
+                          size="small"
+                          :type="card.is_folder ? 'warning' : 'success'"
+                          effect="plain"
+                        >
+                          {{ card.is_folder ? '文件夹' : '文档' }}
+                        </el-tag>
+                        <span class="mono-text">{{ card.doc_name }}</span>
+                      </div>
+                      <div v-if="card.note" class="asset-card-msg-note">
+                        “{{ card.note }}”
+                      </div>
+                      <div class="asset-card-msg-footer">
+                        <span>点击校验权限并查看详情 →</span>
+                      </div>
+                    </div>
+                    <div v-else class="msg-bubble">{{ msg.content }}</div>
+                  </template>
                 </template>
                 <div class="msg-time tabular-nums">{{ formatDateTime(msg.created_at) }}</div>
               </div>
             </div>
           </div>
 
-          <footer class="chat-composer">
+          <div v-if="isSystemConversation(activeConversation)" class="system-readonly-bar">
+            系统通知账号仅用于接收平台通知，不支持回复
+          </div>
+          <footer v-else class="chat-composer">
             <el-input
               v-model="messageInput"
               type="textarea"
@@ -1135,6 +1242,37 @@ onBeforeUnmount(() => {
   font-weight: 600;
 }
 
+.conv-avatar.is-system-avatar {
+  background: linear-gradient(135deg, #f59e0b, #d97706);
+}
+
+.conv-item.is-system {
+  background: #fffbeb;
+}
+
+.conv-item.is-system:hover {
+  background: #fef3c7;
+}
+
+.conv-item.is-system.is-active {
+  background: #fde68a;
+}
+
+.conv-peer-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.system-badge {
+  flex-shrink: 0;
+}
+
+.peer-profile-link.is-static {
+  cursor: default;
+}
+
 .conv-body {
   flex: 1;
   min-width: 0;
@@ -1404,6 +1542,56 @@ onBeforeUnmount(() => {
   color: #4f46e5;
   border-top: 1px solid #f1f5f9;
   padding-top: 6px;
+}
+
+.system-notice-card {
+  width: 340px;
+  max-width: 100%;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: #ffffff;
+  border: 1px solid #fde68a;
+  box-shadow: 0 2px 10px rgba(245, 158, 11, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.system-notice-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.system-notice-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #0f172a;
+  line-height: 1.4;
+}
+
+.system-notice-body {
+  font-size: 13px;
+  line-height: 1.6;
+  color: #334155;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.system-notice-footer {
+  padding-top: 6px;
+  border-top: 1px solid #fef3c7;
+  display: flex;
+  justify-content: flex-start;
+}
+
+.system-readonly-bar {
+  padding: 12px 20px;
+  border-top: 1px solid var(--ascp-border, #e2e8f0);
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 12.5px;
+  text-align: center;
 }
 
 .dialog-section-title {

@@ -10,14 +10,23 @@ import {
   Plus,
   Right,
   Search,
+  Setting,
   Unlock,
   UserFilled
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
-import { createDomain, deleteDomain, getDomains, updateDomain } from '@/api/domain'
+import {
+  applyJoinDomain,
+  createDomain,
+  deleteDomain,
+  getDomains,
+  joinDomainByQuiz,
+  updateDomain,
+  updateDomainJoinSettings
+} from '@/api/domain'
 import { getOrgs } from '@/api/org'
 import { useDomainStore } from '@/stores/domain'
-import type { DomainItem, DomainVisibility, OrgItem } from '@/types/api'
+import type { DomainItem, DomainJoinMode, DomainVisibility, OrgItem } from '@/types/api'
 import { getDomainVisibilityMeta, getRoleLabel, normalizeList } from '@/utils/format'
 
 const router = useRouter()
@@ -42,12 +51,18 @@ const createForm = reactive<{
   description: string
   org_id: number
   visibility: DomainVisibility
+  join_mode: DomainJoinMode
+  join_question: string
+  join_answer: string
 }>({
   domain_name: '',
   domain_code: '',
   description: '',
   org_id: 0,
-  visibility: 'public'
+  visibility: 'public',
+  join_mode: 'approval_only',
+  join_question: '',
+  join_answer: ''
 })
 
 const canCreateOrgPrivate = computed(() => {
@@ -61,6 +76,38 @@ const createRules: FormRules = {
   domain_code: [
     { required: true, message: '请输入域编码', trigger: 'blur' },
     { pattern: /^[a-zA-Z0-9_-]+$/, message: '仅支持字母、数字、下划线和连字符', trigger: 'blur' }
+  ],
+  join_question: [
+    {
+      validator: (_rule, value: string, callback) => {
+        if (
+          createForm.visibility === 'public' &&
+          createForm.join_mode === 'approval_or_quiz' &&
+          !String(value || '').trim()
+        ) {
+          callback(new Error('请填写准入问题'))
+          return
+        }
+        callback()
+      },
+      trigger: 'blur'
+    }
+  ],
+  join_answer: [
+    {
+      validator: (_rule, value: string, callback) => {
+        if (
+          createForm.visibility === 'public' &&
+          createForm.join_mode === 'approval_or_quiz' &&
+          !String(value || '').trim()
+        ) {
+          callback(new Error('请填写预设答案'))
+          return
+        }
+        callback()
+      },
+      trigger: 'blur'
+    }
   ]
 }
 
@@ -90,6 +137,36 @@ const canEditOrgPrivate = computed(() => {
 const editRules: FormRules = {
   domain_name: [{ required: true, message: '请输入域名称', trigger: 'blur' }]
 }
+
+// Join Settings Modal
+const joinSettingsModalOpen = ref(false)
+const joinSettingsFormRef = ref<FormInstance>()
+const savingJoinSettings = ref(false)
+const joinSettingsDomainId = ref<number | null>(null)
+const joinSettingsDomainName = ref('')
+const joinSettingsForm = reactive<{
+  join_mode: DomainJoinMode
+  join_question: string
+  join_answer: string
+}>({
+  join_mode: 'approval_only',
+  join_question: '',
+  join_answer: ''
+})
+
+// Apply Join Domain Modal
+const applyJoinModalOpen = ref(false)
+const applyingJoin = ref(false)
+const applyJoinTarget = ref<DomainItem | null>(null)
+const applyJoinMethod = ref<'quiz' | 'approval'>('quiz')
+const applyQuizAnswer = ref('')
+const applyJoinReason = ref('')
+
+const canQuizJoin = computed(
+  () =>
+    applyJoinTarget.value?.join_mode === 'approval_or_quiz' &&
+    Boolean(applyJoinTarget.value?.join_question)
+)
 
 async function fetchDomainList() {
   loading.value = true
@@ -151,6 +228,9 @@ function openCreateModal() {
   createForm.description = ''
   createForm.org_id = 0
   createForm.visibility = 'public'
+  createForm.join_mode = 'approval_only'
+  createForm.join_question = ''
+  createForm.join_answer = ''
   createFormRef.value?.clearValidate()
   fetchMyOrgs()
   createModalOpen.value = true
@@ -163,12 +243,25 @@ async function handleCreateDomain() {
 
   creating.value = true
   try {
+    const isPublicQuiz =
+      createForm.visibility === 'public' && createForm.join_mode === 'approval_or_quiz'
     await createDomain({
       domain_name: createForm.domain_name.trim(),
       domain_code: createForm.domain_code.trim(),
       description: createForm.description.trim(),
       visibility: createForm.visibility,
-      org_id: createForm.org_id
+      org_id: createForm.org_id,
+      ...(createForm.visibility === 'public'
+        ? {
+            join_mode: createForm.join_mode,
+            ...(isPublicQuiz
+              ? {
+                  join_question: createForm.join_question.trim(),
+                  join_answer: createForm.join_answer.trim()
+                }
+              : {})
+          }
+        : {})
     })
     ElMessage.success('域创建成功')
     createModalOpen.value = false
@@ -253,6 +346,97 @@ function enterDomain(domain: DomainItem) {
 function goMembers(domain: DomainItem) {
   domainStore.setLastDomainId(domain.id)
   router.push(`/domains/${domain.id}/members`)
+}
+
+function openJoinSettingsModal(domain: DomainItem) {
+  joinSettingsDomainId.value = domain.id
+  joinSettingsDomainName.value = domain.domain_name
+  joinSettingsForm.join_mode = domain.join_mode || 'approval_only'
+  joinSettingsForm.join_question = domain.join_question || ''
+  joinSettingsForm.join_answer = ''
+  joinSettingsFormRef.value?.clearValidate()
+  joinSettingsModalOpen.value = true
+}
+
+async function handleUpdateJoinSettings() {
+  if (!joinSettingsDomainId.value) return
+  if (
+    joinSettingsForm.join_mode === 'approval_or_quiz' &&
+    !joinSettingsForm.join_question.trim()
+  ) {
+    ElMessage.warning('选择审批与问题并存时，请填写准入问题')
+    return
+  }
+
+  savingJoinSettings.value = true
+  try {
+    const payload = {
+      join_mode: joinSettingsForm.join_mode,
+      ...(joinSettingsForm.join_mode === 'approval_or_quiz'
+        ? {
+            join_question: joinSettingsForm.join_question.trim(),
+            ...(joinSettingsForm.join_answer.trim()
+              ? { join_answer: joinSettingsForm.join_answer.trim() }
+              : {})
+          }
+        : {})
+    }
+    await updateDomainJoinSettings(joinSettingsDomainId.value, payload)
+    ElMessage.success('域准入设置已更新')
+    joinSettingsModalOpen.value = false
+    await fetchDomainList()
+  } catch {
+    // Handled by interceptor
+  } finally {
+    savingJoinSettings.value = false
+  }
+}
+
+function openApplyJoinModal(domain: DomainItem) {
+  applyJoinTarget.value = domain
+  applyJoinMethod.value =
+    domain.join_mode === 'approval_or_quiz' && domain.join_question ? 'quiz' : 'approval'
+  applyQuizAnswer.value = ''
+  applyJoinReason.value = ''
+  applyJoinModalOpen.value = true
+}
+
+async function handleApplyJoinSubmit() {
+  if (!applyJoinTarget.value) return
+  if (canQuizJoin.value && applyJoinMethod.value === 'quiz') {
+    const answer = applyQuizAnswer.value.trim()
+    if (!answer) {
+      ElMessage.warning('请输入准入问题答案')
+      return
+    }
+    applyingJoin.value = true
+    try {
+      await joinDomainByQuiz(applyJoinTarget.value.id, answer)
+      ElMessage.success('回答正确，已直接成为该域普通成员')
+      applyJoinModalOpen.value = false
+      await domainStore.fetchDomains(true)
+      await fetchDomainList()
+    } catch {
+      // Handled by interceptor
+    } finally {
+      applyingJoin.value = false
+    }
+    return
+  }
+
+  applyingJoin.value = true
+  try {
+    await applyJoinDomain(
+      applyJoinTarget.value.id,
+      applyJoinReason.value.trim() || undefined
+    )
+    ElMessage.success('加入域申请已提交，请等待域所有者/管理员审批')
+    applyJoinModalOpen.value = false
+  } catch {
+    // Handled by interceptor
+  } finally {
+    applyingJoin.value = false
+  }
 }
 
 function getRoleTagType(role?: string) {
@@ -403,6 +587,16 @@ onMounted(() => {
             <el-button
               v-if="domain.can_manage"
               link
+              type="primary"
+              size="small"
+              :icon="Setting"
+              @click="openJoinSettingsModal(domain)"
+            >
+              准入设置
+            </el-button>
+            <el-button
+              v-if="domain.can_manage"
+              link
               type="danger"
               size="small"
               :icon="Delete"
@@ -417,7 +611,25 @@ onMounted(() => {
         </div>
 
         <div class="domain-actions">
-          <el-button type="primary" class="enter-btn" @click="enterDomain(domain)">
+          <el-button
+            v-if="domain.my_role || domain.has_org_access"
+            type="primary"
+            class="enter-btn"
+            @click="enterDomain(domain)"
+          >
+            <span>进入域空间</span>
+            <el-icon class="el-icon--right"><Right /></el-icon>
+          </el-button>
+          <el-button
+            v-else-if="domain.visibility === 'public'"
+            type="primary"
+            plain
+            class="enter-btn"
+            @click="openApplyJoinModal(domain)"
+          >
+            <span>申请加入域</span>
+          </el-button>
+          <el-button v-else type="primary" class="enter-btn" @click="enterDomain(domain)">
             <span>进入域空间</span>
             <el-icon class="el-icon--right"><Right /></el-icon>
           </el-button>
@@ -480,6 +692,28 @@ onMounted(() => {
             </el-radio>
           </el-radio-group>
         </el-form-item>
+        <template v-if="createForm.visibility === 'public'">
+          <el-form-item label="公开域准入方式">
+            <el-radio-group v-model="createForm.join_mode" class="visibility-radios">
+              <el-radio value="approval_only">仅审批（默认）</el-radio>
+              <el-radio value="approval_or_quiz">审批与问题并存（答对问题可直接加入，也可提交审批）</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <template v-if="createForm.join_mode === 'approval_or_quiz'">
+            <el-form-item label="准入问题" prop="join_question">
+              <el-input
+                v-model="createForm.join_question"
+                placeholder="例如：本域研发团队每周例会是周几？"
+              />
+            </el-form-item>
+            <el-form-item label="预设答案" prop="join_answer">
+              <el-input
+                v-model="createForm.join_answer"
+                placeholder="请输入用户答对即可直接加入的预设答案"
+              />
+            </el-form-item>
+          </template>
+        </template>
         <el-form-item label="描述说明" prop="description">
           <el-input
             v-model="createForm.description"
@@ -525,6 +759,101 @@ onMounted(() => {
         <el-button @click="editModalOpen = false">取消</el-button>
         <el-button type="primary" :loading="editing" @click="handleUpdateDomain">
           保存修改
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- Join Settings Modal -->
+    <el-dialog
+      v-model="joinSettingsModalOpen"
+      :title="`准入设置 - ${joinSettingsDomainName}`"
+      width="500px"
+      destroy-on-close
+    >
+      <el-form ref="joinSettingsFormRef" :model="joinSettingsForm" label-position="top">
+        <el-form-item label="准入方式">
+          <el-radio-group v-model="joinSettingsForm.join_mode" class="visibility-radios">
+            <el-radio value="approval_only">仅审批（默认）</el-radio>
+            <el-radio value="approval_or_quiz">审批与问题并存（答对问题可直接加入，也可提交审批）</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <template v-if="joinSettingsForm.join_mode === 'approval_or_quiz'">
+          <el-form-item label="准入问题">
+            <el-input
+              v-model="joinSettingsForm.join_question"
+              placeholder="例如：本域研发团队每周例会是周几？"
+            />
+          </el-form-item>
+          <el-form-item label="预设答案（留空则保持原答案不变）">
+            <el-input
+              v-model="joinSettingsForm.join_answer"
+              placeholder="留空表示保持原答案不变；如需修改请输入新答案"
+            />
+          </el-form-item>
+        </template>
+      </el-form>
+      <template #footer>
+        <el-button @click="joinSettingsModalOpen = false">取消</el-button>
+        <el-button type="primary" :loading="savingJoinSettings" @click="handleUpdateJoinSettings">
+          保存设置
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- Apply Join Domain Modal -->
+    <el-dialog
+      v-model="applyJoinModalOpen"
+      :title="`申请加入域 - ${applyJoinTarget?.domain_name || ''}`"
+      width="480px"
+      destroy-on-close
+    >
+      <template v-if="canQuizJoin">
+        <el-tabs v-model="applyJoinMethod" class="join-method-tabs">
+          <el-tab-pane label="回答问题直接加入" name="quiz">
+            <div class="quiz-question-box">
+              <div class="quiz-question-label">准入问题：</div>
+              <div class="quiz-question-text">{{ applyJoinTarget?.join_question }}</div>
+            </div>
+            <el-form label-position="top">
+              <el-form-item label="您的答案">
+                <el-input
+                  v-model="applyQuizAnswer"
+                  placeholder="请输入问题答案，回答正确将直接成为该域普通成员"
+                  @keyup.enter="handleApplyJoinSubmit"
+                />
+              </el-form-item>
+            </el-form>
+          </el-tab-pane>
+          <el-tab-pane label="提交审批申请" name="approval">
+            <el-form label-position="top">
+              <el-form-item label="申请留言（选填）">
+                <el-input
+                  v-model="applyJoinReason"
+                  type="textarea"
+                  :rows="3"
+                  placeholder="可附带一句留言，说明您的身份或加入原因，便于审核者判断"
+                />
+              </el-form-item>
+            </el-form>
+          </el-tab-pane>
+        </el-tabs>
+      </template>
+      <template v-else>
+        <el-form label-position="top">
+          <el-form-item label="申请留言（选填）">
+            <el-input
+              v-model="applyJoinReason"
+              type="textarea"
+              :rows="3"
+              placeholder="可附带一句留言，说明您的身份或加入原因，便于审核者判断"
+            />
+          </el-form-item>
+        </el-form>
+      </template>
+      <template #footer>
+        <el-button @click="applyJoinModalOpen = false">取消</el-button>
+        <el-button type="primary" :loading="applyingJoin" @click="handleApplyJoinSubmit">
+          {{ canQuizJoin && applyJoinMethod === 'quiz' ? '验证答案并加入' : '提交审批申请' }}
         </el-button>
       </template>
     </el-dialog>
@@ -677,6 +1006,31 @@ onMounted(() => {
   flex-direction: column;
   align-items: flex-start;
   gap: 8px;
+}
+
+.join-method-tabs {
+  margin-top: -6px;
+}
+
+.quiz-question-box {
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: #f8fafc;
+  border: 1px solid var(--ascp-border);
+}
+
+.quiz-question-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ascp-text-muted);
+  margin-bottom: 4px;
+}
+
+.quiz-question-text {
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ascp-text-primary);
 }
 
 .empty-box {

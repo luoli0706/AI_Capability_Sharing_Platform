@@ -119,9 +119,37 @@ func BackfillDomains(db *gorm.DB) error {
 		Update("visibility", model.DomainVisibilityPublic).Error; err != nil {
 		return err
 	}
+	if err := db.Model(&model.BizDomain{}).
+		Where("join_mode = '' OR join_mode IS NULL").
+		Update("join_mode", model.DomainJoinModeApprovalOnly).Error; err != nil {
+		return err
+	}
 	return db.Model(&model.BizDomain{}).
 		Where("org_name = '' OR org_name IS NULL").
 		Update("org_name", "个人").Error
+}
+
+// EnsureSystemUser guarantees the reserved "system" notification account exists and cannot log in with a password.
+func EnsureSystemUser(db *gorm.DB) error {
+	var existing model.SysUser
+	err := db.Where("username = ?", "system").First(&existing).Error
+	if err == nil {
+		return nil
+	}
+	if err != gorm.ErrRecordNotFound {
+		return err
+	}
+	sysUser := model.SysUser{
+		Username:     "system",
+		PasswordHash: "!",
+		Nickname:     "系统通知",
+		Status:       model.UserStatusActive,
+		TokenVersion: 1,
+	}
+	return db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "username"}},
+		DoNothing: true,
+	}).Create(&sysUser).Error
 }
 
 // SeedRoles ensures the default RBAC roles exist in sys_role.

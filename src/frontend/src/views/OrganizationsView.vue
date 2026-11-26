@@ -576,13 +576,16 @@ onMounted(() => {
       destroy-on-close
     >
       <el-form label-position="top">
-        <el-form-item label="申请理由（选填）">
+        <el-form-item label="申请留言（选填）">
           <el-input
             v-model="joinReason"
             type="textarea"
             :rows="3"
-            placeholder="请简要说明您的团队角色或加入原因..."
+            placeholder="可附带一句留言，说明您的身份或加入原因，便于审核者判断"
           />
+          <div style="margin-top: 6px; font-size: 12px; color: var(--ascp-text-muted)">
+            可附带一句留言，说明您的身份或加入原因，便于审核者判断
+          </div>
         </el-form-item>
       </el-form>
       <template #footer>

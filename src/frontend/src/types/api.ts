@@ -85,6 +85,7 @@ export interface UpdatePasswordPayload {
 
 export type DomainRole = 'owner' | 'admin' | 'member'
 export type DomainVisibility = 'public' | 'private' | 'org_private'
+export type DomainJoinMode = 'approval_only' | 'approval_or_quiz'
 
 export interface DomainItem {
   id: number
@@ -93,6 +94,9 @@ export interface DomainItem {
   domain_name: string
   description: string
   visibility: DomainVisibility
+  join_mode?: DomainJoinMode
+  join_question?: string
+  has_join_answer?: boolean
   org_id: number
   org_name: string
   owner_id: number
@@ -111,6 +115,15 @@ export interface CreateDomainPayload {
   description: string
   visibility: DomainVisibility
   org_id?: number
+  join_mode?: DomainJoinMode
+  join_question?: string
+  join_answer?: string
+}
+
+export interface UpdateDomainJoinSettingsPayload {
+  join_mode: DomainJoinMode
+  join_question?: string
+  join_answer?: string
 }
 
 export interface UpdateDomainPayload {
@@ -449,6 +462,7 @@ export type ApprovalTargetType =
   | 'asset_access'
   | 'asset_publish'
   | 'org_join'
+  | 'domain_join'
   | 'cross_domain_ref'
 
 export interface ApprovalRequest {
@@ -462,6 +476,8 @@ export interface ApprovalRequest {
   asset_name?: string
   asset_code?: string
   asset_type?: AssetType
+  domain_id?: number
+  domain_name?: string
   org_id?: number
   org_name?: string
   requested_perm: string
@@ -679,22 +695,33 @@ export interface ConversationItem {
   updated_at: string
 }
 
+export interface SystemNoticePayload {
+  title?: string
+  content?: string
+  body?: string
+  domain_id?: number
+  domain_name?: string
+  action_label?: string
+  action_path?: string
+  [key: string]: unknown
+}
+
 export interface UserMessageItem {
   id: number
   conversation_id: number
   sender_id: number
   receiver_id: number
   content: string
-  msg_type?: 'text' | 'asset_card' | string
-  payload?: AssetCardPayload | Record<string, unknown> | null
+  msg_type?: 'text' | 'asset_card' | 'system_notice' | string
+  payload?: AssetCardPayload | SystemNoticePayload | Record<string, unknown> | null
   is_read: boolean
   created_at: string
 }
 
 export interface SendMessagePayload {
   content?: string
-  msg_type?: 'text' | 'asset_card' | string
-  payload?: string | AssetCardPayload | Record<string, unknown>
+  msg_type?: 'text' | 'asset_card' | 'system_notice' | string
+  payload?: string | AssetCardPayload | SystemNoticePayload | Record<string, unknown>
 }
 
 export interface KbDocumentInteractions {

@@ -131,7 +131,7 @@ func (r *userRepository) SearchActiveUsers(keyword string, excludeUserID uint64,
 	}
 	tx := r.db.Model(&model.SysUser{}).
 		Select("id, username, nickname, avatar").
-		Where("status = ?", model.UserStatusActive)
+		Where("status = ? AND username <> ?", model.UserStatusActive, "system")
 	if excludeUserID > 0 {
 		tx = tx.Where("id <> ?", excludeUserID)
 	}

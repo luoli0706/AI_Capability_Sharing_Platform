@@ -1,10 +1,12 @@
 import { apiDelete, apiGet, apiPost, apiPut } from './request'
 import type {
   AddDomainMemberPayload,
+  ApprovalRequest,
   CreateDomainPayload,
   DomainItem,
   DomainMember,
   PaginatedData,
+  UpdateDomainJoinSettingsPayload,
   UpdateDomainPayload
 } from '@/types/api'
 
@@ -61,4 +63,34 @@ export function updateDomainMemberRole(
 
 export function removeDomainMember(domainId: number, userId: number): Promise<null> {
   return apiDelete<null>(`/domains/${domainId}/members/${userId}`)
+}
+
+export function updateDomainJoinSettings(
+  domainId: number,
+  payload: UpdateDomainJoinSettingsPayload
+): Promise<DomainItem> {
+  return apiPut<DomainItem, UpdateDomainJoinSettingsPayload>(
+    `/domains/${domainId}/join-settings`,
+    payload
+  )
+}
+
+export function applyJoinDomain(
+  domainId: number,
+  reason?: string
+): Promise<ApprovalRequest> {
+  return apiPost<ApprovalRequest, { reason?: string }>(
+    `/domains/${domainId}/join-requests`,
+    { reason }
+  )
+}
+
+export function joinDomainByQuiz(
+  domainId: number,
+  answer: string
+): Promise<DomainItem | null> {
+  return apiPost<DomainItem | null, { answer: string }>(
+    `/domains/${domainId}/join-by-quiz`,
+    { answer }
+  )
 }

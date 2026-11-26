@@ -26,6 +26,7 @@ const (
 	AuditActionDomainUpdate       = "domain.update"
 	AuditActionDomainDelete       = "domain.delete"
 	AuditActionDomainMemberAdd    = "domain.member_add"
+	AuditActionDomainMemberJoin   = "domain_member_join"
 	AuditActionDomainMemberRemove = "domain.member_remove"
 
 	AuditActionOrgCreate       = "org.create"

@@ -69,6 +69,9 @@ func main() {
 	if err := repository.SeedRoles(db); err != nil {
 		logger.Fatal("failed to seed default roles", zap.Error(err))
 	}
+	if err := repository.EnsureSystemUser(db); err != nil {
+		logger.Fatal("failed to ensure system notification user", zap.Error(err))
+	}
 
 	// Repositories
 	userRepo := repository.NewUserRepository(db)
@@ -171,6 +174,7 @@ func main() {
 	kbSvc.SetInteractionRepo(kbInteractionRepo)
 	domainSvc.SetCrossRefRepo(crossRefRepo)
 	govSvc.SetCrossRefRepo(crossRefRepo)
+	govSvc.SetMessageService(msgSvc)
 	kbInteractionSvc := service.NewKBInteractionService(kbInteractionRepo, kbRepo, assetRepo, domainRepo, govRepo, orgRepo, userRepo)
 	kbInteractionSvc.SetCrossRefRepo(crossRefRepo)
 
@@ -181,6 +185,7 @@ func main() {
 	msgHandler := handler.NewMessageHandler(msgSvc)
 	orgHandler := handler.NewOrgHandler(orgSvc, govSvc)
 	domainHandler := handler.NewDomainHandler(domainSvc)
+	domainHandler.SetGovernanceService(govSvc)
 	assetHandler := handler.NewAssetHandler(assetSvc)
 	kbHandler := handler.NewKBHandler(kbSvc)
 	kbInteractionHandler := handler.NewKBInteractionHandler(kbInteractionSvc)
@@ -268,10 +273,14 @@ func main() {
 	protected.POST("/orgs/:id/members", orgHandler.AddMember)
 	protected.DELETE("/orgs/:id/members/:userId", orgHandler.RemoveMember)
 	protected.POST("/orgs/:id/join", orgHandler.JoinOrg)
+	protected.POST("/orgs/:id/join-requests", orgHandler.JoinOrg)
 
 	protected.GET("/domains", domainHandler.ListDomains)
 	protected.POST("/domains", domainHandler.CreateDomain)
 	protected.PUT("/domains/:id", domainHandler.UpdateDomain)
+	protected.PUT("/domains/:id/join-settings", domainHandler.UpdateJoinSettings)
+	protected.POST("/domains/:id/join-requests", domainHandler.ApplyJoinDomain)
+	protected.POST("/domains/:id/join-by-quiz", domainHandler.JoinDomainByQuiz, ascpMiddleware.RateLimitByUserOrIP(10, time.Minute))
 	protected.DELETE("/domains/:id", domainHandler.DeleteDomain)
 	protected.GET("/domains/:id/members", domainHandler.ListMembers)
 	protected.POST("/domains/:id/members", domainHandler.AddMember)

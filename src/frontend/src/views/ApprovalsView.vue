@@ -12,7 +12,7 @@ import { formatDateTime, getApprovalStatusMeta, normalizeList } from '@/utils/fo
 
 const activeTab = ref<'pending' | 'my' | 'handled'>('pending')
 const targetTypeFilter = ref<
-  '' | 'asset_publish' | 'asset_access' | 'org_join' | 'cross_domain_ref'
+  '' | 'asset_publish' | 'asset_access' | 'org_join' | 'domain_join' | 'cross_domain_ref'
 >('')
 const loading = ref(false)
 const list = ref<ApprovalRequest[]>([])
@@ -125,6 +125,7 @@ function getTargetTypeMeta(targetType: string): {
 } {
   if (targetType === 'asset_publish') return { label: '发布审批', tagType: 'primary' }
   if (targetType === 'org_join') return { label: '加入组织', tagType: 'success' }
+  if (targetType === 'domain_join') return { label: '加入域申请', tagType: 'success' }
   if (targetType === 'asset_access') return { label: '权限申请', tagType: 'warning' }
   if (targetType === 'cross_domain_ref') return { label: '跨域引用', tagType: 'info' }
   return { label: targetType, tagType: 'info' }
@@ -134,10 +135,19 @@ function getTargetTitle(row: ApprovalRequest): string {
   if (row.target_type === 'org_join') {
     return row.org_name || row.asset_name || `组织 #${row.org_id || row.asset_id}`
   }
+  if (row.target_type === 'domain_join') {
+    return row.domain_name || row.asset_name || `域 #${row.domain_id || row.asset_id}`
+  }
   if (row.target_type === 'cross_domain_ref') {
     return row.asset_name || `跨域引用 #${row.asset_id || row.id}`
   }
   return row.asset_name || `资产 #${row.asset_id}`
+}
+
+function getTargetObjectLabel(targetType: string): string {
+  if (targetType === 'org_join') return '目标组织'
+  if (targetType === 'domain_join') return '目标域'
+  return '目标资产'
 }
 
 onMounted(() => {
@@ -167,6 +177,7 @@ onMounted(() => {
           <el-radio-button value="asset_publish">发布审批</el-radio-button>
           <el-radio-button value="asset_access">权限申请</el-radio-button>
           <el-radio-button value="org_join">加入组织</el-radio-button>
+          <el-radio-button value="domain_join">加入域申请</el-radio-button>
           <el-radio-button value="cross_domain_ref">跨域引用</el-radio-button>
         </el-radio-group>
       </div>
@@ -213,6 +224,9 @@ onMounted(() => {
             </div>
             <div v-else-if="row.target_type === 'org_join'">
               <span class="reason-text">{{ row.reason || '申请加入组织' }}</span>
+            </div>
+            <div v-else-if="row.target_type === 'domain_join'">
+              <span class="reason-text">{{ row.reason || '申请加入域' }}</span>
             </div>
             <div v-else-if="row.target_type === 'cross_domain_ref'">
               <span class="reason-text">{{ row.reason || '申请跨域引用' }}</span>
@@ -298,7 +312,7 @@ onMounted(() => {
               {{ getTargetTypeMeta(activeRequest.target_type).label }}
             </el-tag>
           </el-descriptions-item>
-          <el-descriptions-item :label="activeRequest.target_type === 'org_join' ? '目标组织' : '目标资产'">
+          <el-descriptions-item :label="getTargetObjectLabel(activeRequest.target_type)">
             {{ getTargetTitle(activeRequest) }}
           </el-descriptions-item>
           <el-descriptions-item

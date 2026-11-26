@@ -127,6 +127,9 @@ func (s *authService) Login(req model.LoginRequest) (*model.LoginResponse, error
 }
 
 func (s *authService) LoginWithIP(req model.LoginRequest, clientIP string) (*model.LoginResponse, error) {
+	if strings.EqualFold(strings.TrimSpace(req.Username), "system") {
+		return nil, NewForbidden("系统内置账号禁止登录")
+	}
 	attemptKey := strings.ToLower(strings.TrimSpace(req.Username)) + "|" + strings.TrimSpace(clientIP)
 	if s.isLoginLocked(attemptKey) {
 		return nil, NewTooManyRequests("登录失败次数过多，请 15 分钟后再试")

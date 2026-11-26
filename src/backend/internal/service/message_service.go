@@ -35,6 +35,7 @@ type MessageService interface {
 	SendMessage(userID, convID uint64, content string) (*model.UserMessage, error)
 	SendMessageReq(userID uint64, isSuperAdmin bool, convID uint64, req model.SendMessageRequest) (*model.UserMessage, error)
 	ShareAssetCard(senderID uint64, isSuperAdmin bool, req model.ShareAssetCardRequest) (int, error)
+	SendSystemNotice(recipientID uint64, payload model.SystemNoticePayload) error
 	MarkRead(userID, convID uint64) error
 }
 
@@ -145,6 +146,9 @@ func (s *messageService) CreateOrGetConversation(userID, targetUserID uint64) (*
 	if target.Status != model.UserStatusActive {
 		return nil, NewBadRequest("目标用户不可用")
 	}
+	if target.Username == "system" {
+		return nil, NewBadRequest("不能向系统通知账号发起私信")
+	}
 
 	u1, u2 := userID, targetUserID
 	if u1 > u2 {
@@ -240,6 +244,9 @@ func (s *messageService) SendMessageReq(userID uint64, isSuperAdmin bool, convID
 	if receiver.Status != model.UserStatusActive {
 		return nil, NewBadRequest("目标用户不可用")
 	}
+	if receiver.Username == "system" {
+		return nil, NewBadRequest("不能向系统通知账号发送私信")
+	}
 
 	msg := &model.UserMessage{
 		ConversationID: conv.ID,
@@ -315,6 +322,69 @@ func (s *messageService) ShareAssetCard(senderID uint64, isSuperAdmin bool, req 
 		sentCount++
 	}
 	return sentCount, nil
+}
+
+func (s *messageService) SendSystemNotice(recipientID uint64, payload model.SystemNoticePayload) error {
+	if recipientID == 0 || s.userRepo == nil || s.msgRepo == nil {
+		return nil
+	}
+	sysUser, err := s.userRepo.FindByUsername("system")
+	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		sysUser = &model.SysUser{
+			Username:     "system",
+			PasswordHash: "!",
+			Nickname:     "系统通知",
+			Status:       model.UserStatusActive,
+			TokenVersion: 1,
+		}
+		if createErr := s.userRepo.CreateWithRole(sysUser, model.RoleDeveloper); createErr != nil {
+			if existing, fErr := s.userRepo.FindByUsername("system"); fErr == nil {
+				sysUser = existing
+			} else {
+				return createErr
+			}
+		}
+	}
+	if sysUser.ID == 0 || sysUser.ID == recipientID {
+		return nil
+	}
+
+	u1, u2 := sysUser.ID, recipientID
+	if u1 > u2 {
+		u1, u2 = u2, u1
+	}
+	conv, err := s.msgRepo.FindOrCreateConversation(u1, u2)
+	if err != nil {
+		return err
+	}
+
+	rawJSON, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	content := strings.TrimSpace(payload.Body)
+	if content == "" {
+		content = strings.TrimSpace(payload.Title)
+	}
+	previewTitle := strings.TrimSpace(payload.Title)
+	if previewTitle == "" {
+		previewTitle = content
+	}
+	preview := truncateRunes("[系统通知] "+previewTitle, 120)
+
+	msg := &model.UserMessage{
+		ConversationID: conv.ID,
+		SenderID:       sysUser.ID,
+		ReceiverID:     recipientID,
+		MsgType:        model.MessageTypeSystemNotice,
+		Content:        content,
+		Payload:        string(rawJSON),
+		CreatedAt:      time.Now(),
+	}
+	return s.msgRepo.CreateMessage(conv, msg, preview)
 }
 
 func (s *messageService) buildSanitizedAssetCard(senderID uint64, isSuperAdmin bool, assetID, docID, refDomainID, crossRefID uint64, rawNote string) (string, string, string, error) {

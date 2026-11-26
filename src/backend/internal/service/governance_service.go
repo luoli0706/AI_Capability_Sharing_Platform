@@ -5,9 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"ascp-backend/internal/model"
+	"ascp-backend/internal/pkg/password"
 	"ascp-backend/internal/repository"
 
 	"gorm.io/gorm"
@@ -17,12 +20,15 @@ type GovernanceService interface {
 	SubscribeAsset(userID, assetID uint64) (*model.AssetPermission, error)
 	CreateApproval(userID uint64, req model.CreateApprovalRequest) (*model.ApprovalRequest, error)
 	RequestJoinOrg(userID, orgID uint64, reason string) (*model.ApprovalRequest, error)
+	RequestJoinDomain(userID, domainID uint64, reason string) (*model.ApprovalRequest, error)
+	JoinDomainByQuiz(userID, domainID uint64, answer string) error
 	ListMyRequests(userID uint64) ([]model.ApprovalRequestView, error)
 	ListPendingRequests(userID uint64, isSuperAdmin bool) ([]model.ApprovalRequestView, error)
 	ListHandledRequests(userID uint64) ([]model.ApprovalRequestView, error)
 	HandleApproval(userID uint64, isSuperAdmin bool, requestID uint64, req model.HandleApprovalRequest) (*model.ApprovalRequest, error)
 	SetAuditRepos(auditRepo repository.AuditLogRepository, userRepo repository.UserRepository)
 	SetCrossRefRepo(crossRefRepo repository.CrossRefRepository)
+	SetMessageService(msgSvc MessageService)
 }
 
 type governanceService struct {
@@ -33,6 +39,7 @@ type governanceService struct {
 	crossRefRepo repository.CrossRefRepository
 	auditRepo    repository.AuditLogRepository
 	userRepo     repository.UserRepository
+	msgSvc       MessageService
 }
 
 func (s *governanceService) SetAuditRepos(auditRepo repository.AuditLogRepository, userRepo repository.UserRepository) {
@@ -42,6 +49,10 @@ func (s *governanceService) SetAuditRepos(auditRepo repository.AuditLogRepositor
 
 func (s *governanceService) SetCrossRefRepo(crossRefRepo repository.CrossRefRepository) {
 	s.crossRefRepo = crossRefRepo
+}
+
+func (s *governanceService) SetMessageService(msgSvc MessageService) {
+	s.msgSvc = msgSvc
 }
 
 func NewGovernanceService(
@@ -175,6 +186,122 @@ func (s *governanceService) CreateApproval(userID uint64, req model.CreateApprov
 	return approvalReq, nil
 }
 
+func (s *governanceService) RequestJoinDomain(userID, domainID uint64, reason string) (*model.ApprovalRequest, error) {
+	domain, err := s.domainRepo.FindByID(domainID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, NewNotFound("domain not found")
+		}
+		return nil, err
+	}
+	if domain.Visibility != model.DomainVisibilityPublic {
+		return nil, NewForbidden("仅公开域支持申请加入")
+	}
+
+	if domain.OwnerID == userID {
+		return nil, NewConflict("您已是该域成员")
+	}
+	hasAccess, err := hasDomainAccess(s.domainRepo, s.orgRepo, domainID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if hasAccess {
+		return nil, NewConflict("您已拥有该域访问权限或已是域成员")
+	}
+
+	pending, err := s.govRepo.HasPendingDomainJoin(domainID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if pending {
+		return nil, NewConflict("您已提交过加入申请，请等待审批")
+	}
+
+	reason = strings.TrimSpace(reason)
+	if utf8.RuneCountInString(reason) > 500 {
+		return nil, NewBadRequest("申请理由不能超过 500 个字符")
+	}
+	if reason == "" {
+		reason = "申请加入公开域 " + domain.DomainName
+	}
+
+	requestNo := generateRequestNo()
+	approvalReq := &model.ApprovalRequest{
+		RequestNo:     requestNo,
+		ApplicantID:   userID,
+		TargetType:    model.ApprovalTargetDomainJoin,
+		AssetID:       domain.ID,
+		RequestedPerm: model.DomainRoleMember,
+		DurationDays:  0,
+		Reason:        reason,
+		CurrentStep:   1,
+		TotalSteps:    1,
+		Status:        model.ApprovalStatusPending,
+	}
+	records := []model.ApprovalRecord{
+		{
+			StepNo:     1,
+			StepName:   "域所有者/管理员审批",
+			ApproverID: domain.OwnerID,
+			Action:     model.ApprovalActionPending,
+		},
+	}
+	if err := s.govRepo.CreateApprovalWithRecords(approvalReq, records); err != nil {
+		return nil, err
+	}
+	return approvalReq, nil
+}
+
+func (s *governanceService) JoinDomainByQuiz(userID, domainID uint64, answer string) error {
+	domain, err := s.domainRepo.FindByID(domainID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return NewNotFound("domain not found")
+		}
+		return err
+	}
+	if domain.Visibility != model.DomainVisibilityPublic {
+		return NewForbidden("仅公开域支持答题加入")
+	}
+	if domain.JoinMode != model.DomainJoinModeApprovalOrQuiz || domain.JoinAnswerHash == "" {
+		return NewBadRequest("该域未开启答题加入模式")
+	}
+
+	if domain.OwnerID == userID {
+		return NewConflict("您已是该域成员")
+	}
+	role, err := s.domainRepo.GetMemberRole(domainID, userID)
+	if err != nil {
+		return err
+	}
+	if role != "" {
+		return NewConflict("您已是该域成员")
+	}
+
+	normalized := normalizeJoinAnswer(answer)
+	if normalized == "" || !password.Verify(normalized, domain.JoinAnswerHash) {
+		return NewBadRequest("回答不正确，请重试或选择提交审批申请")
+	}
+
+	if err := s.govRepo.JoinDomainByQuizTx(domainID, userID); err != nil {
+		return err
+	}
+
+	recordAudit(s.auditRepo, s.userRepo, userID, domain.ID, domain.DomainName, domain.ID, domain.DomainCode, domain.DomainName, "domain", model.AuditActionDomainMemberJoin, domain.DomainName, "答题验证通过加入域 "+domain.DomainName)
+
+	if s.msgSvc != nil {
+		_ = s.msgSvc.SendSystemNotice(userID, model.SystemNoticePayload{
+			Title:       "加入域成功",
+			Body:        fmt.Sprintf("您已通过答题验证，成功加入公开域「%s」。", domain.DomainName),
+			DomainID:    domain.ID,
+			DomainName:  domain.DomainName,
+			ActionLabel: "前往该域",
+			ActionPath:  fmt.Sprintf("/domains/%d", domain.ID),
+		})
+	}
+	return nil
+}
+
 func (s *governanceService) RequestJoinOrg(userID, orgID uint64, reason string) (*model.ApprovalRequest, error) {
 	if s.orgRepo == nil {
 		return nil, NewBadRequest("organization module not configured")
@@ -206,6 +333,10 @@ func (s *governanceService) RequestJoinOrg(userID, orgID uint64, reason string) 
 		return nil, NewConflict("您已提交过加入申请，请等待审批")
 	}
 
+	reason = strings.TrimSpace(reason)
+	if utf8.RuneCountInString(reason) > 512 {
+		return nil, NewBadRequest("申请理由不能超过 512 个字符")
+	}
 	if reason == "" {
 		reason = "申请加入组织 " + org.OrgName
 	}
@@ -314,6 +445,63 @@ func (s *governanceService) HandleApproval(userID uint64, isSuperAdmin bool, req
 			actionName = model.AuditActionAssetPublishReject
 		}
 		recordAudit(s.auditRepo, s.userRepo, userID, domain.ID, domain.DomainName, asset.ID, asset.AssetCode, asset.Name, asset.AssetType, actionName, approvalReq.RequestedPerm, req.Comment)
+		return s.govRepo.FindApprovalByID(requestID)
+	}
+
+	if approvalReq.TargetType == model.ApprovalTargetDomainJoin {
+		domain, err := s.domainRepo.FindByID(approvalReq.AssetID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, NewNotFound("domain not found")
+			}
+			return nil, err
+		}
+		if !isSuperAdmin {
+			role, err := s.domainRepo.GetMemberRole(domain.ID, userID)
+			if err != nil {
+				return nil, err
+			}
+			if domain.OwnerID != userID && role != model.DomainRoleOwner && role != model.DomainRoleAdmin {
+				return nil, NewForbidden("only domain owner, admin, or super_admin can handle domain join approval")
+			}
+		}
+		if err := s.govRepo.HandleDomainJoinApproval(approvalReq, currentRecord.ID, userID, req.Action, req.Comment); err != nil {
+			return nil, err
+		}
+
+		applicantName := fmt.Sprintf("user#%d", approvalReq.ApplicantID)
+		if s.userRepo != nil {
+			if u, uErr := s.userRepo.FindByID(approvalReq.ApplicantID); uErr == nil {
+				applicantName = u.Username
+			}
+		}
+
+		if req.Action == model.ApprovalActionApprove {
+			recordAudit(s.auditRepo, s.userRepo, userID, domain.ID, domain.DomainName, domain.ID, domain.DomainCode, domain.DomainName, "domain", model.AuditActionDomainMemberJoin, applicantName, "审批通过加入域 "+applicantName)
+			if s.msgSvc != nil {
+				_ = s.msgSvc.SendSystemNotice(approvalReq.ApplicantID, model.SystemNoticePayload{
+					Title:       "入域申请已通过",
+					Body:        fmt.Sprintf("您申请加入公开域「%s」的请求已通过审批，已成为域成员。", domain.DomainName),
+					DomainID:    domain.ID,
+					DomainName:  domain.DomainName,
+					ActionLabel: "前往该域",
+					ActionPath:  fmt.Sprintf("/domains/%d", domain.ID),
+				})
+			}
+		} else if s.msgSvc != nil {
+			body := fmt.Sprintf("您申请加入公开域「%s」的请求未通过审批。", domain.DomainName)
+			if comment := strings.TrimSpace(req.Comment); comment != "" {
+				body = fmt.Sprintf("您申请加入公开域「%s」的请求未通过审批。审批意见：%s", domain.DomainName, comment)
+			}
+			_ = s.msgSvc.SendSystemNotice(approvalReq.ApplicantID, model.SystemNoticePayload{
+				Title:       "入域申请未通过",
+				Body:        body,
+				DomainID:    domain.ID,
+				DomainName:  domain.DomainName,
+				ActionLabel: "查看域列表",
+				ActionPath:  "/domains",
+			})
+		}
 		return s.govRepo.FindApprovalByID(requestID)
 	}
 

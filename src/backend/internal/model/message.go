@@ -7,9 +7,20 @@ import (
 )
 
 const (
-	MessageTypeText      = "text"
-	MessageTypeAssetCard = "asset_card"
+	MessageTypeText         = "text"
+	MessageTypeAssetCard    = "asset_card"
+	MessageTypeSystemNotice = "system_notice"
 )
+
+// SystemNoticePayload represents the structured payload for a system_notice message.
+type SystemNoticePayload struct {
+	Title       string `json:"title"`
+	Body        string `json:"body"`
+	DomainID    uint64 `json:"domain_id,omitempty"`
+	DomainName  string `json:"domain_name,omitempty"`
+	ActionLabel string `json:"action_label,omitempty"`
+	ActionPath  string `json:"action_path,omitempty"`
+}
 
 // UserConversation represents a direct messaging thread between two users.
 // Always store User1ID < User2ID.

@@ -227,9 +227,10 @@ type mockP1GovRepo struct {
 	nextRecID uint64
 	reqs      map[uint64]*model.ApprovalRequest
 	recs      map[uint64][]model.ApprovalRecord
-	perms     []*model.AssetPermission
-	assetRepo *mockP1AssetRepo
-	orgRepo   *mockOrgRepo
+	perms      []*model.AssetPermission
+	assetRepo  *mockP1AssetRepo
+	orgRepo    *mockOrgRepo
+	domainRepo repository.DomainRepository
 }
 
 func newMockP1GovRepo() *mockP1GovRepo {
@@ -278,6 +279,14 @@ func (m *mockP1GovRepo) HasPendingOrgJoin(orgID, applicantID uint64) (bool, erro
 	}
 	return false, nil
 }
+func (m *mockP1GovRepo) HasPendingDomainJoin(domainID, applicantID uint64) (bool, error) {
+	for _, r := range m.reqs {
+		if r.TargetType == model.ApprovalTargetDomainJoin && r.AssetID == domainID && r.ApplicantID == applicantID && r.Status == model.ApprovalStatusPending {
+			return true, nil
+		}
+	}
+	return false, nil
+}
 func (m *mockP1GovRepo) FindApprovalByID(id uint64) (*model.ApprovalRequest, error) {
 	if r, ok := m.reqs[id]; ok {
 		cp := *r
@@ -305,6 +314,12 @@ func (m *mockP1GovRepo) ListPendingRequests(approverID uint64, isSuperAdmin bool
 		}
 		if r.TargetType == model.ApprovalTargetOrgJoin {
 			if adminOrgSet[r.AssetID] {
+				out = append(out, model.ApprovalRequestView{ApprovalRequest: *r})
+			}
+			continue
+		}
+		if r.TargetType == model.ApprovalTargetDomainJoin {
+			if adminSet[r.AssetID] {
 				out = append(out, model.ApprovalRequestView{ApprovalRequest: *r})
 			}
 			continue
@@ -413,6 +428,62 @@ func (m *mockP1GovRepo) HandleCrossRefApproval(req *model.ApprovalRequest, recor
 		stored.Status = model.ApprovalStatusApproved
 	}
 	return nil
+}
+
+func (m *mockP1GovRepo) HandleDomainJoinApproval(req *model.ApprovalRequest, recordID, approverID uint64, action, comment string) error {
+	stored := m.reqs[req.ID]
+	for i := range m.recs[req.ID] {
+		if m.recs[req.ID][i].ID == recordID {
+			m.recs[req.ID][i].ApproverID = approverID
+			m.recs[req.ID][i].Action = action
+			m.recs[req.ID][i].Comment = comment
+		}
+	}
+	if action == model.ApprovalActionReject {
+		stored.Status = model.ApprovalStatusRejected
+		return nil
+	}
+	stored.Status = model.ApprovalStatusApproved
+	if m.domainRepo != nil {
+		if role, _ := m.domainRepo.GetMemberRole(req.AssetID, req.ApplicantID); role == "" {
+			_ = m.domainRepo.UpsertMember(&model.DomainMember{
+				DomainID:   req.AssetID,
+				UserID:     req.ApplicantID,
+				DomainRole: model.DomainRoleMember,
+			})
+		}
+	}
+	return nil
+}
+
+func (m *mockP1GovRepo) AutoApprovePendingDomainJoin(domainID, applicantID uint64) error {
+	for _, r := range m.reqs {
+		if r.TargetType == model.ApprovalTargetDomainJoin && r.AssetID == domainID && r.ApplicantID == applicantID && r.Status == model.ApprovalStatusPending {
+			r.Status = model.ApprovalStatusApproved
+			for i := range m.recs[r.ID] {
+				if m.recs[r.ID][i].Action == model.ApprovalActionPending {
+					m.recs[r.ID][i].Action = model.ApprovalActionApprove
+					m.recs[r.ID][i].Comment = "答题验证通过自动关闭"
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (m *mockP1GovRepo) JoinDomainByQuizTx(domainID, userID uint64) error {
+	if m.domainRepo != nil {
+		if role, _ := m.domainRepo.GetMemberRole(domainID, userID); role == "" {
+			if err := m.domainRepo.UpsertMember(&model.DomainMember{
+				DomainID:   domainID,
+				UserID:     userID,
+				DomainRole: model.DomainRoleMember,
+			}); err != nil {
+				return err
+			}
+		}
+	}
+	return m.AutoApprovePendingDomainJoin(domainID, userID)
 }
 
 type mockP1KeyRepo struct {

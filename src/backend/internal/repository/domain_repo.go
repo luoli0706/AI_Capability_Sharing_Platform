@@ -187,6 +187,14 @@ func hydrateDomainListItems(db *gorm.DB, domains []model.BizDomain, userID uint6
 			canManage = d.OwnerID == userID || myRole == model.DomainRoleOwner || myRole == model.DomainRoleAdmin
 		}
 		hasOrgAccess := d.Visibility == model.DomainVisibilityPublic && d.OrgID > 0 && orgSet[d.OrgID]
+		joinMode := d.JoinMode
+		if joinMode == "" {
+			joinMode = model.DomainJoinModeApprovalOnly
+		}
+		joinQuestion := ""
+		if joinMode == model.DomainJoinModeApprovalOrQuiz {
+			joinQuestion = d.JoinQuestion
+		}
 		items = append(items, model.DomainListItem{
 			ID:           d.ID,
 			DomainUID:    d.DomainUID,
@@ -194,6 +202,8 @@ func hydrateDomainListItems(db *gorm.DB, domains []model.BizDomain, userID uint6
 			DomainName:   d.DomainName,
 			Description:  d.Description,
 			Visibility:   d.Visibility,
+			JoinMode:     joinMode,
+			JoinQuestion: joinQuestion,
 			OrgID:        d.OrgID,
 			OrgName:      d.OrgName,
 			OwnerID:      d.OwnerID,

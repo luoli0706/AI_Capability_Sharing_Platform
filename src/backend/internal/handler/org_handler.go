@@ -166,7 +166,7 @@ func (h *OrgHandler) JoinOrg(c echo.Context) error {
 	}
 
 	var req model.JoinOrgRequest
-	if c.Request().ContentLength > 0 {
+	if c.Request().ContentLength != 0 {
 		if !bindAndValidate(c, &req) {
 			return nil
 		}

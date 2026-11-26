@@ -6,6 +6,7 @@ import (
 	"ascp-backend/internal/model"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type GovernanceRepository interface {
@@ -15,6 +16,7 @@ type GovernanceRepository interface {
 	UpsertPermission(perm *model.AssetPermission) error
 	CreateApprovalWithRecords(req *model.ApprovalRequest, records []model.ApprovalRecord) error
 	HasPendingOrgJoin(orgID, applicantID uint64) (bool, error)
+	HasPendingDomainJoin(domainID, applicantID uint64) (bool, error)
 	FindApprovalByID(id uint64) (*model.ApprovalRequest, error)
 	ListApprovalRecords(requestID uint64) ([]model.ApprovalRecordView, error)
 	ListMyRequests(applicantID uint64) ([]model.ApprovalRequestView, error)
@@ -23,6 +25,9 @@ type GovernanceRepository interface {
 	HandleApprovalStep(req *model.ApprovalRequest, recordID uint64, action, comment string, grantPerm *model.AssetPermission) error
 	HandlePublishApproval(req *model.ApprovalRequest, recordID, approverID uint64, action, comment string) error
 	HandleOrgJoinApproval(req *model.ApprovalRequest, recordID, approverID uint64, action, comment string) error
+	HandleDomainJoinApproval(req *model.ApprovalRequest, recordID, approverID uint64, action, comment string) error
+	AutoApprovePendingDomainJoin(domainID, applicantID uint64) error
+	JoinDomainByQuizTx(domainID, userID uint64) error
 	HandleCrossRefApproval(req *model.ApprovalRequest, recordID, approverID uint64, action, comment string) error
 }
 
@@ -109,6 +114,15 @@ func (r *governanceRepository) HasPendingOrgJoin(orgID, applicantID uint64) (boo
 	return count > 0, err
 }
 
+func (r *governanceRepository) HasPendingDomainJoin(domainID, applicantID uint64) (bool, error) {
+	var count int64
+	err := r.db.Model(&model.ApprovalRequest{}).
+		Where("target_type = ? AND asset_id = ? AND applicant_id = ? AND status = ?",
+			model.ApprovalTargetDomainJoin, domainID, applicantID, model.ApprovalStatusPending).
+		Count(&count).Error
+	return count > 0, err
+}
+
 func (r *governanceRepository) FindApprovalByID(id uint64) (*model.ApprovalRequest, error) {
 	var req model.ApprovalRequest
 	if err := r.db.First(&req, id).Error; err != nil {
@@ -147,7 +161,7 @@ func (r *governanceRepository) ListPendingRequests(approverID uint64, isSuperAdm
 	tx := r.db.Table("approval_request").
 		Select("approval_request.*").
 		Joins("INNER JOIN approval_record ON approval_record.request_id = approval_request.id AND approval_record.step_no = approval_request.current_step").
-		Joins("LEFT JOIN ai_asset ON ai_asset.id = approval_request.asset_id AND approval_request.target_type NOT IN ?", []string{model.ApprovalTargetOrgJoin, model.ApprovalTargetCrossRef}).
+		Joins("LEFT JOIN ai_asset ON ai_asset.id = approval_request.asset_id AND approval_request.target_type NOT IN ?", []string{model.ApprovalTargetOrgJoin, model.ApprovalTargetCrossRef, model.ApprovalTargetDomainJoin}).
 		Joins("LEFT JOIN domain_cross_ref ON domain_cross_ref.id = approval_request.asset_id AND approval_request.target_type = ?", model.ApprovalTargetCrossRef).
 		Where("approval_request.status = ? AND approval_record.action = ?", model.ApprovalStatusPending, model.ApprovalActionPending)
 
@@ -155,10 +169,10 @@ func (r *governanceRepository) ListPendingRequests(approverID uint64, isSuperAdm
 	var args []interface{}
 	if isSuperAdmin {
 		orConds = append(orConds, "approval_request.target_type NOT IN ?")
-		args = append(args, []string{model.ApprovalTargetPublish, model.ApprovalTargetOrgJoin})
+		args = append(args, []string{model.ApprovalTargetPublish, model.ApprovalTargetOrgJoin, model.ApprovalTargetDomainJoin})
 	} else {
 		orConds = append(orConds, "(approval_request.target_type NOT IN ? AND approval_record.approver_id = ?)")
-		args = append(args, []string{model.ApprovalTargetPublish, model.ApprovalTargetOrgJoin, model.ApprovalTargetCrossRef}, approverID)
+		args = append(args, []string{model.ApprovalTargetPublish, model.ApprovalTargetOrgJoin, model.ApprovalTargetCrossRef, model.ApprovalTargetDomainJoin}, approverID)
 	}
 
 	if len(adminDomainIDs) > 0 {
@@ -166,6 +180,8 @@ func (r *governanceRepository) ListPendingRequests(approverID uint64, isSuperAdm
 		args = append(args, model.ApprovalTargetPublish, adminDomainIDs)
 		orConds = append(orConds, "(approval_request.target_type = ? AND domain_cross_ref.target_domain_id IN ?)")
 		args = append(args, model.ApprovalTargetCrossRef, adminDomainIDs)
+		orConds = append(orConds, "(approval_request.target_type = ? AND approval_request.asset_id IN ?)")
+		args = append(args, model.ApprovalTargetDomainJoin, adminDomainIDs)
 	}
 	if len(adminOrgIDs) > 0 {
 		orConds = append(orConds, "(approval_request.target_type = ? AND approval_request.asset_id IN ?)")
@@ -210,6 +226,7 @@ func (r *governanceRepository) hydrateApprovalViews(reqs []model.ApprovalRequest
 	reqIDs := make([]uint64, 0, len(reqs))
 	assetIDs := make([]uint64, 0, len(reqs))
 	orgIDs := make([]uint64, 0, len(reqs))
+	domainJoinIDs := make([]uint64, 0, len(reqs))
 	crossRefIDs := make([]uint64, 0, len(reqs))
 	userIDSet := make(map[uint64]struct{})
 	for _, req := range reqs {
@@ -217,6 +234,8 @@ func (r *governanceRepository) hydrateApprovalViews(reqs []model.ApprovalRequest
 		switch req.TargetType {
 		case model.ApprovalTargetOrgJoin:
 			orgIDs = append(orgIDs, req.AssetID)
+		case model.ApprovalTargetDomainJoin:
+			domainJoinIDs = append(domainJoinIDs, req.AssetID)
 		case model.ApprovalTargetCrossRef:
 			crossRefIDs = append(crossRefIDs, req.AssetID)
 		default:
@@ -261,6 +280,24 @@ func (r *governanceRepository) hydrateApprovalViews(reqs []model.ApprovalRequest
 		}
 		for _, o := range orgs {
 			orgMap[o.ID] = o.OrgName
+		}
+	}
+
+	domainMap := make(map[uint64]string, len(domainJoinIDs))
+	if len(domainJoinIDs) > 0 {
+		type domainRow struct {
+			ID         uint64
+			DomainName string
+		}
+		var domains []domainRow
+		if err := r.db.Table("biz_domain").
+			Select("id, domain_name").
+			Where("id IN ?", domainJoinIDs).
+			Scan(&domains).Error; err != nil {
+			return nil, err
+		}
+		for _, d := range domains {
+			domainMap[d.ID] = d.DomainName
 		}
 	}
 
@@ -338,6 +375,11 @@ func (r *governanceRepository) hydrateApprovalViews(reqs []model.ApprovalRequest
 			assetName = orgName
 			assetType = "org"
 			domainName = orgName
+		case model.ApprovalTargetDomainJoin:
+			dName := domainMap[req.AssetID]
+			assetName = dName
+			assetType = "domain"
+			domainName = dName
 		case model.ApprovalTargetCrossRef:
 			cr := crossRefMap[req.AssetID]
 			if cr.Title != "" {
@@ -476,6 +518,87 @@ func (r *governanceRepository) HandleOrgJoinApproval(req *model.ApprovalRequest,
 			OrgRole: model.OrgRoleMember,
 		}).Error
 	})
+}
+
+func (r *governanceRepository) HandleDomainJoinApproval(req *model.ApprovalRequest, recordID, approverID uint64, action, comment string) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		now := time.Now()
+		if err := tx.Model(&model.ApprovalRecord{}).Where("id = ?", recordID).Updates(map[string]interface{}{
+			"approver_id": approverID,
+			"action":      action,
+			"comment":     comment,
+			"handled_at":  now,
+		}).Error; err != nil {
+			return err
+		}
+
+		if action == model.ApprovalActionReject {
+			return tx.Model(&model.ApprovalRequest{}).Where("id = ?", req.ID).
+				Update("status", model.ApprovalStatusRejected).Error
+		}
+
+		if err := tx.Model(&model.ApprovalRequest{}).Where("id = ?", req.ID).
+			Update("status", model.ApprovalStatusApproved).Error; err != nil {
+			return err
+		}
+
+		return tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "domain_id"}, {Name: "user_id"}},
+			DoNothing: true,
+		}).Create(&model.DomainMember{
+			DomainID:   req.AssetID,
+			UserID:     req.ApplicantID,
+			DomainRole: model.DomainRoleMember,
+		}).Error
+	})
+}
+
+func (r *governanceRepository) AutoApprovePendingDomainJoin(domainID, applicantID uint64) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		return autoApprovePendingDomainJoinTx(tx, domainID, applicantID)
+	})
+}
+
+func (r *governanceRepository) JoinDomainByQuizTx(domainID, userID uint64) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "domain_id"}, {Name: "user_id"}},
+			DoNothing: true,
+		}).Create(&model.DomainMember{
+			DomainID:   domainID,
+			UserID:     userID,
+			DomainRole: model.DomainRoleMember,
+		}).Error; err != nil {
+			return err
+		}
+		return autoApprovePendingDomainJoinTx(tx, domainID, userID)
+	})
+}
+
+func autoApprovePendingDomainJoinTx(tx *gorm.DB, domainID, applicantID uint64) error {
+	var pendingIDs []uint64
+	if err := tx.Model(&model.ApprovalRequest{}).
+		Where("target_type = ? AND asset_id = ? AND applicant_id = ? AND status = ?",
+			model.ApprovalTargetDomainJoin, domainID, applicantID, model.ApprovalStatusPending).
+		Pluck("id", &pendingIDs).Error; err != nil {
+		return err
+	}
+	if len(pendingIDs) == 0 {
+		return nil
+	}
+	now := time.Now()
+	if err := tx.Model(&model.ApprovalRecord{}).
+		Where("request_id IN ? AND action = ?", pendingIDs, model.ApprovalActionPending).
+		Updates(map[string]interface{}{
+			"action":     model.ApprovalActionApprove,
+			"comment":    "答题验证通过自动关闭",
+			"handled_at": now,
+		}).Error; err != nil {
+		return err
+	}
+	return tx.Model(&model.ApprovalRequest{}).
+		Where("id IN ?", pendingIDs).
+		Update("status", model.ApprovalStatusApproved).Error
 }
 
 func (r *governanceRepository) HandleCrossRefApproval(req *model.ApprovalRequest, recordID, approverID uint64, action, comment string) error {

@@ -13,10 +13,15 @@ import (
 
 type DomainHandler struct {
 	domainSvc service.DomainService
+	govSvc    service.GovernanceService
 }
 
 func NewDomainHandler(domainSvc service.DomainService) *DomainHandler {
 	return &DomainHandler{domainSvc: domainSvc}
+}
+
+func (h *DomainHandler) SetGovernanceService(govSvc service.GovernanceService) {
+	h.govSvc = govSvc
 }
 
 func (h *DomainHandler) ListDomains(c echo.Context) error {
@@ -173,6 +178,70 @@ func (h *DomainHandler) RemoveMember(c echo.Context) error {
 
 	userID := middleware.GetUserID(c)
 	if err := h.domainSvc.RemoveMember(userID, domainID, targetUserID); err != nil {
+		return service.HandleError(c, err)
+	}
+	return response.Success(c, nil)
+}
+
+func (h *DomainHandler) UpdateJoinSettings(c echo.Context) error {
+	domainID, ok := parseUintParam(c, "id")
+	if !ok {
+		return nil
+	}
+
+	var req model.UpdateDomainJoinSettingsRequest
+	if !bindAndValidate(c, &req) {
+		return nil
+	}
+
+	userID := middleware.GetUserID(c)
+	domain, err := h.domainSvc.UpdateJoinSettings(userID, domainID, req)
+	if err != nil {
+		return service.HandleError(c, err)
+	}
+	return response.Success(c, domain)
+}
+
+func (h *DomainHandler) ApplyJoinDomain(c echo.Context) error {
+	domainID, ok := parseUintParam(c, "id")
+	if !ok {
+		return nil
+	}
+	if h.govSvc == nil {
+		return response.InternalError(c, "governance service not configured")
+	}
+
+	var req model.JoinDomainRequest
+	if c.Request().ContentLength != 0 {
+		if !bindAndValidate(c, &req) {
+			return nil
+		}
+	}
+
+	userID := middleware.GetUserID(c)
+	approval, err := h.govSvc.RequestJoinDomain(userID, domainID, req.Reason)
+	if err != nil {
+		return service.HandleError(c, err)
+	}
+	return response.Success(c, approval)
+}
+
+func (h *DomainHandler) JoinDomainByQuiz(c echo.Context) error {
+	domainID, ok := parseUintParam(c, "id")
+	if !ok {
+		return nil
+	}
+	if h.govSvc == nil {
+		return response.InternalError(c, "governance service not configured")
+	}
+
+	var req model.JoinDomainByQuizRequest
+	if !bindAndValidate(c, &req) {
+		return nil
+	}
+
+	userID := middleware.GetUserID(c)
+	if err := h.govSvc.JoinDomainByQuiz(userID, domainID, req.Answer); err != nil {
 		return service.HandleError(c, err)
 	}
 	return response.Success(c, nil)
