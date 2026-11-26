@@ -180,6 +180,7 @@ type KBService interface {
 	SetCrossRefRepo(crossRefRepo repository.CrossRefRepository)
 	SetInteractionRepo(interactionRepo repository.KBInteractionRepository)
 	SetStorageTierService(tierSvc *StorageTierService)
+	SetFallbackStorageSecret(secret string)
 }
 
 type kbService struct {
@@ -192,10 +193,11 @@ type kbService struct {
 	interactionRepo repository.KBInteractionRepository
 	auditRepo       repository.AuditLogRepository
 	userRepo        repository.UserRepository
-	tierSvc         *StorageTierService
-	uploadDir       string
-	storageSecret   string
-	httpClient      *http.Client
+	tierSvc               *StorageTierService
+	uploadDir             string
+	storageSecret         string
+	fallbackStorageSecret string
+	httpClient            *http.Client
 }
 
 func (s *kbService) SetAuditRepos(auditRepo repository.AuditLogRepository, userRepo repository.UserRepository) {
@@ -213,6 +215,10 @@ func (s *kbService) SetInteractionRepo(interactionRepo repository.KBInteractionR
 
 func (s *kbService) SetStorageTierService(tierSvc *StorageTierService) {
 	s.tierSvc = tierSvc
+}
+
+func (s *kbService) SetFallbackStorageSecret(secret string) {
+	s.fallbackStorageSecret = secret
 }
 
 func NewKBService(
@@ -261,7 +267,22 @@ func (s *kbService) readAndDecryptFile(filePath string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return kbcodec.DecryptAtRest(diskBytes, s.storageSecret)
+	plain, err := kbcodec.DecryptAtRest(diskBytes, s.storageSecret)
+	if err == nil {
+		return plain, nil
+	}
+	if s.fallbackStorageSecret != "" && s.fallbackStorageSecret != s.storageSecret {
+		if fallbackPlain, fbErr := kbcodec.DecryptAtRest(diskBytes, s.fallbackStorageSecret); fbErr == nil {
+			// Lazily re-encrypt legacy files under the new STORAGE_SECRET and resync OSS if enabled.
+			if writeErr := s.encryptAndWriteFile(filePath, fallbackPlain); writeErr == nil && s.tierSvc != nil && s.kbRepo != nil {
+				if doc, findErr := s.kbRepo.FindDocumentByFilePath(filePath); findErr == nil && doc != nil {
+					s.tierSvc.MarkLocalAndEnqueueSync(doc.ID, filePath)
+				}
+			}
+			return fallbackPlain, nil
+		}
+	}
+	return nil, err
 }
 
 // EncryptExistingPlainFiles walks KB asset directories under uploadDir and encrypts

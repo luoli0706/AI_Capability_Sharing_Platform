@@ -110,6 +110,7 @@ func main() {
 	domainSvc := service.NewDomainService(domainRepo, userRepo, orgRepo)
 	assetSvc := service.NewAssetService(assetRepo, domainRepo, govRepo, orgRepo, cfg.Storage.UploadDir)
 	kbSvc := service.NewKBService(kbRepo, assetRepo, domainRepo, govRepo, orgRepo, cfg.Storage.UploadDir, storageSecret)
+	kbSvc.SetFallbackStorageSecret(cfg.JWT.Secret)
 	if encryptedCount, err := kbSvc.EncryptExistingPlainFiles(context.Background()); err != nil {
 		logger.Warn("failed to encrypt existing plain KB files at rest", zap.Error(err))
 	} else if encryptedCount > 0 {
