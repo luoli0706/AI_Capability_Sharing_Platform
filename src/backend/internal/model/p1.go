@@ -88,7 +88,7 @@ type KBDocument struct {
 	FolderPath  string         `gorm:"type:varchar(512);index:idx_kb_folder;not null;default:''" json:"folder_path"`
 	IsFolder    bool           `gorm:"type:tinyint(1);not null;default:0" json:"is_folder"`
 	FileName    string         `gorm:"type:varchar(255);not null" json:"file_name"`
-	FileExt     string         `gorm:"type:varchar(16);not null" json:"file_ext"`
+	FileExt     string         `gorm:"type:varchar(64);not null" json:"file_ext"`
 	FileSize    uint64         `gorm:"not null;default:0" json:"file_size"`
 	FilePath    string         `gorm:"type:varchar(512);not null" json:"file_path"`
 	FileHash    string         `gorm:"type:varchar(128);not null;default:''" json:"file_hash"`

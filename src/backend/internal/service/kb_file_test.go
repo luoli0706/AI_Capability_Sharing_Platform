@@ -1957,9 +1957,6 @@ func TestKBFolderWildcardCharactersNoCrossMatch(t *testing.T) {
 func TestVideoPlatformExtensionsAllowed(t *testing.T) {
 	exts := []string{".douyin", ".youtube", ".niconico", ".vimeo", ".qq", ".youku"}
 	for _, ext := range exts {
-		if !allowedKBExts[ext] {
-			t.Fatalf("expected %s to be in allowedKBExts", ext)
-		}
 		if !textKBExts[ext] {
 			t.Fatalf("expected %s to be in textKBExts", ext)
 		}
@@ -1969,7 +1966,7 @@ func TestVideoPlatformExtensionsAllowed(t *testing.T) {
 	}
 }
 
-func TestUploadDocuments_ExtensionWhitelist(t *testing.T) {
+func TestUploadDocuments_ArbitraryExtensionsAndSizeLimit(t *testing.T) {
 	kbRepo := newMockFileKBRepo()
 	assetRepo := &mockP1AssetRepo{
 		assets: map[uint64]*model.AIAsset{
@@ -1983,23 +1980,14 @@ func TestUploadDocuments_ExtensionWhitelist(t *testing.T) {
 	}
 	kbSvc := NewKBService(kbRepo, assetRepo, domainRepo, nil, nil, t.TempDir(), "test-storage-secret")
 
-	blocked := []string{
+	arbitrary := []string{
+		"motion.vmd", "readme.md", "notes.txt", "doc.pdf", "img.png", "main.go", "archive.zip", "vid.bili",
 		"xss.html", "xss.htm", "xss.xhtml", "xss.svg",
 		"evil.js", "evil.mjs", "shell.php", "shell.jsp", "shell.asp", "shell.aspx",
 		"bin.exe", "run.bat", "run.cmd", "run.sh", "run.ps1", "lib.dll",
 		"noext",
 	}
-	for _, name := range blocked {
-		fh := makeSevenOTestFileHeader(t, "files", name, []byte("test"))
-		_, err := kbSvc.UploadDocuments(10, false, 1, "", "", []*multipart.FileHeader{fh})
-		if err == nil {
-			t.Fatalf("expected UploadDocuments to reject dangerous/unknown file %q", name)
-		}
-		assertAppErrStatus(t, err, http.StatusBadRequest)
-	}
-
-	allowed := []string{"readme.md", "notes.txt", "doc.pdf", "img.png", "main.go", "archive.zip", "vid.bili"}
-	for _, name := range allowed {
+	for _, name := range arbitrary {
 		fh := makeSevenOTestFileHeader(t, "files", name, []byte("ok"))
 		docs, err := kbSvc.UploadDocuments(10, false, 1, "", "", []*multipart.FileHeader{fh})
 		if err != nil {
@@ -2008,6 +1996,23 @@ func TestUploadDocuments_ExtensionWhitelist(t *testing.T) {
 		if len(docs) != 1 || docs[0].FileName != name {
 			t.Fatalf("unexpected uploaded doc for %q: %+v", name, docs)
 		}
+	}
+
+	// Verify file size limit (10MB) is still enforced.
+	oversized := bytes.Repeat([]byte("a"), maxKBFileSize+1)
+	fhBig := makeSevenOTestFileHeader(t, "files", "huge.vmd", oversized)
+	if _, err := kbSvc.UploadDocuments(10, false, 1, "", "", []*multipart.FileHeader{fhBig}); err == nil {
+		t.Fatalf("expected UploadDocuments to reject oversized file > 10MB")
+	} else {
+		assertAppErrStatus(t, err, http.StatusBadRequest)
+	}
+
+	// Verify active web MIME types are neutralized on raw fetch.
+	if !isDangerousActiveMIMEType("text/html; charset=utf-8") || !isDangerousActiveMIMEType("image/svg+xml") || !isDangerousActiveMIMEType("application/javascript") {
+		t.Fatalf("expected active web MIME types to be flagged as dangerous")
+	}
+	if isDangerousActiveMIMEType("image/png") || isDangerousActiveMIMEType("application/pdf") {
+		t.Fatalf("expected safe image/pdf MIME types not to be flagged")
 	}
 }
 

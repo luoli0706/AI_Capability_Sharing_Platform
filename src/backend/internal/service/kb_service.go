@@ -392,7 +392,7 @@ func sanitizeMarkdownFileName(raw string) (string, string, error) {
 		name += ".md"
 		ext = ".md"
 	}
-	if !allowedKBExts[ext] {
+	if !textKBExts[ext] {
 		return "", "", NewBadRequest("unsupported file type; allowed: .md, .markdown, .txt, .bili, .douyin, .youtube, .niconico, .vimeo, .qq, .youku, .video")
 	}
 	return name, ext, nil
@@ -570,8 +570,8 @@ func (s *kbService) UploadDocuments(
 		}
 
 		ext := strings.ToLower(filepath.Ext(safeName))
-		if !allowedKBExts[ext] {
-			return nil, NewBadRequest(fmt.Sprintf("不支持上传该文件类型: %s", ext))
+		if len(ext) > 64 {
+			ext = ext[:64]
 		}
 		if fh.Size > maxKBFileSize {
 			return nil, NewBadRequest("单文件大小不能超过 10MB")
@@ -692,6 +692,23 @@ func detectKBMIMEType(ext string, data []byte) string {
 	return "application/octet-stream"
 }
 
+func isDangerousActiveMIMEType(mimeType string) bool {
+	mediaType := strings.ToLower(strings.TrimSpace(strings.Split(mimeType, ";")[0]))
+	switch mediaType {
+	case "text/html",
+		"application/xhtml+xml",
+		"image/svg+xml",
+		"text/javascript",
+		"application/javascript",
+		"application/x-javascript",
+		"text/xml",
+		"application/xml":
+		return true
+	default:
+		return false
+	}
+}
+
 func resolveUploadTarget(baseFolder, relativePath, origFilename string) (folder string, fileName string, err error) {
 	if relativePath != "" {
 		normRel, err := NormalizeFolderPath(relativePath)
@@ -715,7 +732,16 @@ func resolveUploadTarget(baseFolder, relativePath, origFilename string) (folder 
 	}
 
 	replaced := strings.ReplaceAll(origFilename, "\\", "/")
-	return baseFolder, path.Base(replaced), nil
+	base := strings.TrimSpace(path.Base(replaced))
+	if base == "" || base == "." || base == ".." {
+		return "", "", NewBadRequest("invalid file_name")
+	}
+	for _, r := range base {
+		if r < 0x20 || r == 0x7f {
+			return "", "", NewBadRequest("file_name cannot contain control characters")
+		}
+	}
+	return baseFolder, base, nil
 }
 
 func (s *kbService) ListDocuments(userID uint64, isSuperAdmin bool, kbID, refDomainID uint64) ([]model.KBDocument, error) {
@@ -1020,6 +1046,9 @@ func (s *kbService) GetDocumentRaw(userID uint64, isSuperAdmin bool, kbID, docID
 	}
 	mimeType := detectKBMIMEType(ext, raw)
 	isSVG := strings.EqualFold(ext, ".svg")
+	if isDangerousActiveMIMEType(mimeType) {
+		mimeType = "application/octet-stream"
+	}
 	if obf {
 		obfData, err := kbcodec.ObfuscateTransport(raw)
 		if err != nil {

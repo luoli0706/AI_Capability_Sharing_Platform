@@ -208,10 +208,16 @@ func (h *KBHandler) GetDocumentContent(c echo.Context) error {
 	return response.Success(c, res)
 }
 
-func isAttachmentOnlyRawExt(fileName string) bool {
+func isSafeInlineRaw(fileName, mimeType string, isSVG bool) bool {
+	if isSVG {
+		return false
+	}
+	mediaType := strings.ToLower(strings.TrimSpace(strings.Split(mimeType, ";")[0]))
 	switch strings.ToLower(filepath.Ext(fileName)) {
-	case ".html", ".htm", ".xhtml", ".svg", ".xml":
-		return true
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".avif":
+		return strings.HasPrefix(mediaType, "image/") && mediaType != "image/svg+xml"
+	case ".pdf":
+		return mediaType == "application/pdf"
 	default:
 		return false
 	}
@@ -238,9 +244,9 @@ func (h *KBHandler) GetDocumentRaw(c echo.Context) error {
 
 	c.Response().Header().Set("X-Content-Type-Options", "nosniff")
 	c.Response().Header().Set("Content-Security-Policy", "sandbox; default-src 'none'")
-	disposition := "inline"
-	if isSVG || isAttachmentOnlyRawExt(fileName) {
-		disposition = "attachment"
+	disposition := "attachment"
+	if !obf && isSafeInlineRaw(fileName, mimeType, isSVG) {
+		disposition = "inline"
 	}
 	setContentDisposition(c, disposition, fileName)
 	if obf {

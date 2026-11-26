@@ -111,8 +111,12 @@ func TestGetDocumentRaw_SecurityHeadersAndDisposition(t *testing.T) {
 		{"htm forces attachment", "xss.htm", "text/html", false, "attachment;"},
 		{"xhtml forces attachment", "xss.xhtml", "application/xhtml+xml", false, "attachment;"},
 		{"xml forces attachment", "data.xml", "application/xml", false, "attachment;"},
+		{"vmd forces attachment", "motion.vmd", "application/octet-stream", false, "attachment;"},
+		{"js forces attachment", "evil.js", "application/octet-stream", false, "attachment;"},
+		{"exe forces attachment", "bin.exe", "application/octet-stream", false, "attachment;"},
 		{"png stays inline", "logo.png", "image/png", false, "inline;"},
 		{"pdf stays inline", "doc.pdf", "application/pdf", false, "inline;"},
+		{"spoofed png with html mime forces attachment", "fake.png", "text/html", false, "attachment;"},
 	}
 
 	e := echo.New()
