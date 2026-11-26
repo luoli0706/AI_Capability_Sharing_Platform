@@ -68,8 +68,16 @@ func TestBuildSubjectAndHTML(t *testing.T) {
 	if bindSubj != "【AI能力共享平台】修改绑定邮箱验证码" {
 		t.Fatalf("unexpected bind subject: %q", bindSubj)
 	}
+	resetSubj, resetAction := buildSubjectAndAction(PurposeResetPassword)
+	if resetSubj != "【AI能力共享平台】找回密码验证码" || resetAction != "找回密码" {
+		t.Fatalf("unexpected reset subject/action: %q / %q", resetSubj, resetAction)
+	}
 	htmlBody := buildVerificationHTML(regAction, "123456")
 	if !strings.Contains(htmlBody, "123456") || !strings.Contains(htmlBody, "10 分钟") {
 		t.Fatalf("expected code and 10 分钟 in htmlBody, got %s", htmlBody)
+	}
+	noticeHTML := buildPasswordResetNoticeHTML("alice")
+	if !strings.Contains(noticeHTML, "000000") || !strings.Contains(noticeHTML, "个人中心") || !strings.Contains(noticeHTML, "alice") {
+		t.Fatalf("expected 000000, 个人中心, and username in noticeHTML, got %s", noticeHTML)
 	}
 }

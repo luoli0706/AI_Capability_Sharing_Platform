@@ -197,3 +197,14 @@ type UpdatePasswordRequest struct {
 	OldPassword string `json:"old_password" validate:"required"`
 	NewPassword string `json:"new_password" validate:"required,min=6,max=64"`
 }
+
+// SendResetPasswordCodeRequest represents POST /api/v1/auth/password/send-reset-code payload.
+type SendResetPasswordCodeRequest struct {
+	Account string `json:"account" validate:"required,min=1,max=128"`
+}
+
+// ResetPasswordRequest represents POST /api/v1/auth/password/reset payload.
+type ResetPasswordRequest struct {
+	Account   string `json:"account" validate:"required,min=1,max=128"`
+	EmailCode string `json:"email_code" validate:"required,len=6"`
+}

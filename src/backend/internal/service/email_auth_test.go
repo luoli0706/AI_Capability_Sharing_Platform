@@ -113,6 +113,14 @@ func (m *memAuthUserRepo) UpdateEmail(userID uint64, email string, verified bool
 }
 
 func (m *memAuthUserRepo) UpdatePasswordAndTokenVersion(userID uint64, passwordHash string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u, ok := m.users[userID]
+	if !ok {
+		return gorm.ErrRecordNotFound
+	}
+	u.PasswordHash = passwordHash
+	u.TokenVersion++
 	return nil
 }
 func (m *memAuthUserRepo) IncrementTokenVersion(userID uint64) error          { return nil }
@@ -158,14 +166,29 @@ func (m *memEmailRepo) CheckCooldown(email, purpose, clientIP string, window tim
 }
 
 func (m *memEmailRepo) TryAcquireDailyQuota(bizDate, purpose string, limit int) (bool, error) {
+	ok, _, err := m.TryAcquireDailyQuotaWithGlobal(bizDate, purpose, limit, 0)
+	return ok, err
+}
+
+func (m *memEmailRepo) TryAcquireDailyQuotaWithGlobal(bizDate, purpose string, purposeLimit, globalLimit int) (bool, string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	key := bizDate + "|" + purpose
-	if m.quotas[key] >= limit {
-		return false, nil
+	totalSent := 0
+	prefix := bizDate + "|"
+	for k, v := range m.quotas {
+		if strings.HasPrefix(k, prefix) {
+			totalSent += v
+		}
+	}
+	if globalLimit > 0 && totalSent >= globalLimit {
+		return false, "global", nil
+	}
+	key := prefix + purpose
+	if purposeLimit > 0 && m.quotas[key] >= purposeLimit {
+		return false, "purpose", nil
 	}
 	m.quotas[key]++
-	return true, nil
+	return true, "", nil
 }
 
 func (m *memEmailRepo) ReleaseDailyQuota(bizDate, purpose string) error {
@@ -240,6 +263,7 @@ func (m *memEmailRepo) VerifyAndConsumeCode(email, purpose, plainCode, hmacSecre
 type stubMailer struct {
 	mu       sync.Mutex
 	sent     []struct{ Email, Purpose, Code string }
+	notices  []struct{ Email, Username string }
 	failNext bool
 }
 
@@ -250,6 +274,16 @@ func (s *stubMailer) SendVerificationCode(_ context.Context, toEmail, purpose, c
 		return errors.New("smtp error")
 	}
 	s.sent = append(s.sent, struct{ Email, Purpose, Code string }{toEmail, purpose, code})
+	return nil
+}
+
+func (s *stubMailer) SendPasswordResetNotice(_ context.Context, toEmail, username string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failNext {
+		return errors.New("smtp error")
+	}
+	s.notices = append(s.notices, struct{ Email, Username string }{toEmail, username})
 	return nil
 }
 
@@ -442,5 +476,108 @@ func TestVerificationCodeMaxAttemptsAndFullFlowsAndLoginLockout(t *testing.T) {
 	legacyRes, err := authSvc.LoginWithIP(model.LoginRequest{Username: "legacy_user", Password: "Legacy123"}, "10.0.0.2")
 	if err != nil || legacyRes.Token == "" || legacyRes.User.Email != "" || legacyRes.User.EmailVerified {
 		t.Fatalf("expected legacy user login success, got res=%+v err=%v", legacyRes, err)
+	}
+}
+
+func TestResetPasswordFlowAndGlobalQuota200(t *testing.T) {
+	userRepo := newMemAuthUserRepo()
+	emailRepo := newMemEmailRepo()
+	mailer := &stubMailer{}
+	now := time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC)
+
+	emailSvc := NewEmailService(emailRepo, userRepo, mailer, "test-hmac").(*emailService)
+	emailSvc.nowFn = func() time.Time { return now }
+
+	authSvc := NewAuthService(userRepo, config.JWTConfig{Secret: "jwt-secret", ExpireHours: 24}).(*authService)
+	authSvc.SetEmailService(emailSvc)
+	authSvc.nowFn = func() time.Time { return now }
+
+	// 1. User without bound email -> returns bad request telling user to contact admin, and does not deduct quota
+	hashNoEmail, _ := password.Hash("NoEmail123")
+	_ = userRepo.CreateWithRole(&model.SysUser{
+		Username:     "unbound_user",
+		PasswordHash: hashNoEmail,
+		Nickname:     "Unbound",
+		Email:        nil,
+		Status:       model.UserStatusActive,
+		TokenVersion: 1,
+	}, model.RoleDeveloper)
+
+	_, err := authSvc.SendResetPasswordCode(context.Background(), "unbound_user", "10.0.0.10")
+	assertAppErrStatus(t, err, http.StatusBadRequest)
+	if !strings.Contains(err.Error(), "联系网站管理员") {
+		t.Fatalf("expected contact admin message, got: %v", err)
+	}
+	bizDate := now.In(emailSvc.loc).Format("2006-01-02")
+	if emailRepo.quotas[bizDate+"|"+model.EmailPurposeResetPassword] != 0 {
+		t.Fatalf("expected 0 quota deducted for unbound user, got %d", emailRepo.quotas[bizDate+"|"+model.EmailPurposeResetPassword])
+	}
+
+	// 2. User with bound email -> send reset code, verify masked email, reset to 000000, old token version invalidated, login with 000000, notice sent
+	boundEmail := "luna@gmail.com"
+	hashBound, _ := password.Hash("OldPass123")
+	_ = userRepo.CreateWithRole(&model.SysUser{
+		Username:      "luna",
+		PasswordHash:  hashBound,
+		Nickname:      "Luna",
+		Email:         &boundEmail,
+		EmailVerified: true,
+		Status:        model.UserStatusActive,
+		TokenVersion:  1,
+	}, model.RoleDeveloper)
+
+	oldLogin, err := authSvc.LoginWithIP(model.LoginRequest{Username: "luna", Password: "OldPass123"}, "10.0.0.11")
+	if err != nil || oldLogin.Token == "" {
+		t.Fatalf("initial login failed: %v", err)
+	}
+
+	masked, err := authSvc.SendResetPasswordCode(context.Background(), "luna", "10.0.0.11")
+	if err != nil {
+		t.Fatalf("send reset code failed: %v", err)
+	}
+	if masked != "lu***@gmail.com" {
+		t.Fatalf("expected masked email lu***@gmail.com, got %q", masked)
+	}
+	if len(mailer.sent) != 1 || mailer.sent[0].Purpose != model.EmailPurposeResetPassword {
+		t.Fatalf("unexpected sent code record: %+v", mailer.sent)
+	}
+
+	if err := authSvc.ResetPasswordByEmail(context.Background(), model.ResetPasswordRequest{
+		Account:   "luna",
+		EmailCode: mailer.sent[0].Code,
+	}); err != nil {
+		t.Fatalf("reset password failed: %v", err)
+	}
+
+	// TokenVersion incremented (old token invalidated)
+	uAfter, _ := userRepo.FindByUsername("luna")
+	if uAfter.TokenVersion != 2 {
+		t.Fatalf("expected TokenVersion 2 after reset, got %d", uAfter.TokenVersion)
+	}
+
+	// Notice email sent
+	if len(mailer.notices) != 1 || mailer.notices[0].Email != boundEmail || mailer.notices[0].Username != "luna" {
+		t.Fatalf("expected reset notice email sent, got %+v", mailer.notices)
+	}
+
+	// Old password fails, "000000" succeeds
+	if _, err := authSvc.LoginWithIP(model.LoginRequest{Username: "luna", Password: "OldPass123"}, "10.0.0.12"); err == nil {
+		t.Fatalf("expected old password to fail after reset")
+	}
+	newLogin, err := authSvc.LoginWithIP(model.LoginRequest{Username: "luna", Password: "000000"}, "10.0.0.13")
+	if err != nil || newLogin.Token == "" {
+		t.Fatalf("expected login with 000000 to succeed, got err=%v", err)
+	}
+
+	// 3. Global 200 cap: register (100) + bind (75) + reset (23) + 2 already sent = 200 -> next send blocked
+	emailRepo.quotas[bizDate+"|"+model.EmailPurposeRegister] = 100
+	emailRepo.quotas[bizDate+"|"+model.EmailPurposeBindEmail] = 75
+	emailRepo.quotas[bizDate+"|"+model.EmailPurposeResetPassword] = 25 // total = 200
+
+	now = now.Add(65 * time.Second)
+	_, err = authSvc.SendResetPasswordCode(context.Background(), "luna@gmail.com", "10.0.0.14")
+	assertAppErrStatus(t, err, http.StatusTooManyRequests)
+	if !strings.Contains(err.Error(), "今日邮件发送额度已耗尽") {
+		t.Fatalf("expected global quota exhausted message, got: %v", err)
 	}
 }

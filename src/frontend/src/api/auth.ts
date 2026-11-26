@@ -25,6 +25,23 @@ export function login(data: LoginPayload): Promise<LoginResult> {
   return apiPost<LoginResult, LoginPayload>('/auth/login', data)
 }
 
+export function sendResetPasswordCode(account: string): Promise<{ masked_email?: string }> {
+  return apiPost<{ masked_email?: string }, { account: string }>(
+    '/auth/password/send-reset-code',
+    { account }
+  )
+}
+
+export function resetPasswordByEmail(payload: {
+  account: string
+  email_code: string
+}): Promise<{ message?: string } | null> {
+  return apiPost<{ message?: string } | null, { account: string; email_code: string }>(
+    '/auth/password/reset',
+    payload
+  )
+}
+
 export function logout(): Promise<null> {
   return apiPost<null>('/auth/logout')
 }

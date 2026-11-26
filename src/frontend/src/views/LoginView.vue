@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { reactive, ref } from 'vue'
+import { onUnmounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Lock, User } from '@element-plus/icons-vue'
-import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
+import { Key, Lock, User } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
+import { resetPasswordByEmail, sendResetPasswordCode } from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
 
 const route = useRoute()
@@ -20,6 +21,138 @@ const form = reactive({
 const rules: FormRules = {
   username: [{ required: true, message: '请输入用户名', trigger: 'blur' }],
   password: [{ required: true, message: '请输入密码', trigger: 'blur' }]
+}
+
+const resetDialogVisible = ref(false)
+const resetFormRef = ref<FormInstance>()
+const resetLoading = ref(false)
+const sendingResetCode = ref(false)
+const resetCountdown = ref(0)
+const resetError = ref('')
+const resetSuccessHint = ref('')
+let resetCountdownTimer: ReturnType<typeof setInterval> | null = null
+
+const resetForm = reactive({
+  account: '',
+  email_code: ''
+})
+
+const resetRules: FormRules = {
+  account: [{ required: true, message: '请输入用户名或已绑定邮箱', trigger: 'blur' }],
+  email_code: [
+    { required: true, message: '请输入 6 位数字验证码', trigger: 'blur' },
+    { pattern: /^\d{6}$/, message: '验证码为 6 位数字', trigger: 'blur' }
+  ]
+}
+
+function extractErrorMessage(err: unknown, fallback: string): string {
+  if (err && typeof err === 'object') {
+    const maybeAxios = err as { response?: { data?: { message?: string } }; message?: string }
+    if (maybeAxios.response?.data?.message) return maybeAxios.response.data.message
+    if (maybeAxios.message) return maybeAxios.message
+  }
+  return fallback
+}
+
+function clearResetTimer() {
+  if (resetCountdownTimer) {
+    clearInterval(resetCountdownTimer)
+    resetCountdownTimer = null
+  }
+  resetCountdown.value = 0
+}
+
+function startResetCountdown() {
+  clearResetTimer()
+  resetCountdown.value = 60
+  resetCountdownTimer = setInterval(() => {
+    if (resetCountdown.value <= 1) {
+      clearResetTimer()
+      return
+    }
+    resetCountdown.value -= 1
+  }, 1000)
+}
+
+onUnmounted(() => {
+  clearResetTimer()
+})
+
+function openResetDialog() {
+  resetError.value = ''
+  resetSuccessHint.value = ''
+  resetForm.account = form.username.trim()
+  resetForm.email_code = ''
+  resetDialogVisible.value = true
+  resetFormRef.value?.clearValidate()
+}
+
+function handleResetDialogClose() {
+  clearResetTimer()
+  resetError.value = ''
+  resetSuccessHint.value = ''
+  resetForm.email_code = ''
+  resetFormRef.value?.clearValidate()
+}
+
+async function handleSendResetCode() {
+  if (!resetFormRef.value || sendingResetCode.value || resetCountdown.value > 0) return
+  resetError.value = ''
+  resetSuccessHint.value = ''
+  const accountValid = await resetFormRef.value
+    .validateField('account')
+    .then(() => true)
+    .catch(() => false)
+  if (!accountValid) return
+
+  sendingResetCode.value = true
+  try {
+    const res = await sendResetPasswordCode(resetForm.account.trim())
+    const maskedEmail = res?.masked_email
+    const hint = maskedEmail
+      ? `验证码已发送至绑定邮箱 ${maskedEmail}，请注意查收`
+      : '验证码已发送至您的绑定邮箱，请注意查收'
+    resetSuccessHint.value = hint
+    ElMessage.success(hint)
+    startResetCountdown()
+  } catch (err: unknown) {
+    resetError.value = extractErrorMessage(err, '发送验证码失败，请稍后重试')
+  } finally {
+    sendingResetCode.value = false
+  }
+}
+
+async function handleResetSubmit() {
+  if (!resetFormRef.value) return
+  resetError.value = ''
+  const valid = await resetFormRef.value.validate().catch(() => false)
+  if (!valid) return
+
+  const account = resetForm.account.trim()
+  resetLoading.value = true
+  try {
+    await resetPasswordByEmail({
+      account,
+      email_code: resetForm.email_code.trim()
+    })
+    resetDialogVisible.value = false
+    if (!account.includes('@')) {
+      form.username = account
+    }
+    form.password = ''
+    await ElMessageBox.alert(
+      '密码已重置为 000000（六个零），并已向您的绑定邮箱发送提醒，请立即使用 000000 登录并前往个人中心修改密码！',
+      '密码重置成功',
+      {
+        type: 'success',
+        confirmButtonText: '知道了'
+      }
+    )
+  } catch (err: unknown) {
+    resetError.value = extractErrorMessage(err, '重置密码失败，请检查输入信息')
+  } finally {
+    resetLoading.value = false
+  }
 }
 
 const highlights = [
@@ -126,6 +259,12 @@ async function handleSubmit() {
             />
           </el-form-item>
 
+          <div class="login-actions-row">
+            <el-button link type="primary" class="forgot-link-btn" @click="openResetDialog">
+              忘记密码？
+            </el-button>
+          </div>
+
           <el-button
             type="primary"
             native-type="submit"
@@ -142,6 +281,82 @@ async function handleSubmit() {
         </div>
       </div>
     </section>
+
+    <el-dialog
+      v-model="resetDialogVisible"
+      title="找回密码"
+      width="440px"
+      destroy-on-close
+      @close="handleResetDialogClose"
+    >
+      <p class="reset-desc">
+        输入用户名或已绑定邮箱，验证绑定邮箱后将把密码重置为 <code>000000</code>（六个零）；若账号尚未绑定邮箱，请联系网站管理员解决。
+      </p>
+
+      <el-alert
+        v-if="resetError"
+        :title="resetError"
+        type="error"
+        show-icon
+        closable
+        style="margin-bottom: 16px"
+        @close="resetError = ''"
+      />
+
+      <el-alert
+        v-if="resetSuccessHint"
+        :title="resetSuccessHint"
+        type="success"
+        show-icon
+        closable
+        style="margin-bottom: 16px"
+        @close="resetSuccessHint = ''"
+      />
+
+      <el-form
+        ref="resetFormRef"
+        :model="resetForm"
+        :rules="resetRules"
+        label-position="top"
+        size="large"
+        @submit.prevent="handleResetSubmit"
+      >
+        <el-form-item label="用户名或绑定邮箱" prop="account">
+          <el-input
+            v-model="resetForm.account"
+            placeholder="请输入用户名或已绑定邮箱"
+            :prefix-icon="User"
+          />
+        </el-form-item>
+
+        <el-form-item label="邮箱验证码" prop="email_code">
+          <div class="code-row">
+            <el-input
+              v-model="resetForm.email_code"
+              maxlength="6"
+              placeholder="请输入 6 位数字验证码"
+              :prefix-icon="Key"
+              autocomplete="one-time-code"
+            />
+            <el-button
+              class="send-code-btn"
+              :loading="sendingResetCode"
+              :disabled="sendingResetCode || resetCountdown > 0"
+              @click="handleSendResetCode"
+            >
+              {{ resetCountdown > 0 ? `${resetCountdown}s 后重试` : '发送验证码' }}
+            </el-button>
+          </div>
+        </el-form-item>
+      </el-form>
+
+      <template #footer>
+        <el-button @click="resetDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="resetLoading" @click="handleResetSubmit">
+          确认重置密码
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -280,6 +495,45 @@ async function handleSubmit() {
   margin: 8px 0 28px;
   font-size: 14px;
   color: var(--ascp-text-muted);
+}
+
+.login-actions-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: -10px;
+  margin-bottom: 10px;
+}
+
+.forgot-link-btn {
+  padding: 0;
+  font-size: 13.5px;
+  font-weight: 500;
+}
+
+.reset-desc {
+  margin: 0 0 16px;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--ascp-text-secondary);
+}
+
+.reset-desc code {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background-color: var(--ascp-bg-subtle, #f1f5f9);
+  color: var(--ascp-primary);
+  font-weight: 600;
+}
+
+.code-row {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+}
+
+.send-code-btn {
+  flex-shrink: 0;
+  min-width: 116px;
 }
 
 .submit-btn {

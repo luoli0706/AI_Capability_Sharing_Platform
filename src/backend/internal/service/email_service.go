@@ -14,16 +14,19 @@ import (
 )
 
 const (
-	DailyQuotaRegister   = 100
-	DailyQuotaBindEmail  = 75
-	EmailCooldownWindow  = 60 * time.Second
-	EmailCodeTTL         = 10 * time.Minute
-	EmailCodeMaxAttempts = 5
+	DailyQuotaRegister    = 100
+	DailyQuotaBindEmail   = 75
+	DailyQuotaGlobalTotal = 200
+	EmailCooldownWindow   = 60 * time.Second
+	EmailCodeTTL          = 10 * time.Minute
+	EmailCodeMaxAttempts  = 5
 )
 
 type EmailService interface {
 	SendPublicRegisterCode(ctx context.Context, rawEmail, clientIP string) error
 	SendBindEmailCode(ctx context.Context, userID uint64, rawEmail, clientIP string) error
+	SendResetPasswordCode(ctx context.Context, account, clientIP string) (string, error)
+	SendPasswordResetNotice(ctx context.Context, toEmail, username string) error
 	VerifyCode(rawEmail, purpose, code string) error
 }
 
@@ -87,6 +90,43 @@ func (s *emailService) SendBindEmailCode(ctx context.Context, userID uint64, raw
 	return s.sendCode(ctx, &userID, normalized, model.EmailPurposeBindEmail, clientIP, DailyQuotaBindEmail, "今日修改绑定邮箱名额已耗尽，等明日再来")
 }
 
+func (s *emailService) SendResetPasswordCode(ctx context.Context, account, clientIP string) (string, error) {
+	user, boundEmail, err := resolveUserByAccount(s.userRepo, account)
+	if err != nil {
+		return "", err
+	}
+	if err := s.sendCode(ctx, &user.ID, boundEmail, model.EmailPurposeResetPassword, clientIP, 0, "今日邮件发送额度已耗尽，请明日再试"); err != nil {
+		return "", err
+	}
+	return maskEmail(boundEmail), nil
+}
+
+func (s *emailService) SendPasswordResetNotice(ctx context.Context, toEmail, username string) error {
+	if s.mailer == nil {
+		return &AppError{HTTPStatus: 503, Code: 50301, Message: "邮件服务未配置，请联系管理员"}
+	}
+	normalized := strings.ToLower(strings.TrimSpace(toEmail))
+	if normalized == "" {
+		return nil
+	}
+
+	bizDate := s.nowFn().In(s.loc).Format("2006-01-02")
+	acquired, _, err := s.emailRepo.TryAcquireDailyQuotaWithGlobal(bizDate, model.EmailPurposeResetPassword, 0, DailyQuotaGlobalTotal)
+	if err != nil {
+		return err
+	}
+	if !acquired {
+		// Do not block password reset flow when daily global email quota (200) is exhausted.
+		return nil
+	}
+
+	if err := s.mailer.SendPasswordResetNotice(ctx, normalized, username); err != nil {
+		_ = s.emailRepo.ReleaseDailyQuota(bizDate, model.EmailPurposeResetPassword)
+		return err
+	}
+	return nil
+}
+
 func (s *emailService) VerifyCode(rawEmail, purpose, code string) error {
 	normalized, err := validateAndCheckDisposableEmail(rawEmail)
 	if err != nil {
@@ -132,11 +172,14 @@ func (s *emailService) sendCode(
 	}
 
 	bizDate := now.In(s.loc).Format("2006-01-02")
-	acquired, err := s.emailRepo.TryAcquireDailyQuota(bizDate, purpose, dailyLimit)
+	acquired, reason, err := s.emailRepo.TryAcquireDailyQuotaWithGlobal(bizDate, purpose, dailyLimit, DailyQuotaGlobalTotal)
 	if err != nil {
 		return err
 	}
 	if !acquired {
+		if reason == "global" {
+			return NewTooManyRequests("今日邮件发送额度已耗尽，请明日再试")
+		}
 		return NewTooManyRequests(quotaExhaustedMsg)
 	}
 
@@ -182,4 +225,60 @@ func validateAndCheckDisposableEmail(raw string) (string, error) {
 		return "", NewBadRequest("不支持使用临时邮箱地址")
 	}
 	return normalized, nil
+}
+
+func resolveUserByAccount(userRepo repository.UserRepository, account string) (*model.SysUser, string, error) {
+	trimmed := strings.TrimSpace(account)
+	if trimmed == "" {
+		return nil, "", NewBadRequest("请输入用户名或绑定邮箱")
+	}
+
+	var user *model.SysUser
+	if strings.Contains(trimmed, "@") {
+		normalized, err := validateAndCheckDisposableEmail(trimmed)
+		if err != nil {
+			return nil, "", err
+		}
+		user, err = userRepo.FindByEmail(normalized)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, "", NewNotFound("未找到绑定该邮箱的账号，若尚未绑定邮箱请联系网站管理员解决")
+			}
+			return nil, "", err
+		}
+	} else {
+		var err error
+		user, err = userRepo.FindByUsername(trimmed)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, "", NewNotFound("账号不存在，请检查用户名或联系网站管理员")
+			}
+			return nil, "", err
+		}
+	}
+
+	if user.Email == nil || strings.TrimSpace(*user.Email) == "" {
+		return nil, "", NewBadRequest("该账号尚未绑定邮箱，请联系网站管理员解决")
+	}
+	if user.Status != model.UserStatusActive {
+		return nil, "", NewForbidden("账号已被禁用，请联系网站管理员")
+	}
+
+	return user, strings.ToLower(strings.TrimSpace(*user.Email)), nil
+}
+
+func maskEmail(email string) string {
+	atIdx := strings.LastIndexByte(email, '@')
+	if atIdx <= 0 || atIdx >= len(email)-1 {
+		return "***"
+	}
+	local := []rune(email[:atIdx])
+	domain := email[atIdx+1:]
+	if len(local) <= 1 {
+		return "*@" + domain
+	}
+	if len(local) == 2 {
+		return string(local[:1]) + "***@" + domain
+	}
+	return string(local[:2]) + "***@" + domain
 }

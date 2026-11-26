@@ -25,6 +25,7 @@ var (
 type EmailRepository interface {
 	CheckCooldown(email, purpose, clientIP string, window time.Duration, now time.Time) (emailLimited bool, ipLimited bool, err error)
 	TryAcquireDailyQuota(bizDate, purpose string, limit int) (bool, error)
+	TryAcquireDailyQuotaWithGlobal(bizDate, purpose string, purposeLimit, globalLimit int) (bool, string, error)
 	ReleaseDailyQuota(bizDate, purpose string) error
 	CreateCode(code *model.EmailVerificationCode) error
 	InvalidateCode(id uint64, now time.Time) error
@@ -62,28 +63,70 @@ func (r *emailRepository) CheckCooldown(email, purpose, clientIP string, window 
 }
 
 func (r *emailRepository) TryAcquireDailyQuota(bizDate, purpose string, limit int) (bool, error) {
-	// Ensure row exists safely across both MySQL and SQLite under concurrency.
-	if err := r.db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "biz_date"}, {Name: "purpose"}},
-		DoNothing: true,
-	}).Create(&model.EmailDailyQuota{
-		BizDate:   bizDate,
-		Purpose:   purpose,
-		SentCount: 0,
-	}).Error; err != nil {
-		return false, err
-	}
+	ok, _, err := r.TryAcquireDailyQuotaWithGlobal(bizDate, purpose, limit, 0)
+	return ok, err
+}
 
-	res := r.db.Model(&model.EmailDailyQuota{}).
-		Where("biz_date = ? AND purpose = ? AND sent_count < ?", bizDate, purpose, limit).
-		Updates(map[string]interface{}{
-			"sent_count": gorm.Expr("sent_count + 1"),
-			"updated_at": time.Now(),
-		})
-	if res.Error != nil {
-		return false, res.Error
+func (r *emailRepository) TryAcquireDailyQuotaWithGlobal(bizDate, purpose string, purposeLimit, globalLimit int) (bool, string, error) {
+	acquired := false
+	reason := ""
+
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		// Ensure row exists safely across both MySQL and SQLite under concurrency.
+		if err := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "biz_date"}, {Name: "purpose"}},
+			DoNothing: true,
+		}).Create(&model.EmailDailyQuota{
+			BizDate:   bizDate,
+			Purpose:   purpose,
+			SentCount: 0,
+		}).Error; err != nil {
+			return err
+		}
+
+		var rows []model.EmailDailyQuota
+		query := tx.Where("biz_date = ?", bizDate)
+		if tx.Dialector.Name() != "sqlite" {
+			query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+		}
+		if err := query.Find(&rows).Error; err != nil {
+			return err
+		}
+
+		totalSent := 0
+		purposeSent := 0
+		for _, row := range rows {
+			totalSent += row.SentCount
+			if row.Purpose == purpose {
+				purposeSent = row.SentCount
+			}
+		}
+
+		if globalLimit > 0 && totalSent >= globalLimit {
+			reason = "global"
+			return nil
+		}
+		if purposeLimit > 0 && purposeSent >= purposeLimit {
+			reason = "purpose"
+			return nil
+		}
+
+		res := tx.Model(&model.EmailDailyQuota{}).
+			Where("biz_date = ? AND purpose = ?", bizDate, purpose).
+			Updates(map[string]interface{}{
+				"sent_count": gorm.Expr("sent_count + 1"),
+				"updated_at": time.Now(),
+			})
+		if res.Error != nil {
+			return res.Error
+		}
+		acquired = res.RowsAffected > 0
+		return nil
+	})
+	if err != nil {
+		return false, "", err
 	}
-	return res.RowsAffected > 0, nil
+	return acquired, reason, nil
 }
 
 func (r *emailRepository) ReleaseDailyQuota(bizDate, purpose string) error {

@@ -3,8 +3,9 @@ package model
 import "time"
 
 const (
-	EmailPurposeRegister  = "register"
-	EmailPurposeBindEmail = "bind_email"
+	EmailPurposeRegister      = "register"
+	EmailPurposeBindEmail     = "bind_email"
+	EmailPurposeResetPassword = "reset_password"
 )
 
 // EmailVerificationCode stores hashed 6-digit email verification codes with cooldown & attempt tracking.

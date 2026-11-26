@@ -1,7 +1,9 @@
 package service
 
 import (
+	"context"
 	"errors"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -10,6 +12,7 @@ import (
 	"ascp-backend/internal/config"
 	"ascp-backend/internal/model"
 	"ascp-backend/internal/pkg/jwt"
+	"ascp-backend/internal/pkg/mailer"
 	"ascp-backend/internal/pkg/password"
 	"ascp-backend/internal/repository"
 
@@ -31,6 +34,8 @@ type AuthService interface {
 	UpdateProfile(userID uint64, req model.UpdateProfileRequest) (*model.UserInfo, error)
 	BindEmail(userID uint64, req model.BindEmailRequest) (*model.UserInfo, error)
 	UpdatePassword(userID uint64, req model.UpdatePasswordRequest) error
+	SendResetPasswordCode(ctx context.Context, account, clientIP string) (string, error)
+	ResetPasswordByEmail(ctx context.Context, req model.ResetPasswordRequest) error
 }
 
 type loginAttemptState struct {
@@ -279,6 +284,42 @@ func (s *authService) UpdatePassword(userID uint64, req model.UpdatePasswordRequ
 	}
 
 	return s.userRepo.UpdatePasswordAndTokenVersion(userID, hash)
+}
+
+func (s *authService) SendResetPasswordCode(ctx context.Context, account, clientIP string) (string, error) {
+	if s.emailSvc == nil {
+		return "", &AppError{HTTPStatus: 503, Code: 50301, Message: "邮箱验证服务未初始化"}
+	}
+	return s.emailSvc.SendResetPasswordCode(ctx, account, clientIP)
+}
+
+func (s *authService) ResetPasswordByEmail(ctx context.Context, req model.ResetPasswordRequest) error {
+	if s.emailSvc == nil {
+		return &AppError{HTTPStatus: 503, Code: 50301, Message: "邮箱验证服务未初始化"}
+	}
+
+	user, boundEmail, err := resolveUserByAccount(s.userRepo, req.Account)
+	if err != nil {
+		return err
+	}
+
+	if err := s.emailSvc.VerifyCode(boundEmail, mailer.PurposeResetPassword, req.EmailCode); err != nil {
+		return err
+	}
+
+	hash, err := password.Hash("000000")
+	if err != nil {
+		return err
+	}
+
+	if err := s.userRepo.UpdatePasswordAndTokenVersion(user.ID, hash); err != nil {
+		return err
+	}
+
+	if err := s.emailSvc.SendPasswordResetNotice(ctx, boundEmail, user.Username); err != nil {
+		log.Printf("failed to send password reset notice email to %s (user=%s): %v", boundEmail, user.Username, err)
+	}
+	return nil
 }
 
 func validatePasswordComplexity(pw string) error {

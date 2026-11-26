@@ -133,3 +133,33 @@ func (h *AuthHandler) UpdatePassword(c echo.Context) error {
 	}
 	return response.Success(c, nil)
 }
+
+func (h *AuthHandler) SendResetPasswordCode(c echo.Context) error {
+	var req model.SendResetPasswordCodeRequest
+	if !bindAndValidate(c, &req) {
+		return nil
+	}
+
+	maskedEmail, err := h.authSvc.SendResetPasswordCode(c.Request().Context(), req.Account, c.RealIP())
+	if err != nil {
+		return service.HandleError(c, err)
+	}
+	return response.Success(c, map[string]string{
+		"message":      "验证码已发送至绑定邮箱",
+		"masked_email": maskedEmail,
+	})
+}
+
+func (h *AuthHandler) ResetPassword(c echo.Context) error {
+	var req model.ResetPasswordRequest
+	if !bindAndValidate(c, &req) {
+		return nil
+	}
+
+	if err := h.authSvc.ResetPasswordByEmail(c.Request().Context(), req); err != nil {
+		return service.HandleError(c, err)
+	}
+	return response.Success(c, map[string]string{
+		"message": "密码已重置为 000000，请尽快登录并前往个人中心修改密码",
+	})
+}

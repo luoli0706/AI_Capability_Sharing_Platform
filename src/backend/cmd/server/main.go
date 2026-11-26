@@ -226,6 +226,8 @@ func main() {
 	v1.POST("/auth/email/send-code", authHandler.SendRegisterEmailCode)
 	v1.POST("/auth/register", authHandler.Register)
 	v1.POST("/auth/login", authHandler.Login)
+	v1.POST("/auth/password/send-reset-code", authHandler.SendResetPasswordCode, ascpMiddleware.RateLimitByUserOrIP(10, time.Minute))
+	v1.POST("/auth/password/reset", authHandler.ResetPassword, ascpMiddleware.RateLimitByUserOrIP(10, time.Minute))
 
 	// Protected routes (JWT)
 	protected := v1.Group("", ascpMiddleware.AuthMiddleware(cfg.JWT.Secret, userRepo))

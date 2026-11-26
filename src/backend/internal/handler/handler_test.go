@@ -365,12 +365,24 @@ func (m *memAssetRepo) IncrementInvokeCount(assetID uint64) error {
 	return nil
 }
 
-type mockHandlerEmailService struct{}
+type mockHandlerEmailService struct {
+	noticesSent int
+}
 
 func (m *mockHandlerEmailService) SendPublicRegisterCode(ctx context.Context, rawEmail, clientIP string) error {
 	return nil
 }
 func (m *mockHandlerEmailService) SendBindEmailCode(ctx context.Context, userID uint64, rawEmail, clientIP string) error {
+	return nil
+}
+func (m *mockHandlerEmailService) SendResetPasswordCode(ctx context.Context, account, clientIP string) (string, error) {
+	if account == "unbound" {
+		return "", service.NewBadRequest("该账号尚未绑定邮箱，请联系网站管理员解决")
+	}
+	return "al***@example.com", nil
+}
+func (m *mockHandlerEmailService) SendPasswordResetNotice(ctx context.Context, toEmail, username string) error {
+	m.noticesSent++
 	return nil
 }
 func (m *mockHandlerEmailService) VerifyCode(rawEmail, purpose, code string) error {
@@ -406,6 +418,8 @@ func setupTestEcho() *echo.Echo {
 	v1.POST("/auth/email/send-code", authH.SendRegisterEmailCode)
 	v1.POST("/auth/register", authH.Register)
 	v1.POST("/auth/login", authH.Login)
+	v1.POST("/auth/password/send-reset-code", authH.SendResetPasswordCode)
+	v1.POST("/auth/password/reset", authH.ResetPassword)
 
 	protected := v1.Group("", middleware.AuthMiddleware(jwtCfg.Secret, userRepo))
 	protected.POST("/auth/logout", authH.Logout)
@@ -580,4 +594,53 @@ func TestOptionalEmailAndBioAvatarProfile(t *testing.T) {
 	if profRes.Data.Email != "noemail1@example.com" || !profRes.Data.EmailVerified || profRes.Data.Bio != "Building AI capabilities" || profRes.Data.Avatar != avatarData {
 		t.Fatalf("unexpected updated profile: %+v", profRes.Data)
 	}
+}
+
+func TestForgotPasswordResetEndpoints(t *testing.T) {
+	e := setupTestEcho()
+
+	// Register user with bound email
+	recReg := doJSON(e, http.MethodPost, "/api/v1/auth/register", "", map[string]string{
+		"username":   "bob",
+		"password":   "BobPass123",
+		"email":      "bob@example.com",
+		"email_code": "123456",
+	})
+	assertStatus(t, recReg.Code, http.StatusOK, recReg.Body.String())
+
+	// Login to obtain old token
+	recLogin := doJSON(e, http.MethodPost, "/api/v1/auth/login", "", map[string]string{
+		"username": "bob",
+		"password": "BobPass123",
+	})
+	assertStatus(t, recLogin.Code, http.StatusOK, recLogin.Body.String())
+	var loginRes struct {
+		Data model.LoginResponse `json:"data"`
+	}
+	_ = json.Unmarshal(recLogin.Body.Bytes(), &loginRes)
+	oldToken := loginRes.Data.Token
+
+	// Send reset code -> 200 with masked_email
+	recSend := doJSON(e, http.MethodPost, "/api/v1/auth/password/send-reset-code", "", map[string]string{
+		"account": "bob",
+	})
+	assertStatus(t, recSend.Code, http.StatusOK, recSend.Body.String())
+
+	// Reset password -> 200
+	recReset := doJSON(e, http.MethodPost, "/api/v1/auth/password/reset", "", map[string]string{
+		"account":    "bob@example.com",
+		"email_code": "123456",
+	})
+	assertStatus(t, recReset.Code, http.StatusOK, recReset.Body.String())
+
+	// Old token is now invalid -> 401
+	recProf := doJSON(e, http.MethodGet, "/api/v1/user/profile", oldToken, nil)
+	assertStatus(t, recProf.Code, http.StatusUnauthorized, recProf.Body.String())
+
+	// Login with 000000 succeeds -> 200
+	recNewLogin := doJSON(e, http.MethodPost, "/api/v1/auth/login", "", map[string]string{
+		"username": "bob",
+		"password": "000000",
+	})
+	assertStatus(t, recNewLogin.Code, http.StatusOK, recNewLogin.Body.String())
 }
