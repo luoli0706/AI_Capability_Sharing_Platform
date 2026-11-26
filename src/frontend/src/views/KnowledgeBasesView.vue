@@ -600,6 +600,7 @@ async function fetchKbs() {
     kbList.value = normalized.items
     kbTotal.value = normalized.total
     activeCrossRefs.value = normalizeList(crossRefsRes).items
+    loadingKbs.value = false
 
     if (kbSelectorEntries.value.length > 0) {
       await applyRouteOrDefaultSelection()
@@ -622,6 +623,14 @@ async function fetchKbs() {
 }
 
 async function applyRouteOrDefaultSelection() {
+  const queryDocId = Number(route.query.docId)
+  const hasQueryDoc = Number.isFinite(queryDocId) && queryDocId > 0
+  const openDocIfNeeded = async () => {
+    if (!hasQueryDoc) return
+    await waitForTreeRootReady()
+    await tryOpenQueryDocument()
+  }
+
   const queryCrossRefId = Number(route.query.crossRefId)
   if (Number.isFinite(queryCrossRefId) && queryCrossRefId > 0) {
     const targetRef = activeCrossRefs.value.find((r) => r.id === queryCrossRefId)
@@ -630,8 +639,7 @@ async function applyRouteOrDefaultSelection() {
         const entryKey = `cross-kb:${targetRef.id}`
         if (kbSelectorEntries.value.some((e) => e.key === entryKey)) {
           handleSelectEntry(entryKey)
-          await waitForTreeRootReady()
-          await tryOpenQueryDocument()
+          await openDocIfNeeded()
           return
         }
       } else if (targetRef.ref_type === 'kb_file') {
@@ -645,15 +653,13 @@ async function applyRouteOrDefaultSelection() {
   }
 
   const queryKbId = Number(route.query.kbId)
-  const queryDocId = Number(route.query.docId)
   if (Number.isFinite(queryKbId) && queryKbId > 0) {
     const ownKey = `own:${queryKbId}`
     if (kbSelectorEntries.value.some((e) => e.key === ownKey)) {
       selectedEntryKey.value = ownKey
       selectedCrossFileRef.value = null
       refreshTree()
-      await waitForTreeRootReady()
-      await tryOpenQueryDocument()
+      await openDocIfNeeded()
       return
     }
     const matchedCrossKb = crossKbRefs.value.find((r) => r.source_asset_id === queryKbId)
@@ -661,8 +667,7 @@ async function applyRouteOrDefaultSelection() {
       const entryKey = `cross-kb:${matchedCrossKb.id}`
       if (kbSelectorEntries.value.some((e) => e.key === entryKey)) {
         handleSelectEntry(entryKey)
-        await waitForTreeRootReady()
-        await tryOpenQueryDocument()
+        await openDocIfNeeded()
         return
       }
     }
@@ -682,8 +687,7 @@ async function applyRouteOrDefaultSelection() {
   }
   if (!isCrossFilesMode.value) {
     refreshTree()
-    await waitForTreeRootReady()
-    await tryOpenQueryDocument()
+    await openDocIfNeeded()
   }
 }
 
