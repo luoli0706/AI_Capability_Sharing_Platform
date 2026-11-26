@@ -67,6 +67,7 @@ import {
   updateKbFileContent,
   uploadDocument
 } from '@/api/kb'
+import { useAuthStore } from '@/stores/auth'
 import { useDomainStore } from '@/stores/domain'
 import { useKbClipboardStore } from '@/stores/kbClipboard'
 import { useKbTreeCacheStore } from '@/stores/kbTreeCache'
@@ -109,12 +110,18 @@ import { renderMarkdown } from '@/utils/markdown'
 
 const route = useRoute()
 const router = useRouter()
+const authStore = useAuthStore()
 const domainStore = useDomainStore()
 const kbClipboardStore = useKbClipboardStore()
 const kbTreeCache = useKbTreeCacheStore()
 
 const domainId = computed(() => Number(route.params.domainId))
 const currentDomain = computed(() => domainStore.getDomainById(domainId.value))
+const canManageCurrentDomain = computed(() => {
+  if (authStore.user?.roles?.includes('super_admin')) return true
+  const role = currentDomain.value?.my_role
+  return role === 'owner' || role === 'admin'
+})
 
 type KbEntryKind = 'own' | 'cross_kb' | 'cross_files'
 
@@ -182,8 +189,15 @@ const selectedEntry = computed(
 )
 const isCrossKbMode = computed(() => selectedEntry.value?.kind === 'cross_kb')
 const isCrossFilesMode = computed(() => selectedEntry.value?.kind === 'cross_files')
-const isReadOnlyKb = computed(() => isCrossKbMode.value || isCrossFilesMode.value)
-const activeRefDomainId = computed(() => (isReadOnlyKb.value ? domainId.value : undefined))
+const isReadOnlyKb = computed(() => {
+  if (isCrossKbMode.value || isCrossFilesMode.value) return true
+  if (!selectedKb.value) return false
+  if (canManageCurrentDomain.value) return false
+  return selectedKb.value.owner_id !== authStore.user?.id
+})
+const activeRefDomainId = computed(() =>
+  isCrossKbMode.value || isCrossFilesMode.value ? domainId.value : undefined
+)
 const selectedKbId = computed<number | null>(() => {
   if (!selectedEntry.value) return null
   if (selectedEntry.value.kind === 'cross_files') {
@@ -630,9 +644,12 @@ async function fetchKbs() {
   if (!domainId.value) return
   loadingKbs.value = true
   try {
+    if (domainStore.domains.length === 0) {
+      await domainStore.fetchDomains().catch(() => {})
+    }
     const [assetsRes, crossRefsRes] = await Promise.all([
       getAssets({
-        scope: 'workspace',
+        ...(canManageCurrentDomain.value ? { scope: 'workspace' } : {}),
         domain_id: domainId.value,
         asset_type: 'kb',
         page: kbPage.value,
