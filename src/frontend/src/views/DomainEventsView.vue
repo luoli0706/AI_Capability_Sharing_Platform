@@ -490,12 +490,14 @@ onMounted(() => {
       </article>
     </div>
 
-    <!-- Event Detail Drawer -->
-    <el-drawer
+    <!-- Event Detail Sub-window Dialog -->
+    <el-dialog
       v-model="detailDrawerOpen"
-      size="640px"
+      width="760px"
+      top="6vh"
       destroy-on-close
       :title="activeEvent?.title || '事件详情'"
+      class="event-detail-dialog"
     >
       <div v-if="detailLoading" class="drawer-loading">
         <el-skeleton :rows="6" animated />
@@ -654,7 +656,7 @@ onMounted(() => {
           </div>
         </div>
       </div>
-    </el-drawer>
+    </el-dialog>
 
     <!-- Create Event Dialog -->
     <el-dialog v-model="createDialogOpen" title="发起域内事件" width="540px" destroy-on-close>
@@ -967,6 +969,9 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 20px;
+  max-height: 75vh;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .detail-meta-card {
