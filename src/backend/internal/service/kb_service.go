@@ -20,6 +20,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -174,6 +175,8 @@ type KBService interface {
 	DownloadKB(userID uint64, isSuperAdmin bool, kbID uint64, scope string, docID uint64, folderPath string, refDomainID uint64) (filename, contentType string, data []byte, err error)
 	MoveDocument(userID uint64, isSuperAdmin bool, kbID, docID uint64, targetFolderPath string) (*model.KBDocument, error)
 	CopyDocument(userID uint64, isSuperAdmin bool, kbID, docID uint64, targetFolderPath, newName string) (*model.KBDocument, error)
+	CopyDocumentWithOptions(userID uint64, isSuperAdmin bool, kbID, docID uint64, req model.CopyKBDocumentRequest) (*model.KBDocument, error)
+	ListEditableKBTargets(userID uint64, isSuperAdmin bool) ([]model.EditableKBTarget, error)
 	RenameDocument(userID uint64, isSuperAdmin bool, kbID, docID uint64, newName string) (*model.KBDocument, error)
 	EncryptExistingPlainFiles(ctx context.Context) (int, error)
 	SetAuditRepos(auditRepo repository.AuditLogRepository, userRepo repository.UserRepository)
@@ -1614,10 +1617,26 @@ func (s *kbService) RenameDocument(userID uint64, isSuperAdmin bool, kbID, docID
 }
 
 func (s *kbService) CopyDocument(userID uint64, isSuperAdmin bool, kbID, docID uint64, targetFolderPath, newName string) (*model.KBDocument, error) {
-	detail, err := s.ensureKBEditPermission(userID, isSuperAdmin, kbID)
+	return s.CopyDocumentWithOptions(userID, isSuperAdmin, kbID, docID, model.CopyKBDocumentRequest{
+		TargetFolderPath: targetFolderPath,
+		NewName:          newName,
+	})
+}
+
+func (s *kbService) CopyDocumentWithOptions(userID uint64, isSuperAdmin bool, kbID, docID uint64, req model.CopyKBDocumentRequest) (*model.KBDocument, error) {
+	targetKBID := req.TargetKBID
+	if targetKBID == 0 {
+		targetKBID = kbID
+	}
+
+	if _, err := s.ensureKBViewPermission(userID, isSuperAdmin, kbID, req.RefDomainID, docID); err != nil {
+		return nil, err
+	}
+	targetDetail, err := s.ensureKBEditPermission(userID, isSuperAdmin, targetKBID)
 	if err != nil {
 		return nil, err
 	}
+
 	doc, err := s.kbRepo.FindDocumentByID(kbID, docID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -1625,49 +1644,214 @@ func (s *kbService) CopyDocument(userID uint64, isSuperAdmin bool, kbID, docID u
 		}
 		return nil, err
 	}
-	if doc.IsFolder {
-		return nil, NewBadRequest("only files can be copied")
-	}
 
-	targetFolder, err := NormalizeFolderPath(targetFolderPath)
-	if err != nil {
-		return nil, err
-	}
-
-	contentBytes, err := s.readAndDecryptFile(doc.FilePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, NewNotFound("source file not found on disk")
-		}
-		return nil, err
-	}
-
-	candidateName := doc.FileName
-	if strings.TrimSpace(newName) != "" {
-		candidateName = path.Base(strings.ReplaceAll(strings.TrimSpace(newName), "\\", "/"))
-	}
-	finalName, err := s.deduplicateFileName(kbID, targetFolder, candidateName)
+	targetFolder, err := NormalizeFolderPath(req.TargetFolderPath)
 	if err != nil {
 		return nil, err
 	}
 
 	chunkSize := 500
 	chunkOverlap := 50
-	if detail.KBConfig != nil {
-		if detail.KBConfig.ChunkSize > 0 {
-			chunkSize = detail.KBConfig.ChunkSize
+	if targetDetail.KBConfig != nil {
+		if targetDetail.KBConfig.ChunkSize > 0 {
+			chunkSize = targetDetail.KBConfig.ChunkSize
 		}
-		if detail.KBConfig.ChunkOverlap >= 0 {
-			chunkOverlap = detail.KBConfig.ChunkOverlap
+		if targetDetail.KBConfig.ChunkOverlap >= 0 {
+			chunkOverlap = targetDetail.KBConfig.ChunkOverlap
 		}
 	}
 
-	copied, err := s.persistKBFileAndChunks(detail, userID, targetFolder, finalName, doc.FileExt, contentBytes, chunkSize, chunkOverlap)
+	if !doc.IsFolder {
+		contentBytes, err := s.readAndDecryptFile(doc.FilePath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil, NewNotFound("source file not found on disk")
+			}
+			return nil, err
+		}
+
+		candidateName := doc.FileName
+		if strings.TrimSpace(req.NewName) != "" {
+			candidateName = path.Base(strings.ReplaceAll(strings.TrimSpace(req.NewName), "\\", "/"))
+		}
+		finalName, err := s.deduplicateFileName(targetKBID, targetFolder, candidateName)
+		if err != nil {
+			return nil, err
+		}
+
+		if targetFolder != "" {
+			if _, err := s.kbRepo.EnsureFolderHierarchy(targetKBID, userID, targetFolder); err != nil {
+				return nil, err
+			}
+		}
+
+		copied, err := s.persistKBFileAndChunks(targetDetail, userID, targetFolder, finalName, doc.FileExt, contentBytes, chunkSize, chunkOverlap)
+		if err != nil {
+			return nil, err
+		}
+		recordAudit(s.auditRepo, s.userRepo, userID, targetDetail.DomainID, targetDetail.DomainName, targetDetail.ID, targetDetail.AssetCode, targetDetail.Name, targetDetail.AssetType, model.AuditActionKBFileCopy, relativeDocPath(*copied), fmt.Sprintf("复制 %s -> %s", relativeDocPath(*doc), relativeDocPath(*copied)))
+		return copied, nil
+	}
+
+	srcFolderPath := strings.Trim(doc.FolderPath, "/")
+	if srcFolderPath == "" {
+		srcFolderPath = doc.FileName
+	}
+	if kbID == targetKBID && (targetFolder == srcFolderPath || strings.HasPrefix(targetFolder, srcFolderPath+"/")) {
+		return nil, NewBadRequest("cannot copy folder into itself or its subfolder")
+	}
+
+	candidateFolderName := doc.FileName
+	if strings.TrimSpace(req.NewName) != "" {
+		validated, err := validateRenameTarget(req.NewName)
+		if err != nil {
+			return nil, err
+		}
+		candidateFolderName = validated
+	}
+	finalFolderName, err := s.deduplicateFolderName(targetKBID, targetFolder, candidateFolderName)
 	if err != nil {
 		return nil, err
 	}
-	recordAudit(s.auditRepo, s.userRepo, userID, detail.DomainID, detail.DomainName, detail.ID, detail.AssetCode, detail.Name, detail.AssetType, model.AuditActionKBFileCopy, relativeDocPath(*copied), fmt.Sprintf("复制 %s -> %s", relativeDocPath(*doc), relativeDocPath(*copied)))
-	return copied, nil
+
+	targetRootPath := finalFolderName
+	if targetFolder != "" {
+		targetRootPath = targetFolder + "/" + finalFolderName
+	}
+
+	rootFolderDoc, err := s.kbRepo.EnsureFolderHierarchy(targetKBID, userID, targetRootPath)
+	if err != nil {
+		return nil, err
+	}
+
+	subtreeDocs, err := s.kbRepo.ListSubtreeDocuments(kbID, srcFolderPath)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, sub := range subtreeDocs {
+		if !sub.IsFolder {
+			continue
+		}
+		subPath := strings.Trim(sub.FolderPath, "/")
+		relSub := strings.TrimPrefix(subPath, srcFolderPath+"/")
+		if relSub == "" || relSub == subPath {
+			continue
+		}
+		destSubPath := targetRootPath + "/" + relSub
+		if _, err := s.kbRepo.EnsureFolderHierarchy(targetKBID, userID, destSubPath); err != nil {
+			return nil, err
+		}
+	}
+
+	for _, f := range subtreeDocs {
+		if f.IsFolder {
+			continue
+		}
+		contentBytes, err := s.readAndDecryptFile(f.FilePath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil, NewNotFound("source file not found on disk")
+			}
+			return nil, err
+		}
+		fFolder := strings.Trim(f.FolderPath, "/")
+		destFolder := targetRootPath
+		if strings.HasPrefix(fFolder, srcFolderPath+"/") {
+			destFolder = targetRootPath + "/" + strings.TrimPrefix(fFolder, srcFolderPath+"/")
+		}
+		finalName, err := s.deduplicateFileName(targetKBID, destFolder, f.FileName)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := s.persistKBFileAndChunks(targetDetail, userID, destFolder, finalName, f.FileExt, contentBytes, chunkSize, chunkOverlap); err != nil {
+			return nil, err
+		}
+	}
+
+	recordAudit(s.auditRepo, s.userRepo, userID, targetDetail.DomainID, targetDetail.DomainName, targetDetail.ID, targetDetail.AssetCode, targetDetail.Name, targetDetail.AssetType, model.AuditActionKBFileCopy, targetRootPath, fmt.Sprintf("复制目录 %s -> %s", srcFolderPath, targetRootPath))
+	return rootFolderDoc, nil
+}
+
+func (s *kbService) deduplicateFolderName(kbID uint64, targetFolder, folderName string) (string, error) {
+	joinFolder := func(parent, name string) string {
+		if parent == "" {
+			return name
+		}
+		return parent + "/" + name
+	}
+
+	exists, err := s.kbRepo.FolderExists(kbID, joinFolder(targetFolder, folderName), 0)
+	if err != nil {
+		return "", err
+	}
+	if !exists {
+		return folderName, nil
+	}
+
+	for i := 1; i <= 100; i++ {
+		var candidate string
+		if i == 1 {
+			candidate = folderName + "-copy"
+		} else {
+			candidate = fmt.Sprintf("%s-copy-%d", folderName, i)
+		}
+		exists, err := s.kbRepo.FolderExists(kbID, joinFolder(targetFolder, candidate), 0)
+		if err != nil {
+			return "", err
+		}
+		if !exists {
+			return candidate, nil
+		}
+	}
+	return fmt.Sprintf("%s-copy-%d", folderName, os.Getpid()), nil
+}
+
+func (s *kbService) ListEditableKBTargets(userID uint64, isSuperAdmin bool) ([]model.EditableKBTarget, error) {
+	var adminDomainIDs []uint64
+	if !isSuperAdmin {
+		var err error
+		adminDomainIDs, err = s.domainRepo.GetUserAdminDomainIDs(userID)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	targets := []model.EditableKBTarget{}
+	const pageSize = 100
+	for page := 1; ; page++ {
+		items, total, err := s.assetRepo.ListAssets(model.AssetQuery{
+			Scope:     "workspace",
+			AssetType: model.AssetTypeKB,
+			Page:      page,
+			PageSize:  pageSize,
+		}, userID, isSuperAdmin, nil, adminDomainIDs, nil)
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range items {
+			targets = append(targets, model.EditableKBTarget{
+				DomainID:   item.DomainID,
+				DomainName: item.DomainName,
+				KBID:       item.ID,
+				KBName:     item.Name,
+			})
+		}
+		if len(items) == 0 || int64(len(targets)) >= total {
+			break
+		}
+	}
+
+	sort.Slice(targets, func(i, j int) bool {
+		if targets[i].DomainName != targets[j].DomainName {
+			return targets[i].DomainName < targets[j].DomainName
+		}
+		if targets[i].KBName != targets[j].KBName {
+			return targets[i].KBName < targets[j].KBName
+		}
+		return targets[i].KBID < targets[j].KBID
+	})
+	return targets, nil
 }
 
 func (s *kbService) deduplicateFileName(kbID uint64, targetFolder, fileName string) (string, error) {

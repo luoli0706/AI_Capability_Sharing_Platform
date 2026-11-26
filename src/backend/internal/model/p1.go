@@ -259,6 +259,15 @@ type MoveKBDocumentRequest struct {
 type CopyKBDocumentRequest struct {
 	TargetFolderPath string `json:"target_folder_path" validate:"max=512"`
 	NewName          string `json:"new_name" validate:"max=255"`
+	TargetKBID       uint64 `json:"target_kb_id"`
+	RefDomainID      uint64 `json:"ref_domain_id"`
+}
+
+type EditableKBTarget struct {
+	DomainID   uint64 `json:"domain_id"`
+	DomainName string `json:"domain_name"`
+	KBID       uint64 `json:"kb_id"`
+	KBName     string `json:"kb_name"`
 }
 
 type RenameKBDocumentRequest struct {

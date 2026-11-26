@@ -87,6 +87,7 @@ func main() {
 	crossRefRepo := repository.NewCrossRefRepository(db)
 	msgRepo := repository.NewMessageRepository(db)
 	kbInteractionRepo := repository.NewKBInteractionRepository(db)
+	domainEventRepo := repository.NewDomainEventRepository(db)
 
 	// Services
 	var mailSender mailer.Mailer
@@ -177,6 +178,7 @@ func main() {
 	govSvc.SetMessageService(msgSvc)
 	kbInteractionSvc := service.NewKBInteractionService(kbInteractionRepo, kbRepo, assetRepo, domainRepo, govRepo, orgRepo, userRepo)
 	kbInteractionSvc.SetCrossRefRepo(crossRefRepo)
+	domainEventSvc := service.NewDomainEventService(domainEventRepo, domainRepo, orgRepo, assetRepo, kbRepo, userRepo)
 
 	// Handlers
 	authHandler := handler.NewAuthHandler(authSvc)
@@ -195,6 +197,7 @@ func main() {
 	auditHandler := handler.NewAuditHandler(auditSvc)
 	crossRefHandler := handler.NewCrossRefHandler(crossRefSvc)
 	sevenOHandler := handler.NewSevenOHandler(sevenOSvc)
+	domainEventHandler := handler.NewDomainEventHandler(domainEventSvc)
 
 	e := echo.New()
 	e.HideBanner = true
@@ -289,6 +292,14 @@ func main() {
 	protected.POST("/domains/:id/cross-refs", crossRefHandler.CreateCrossRef)
 	protected.GET("/domains/:id/cross-refs", crossRefHandler.ListCrossRefs)
 	protected.DELETE("/domains/:id/cross-refs/:refId", crossRefHandler.DeleteCrossRef)
+	protected.GET("/domains/:id/events", domainEventHandler.ListEvents)
+	protected.POST("/domains/:id/events", domainEventHandler.CreateEvent)
+	protected.GET("/domains/:id/events/:eventId", domainEventHandler.GetEventDetail)
+	protected.POST("/domains/:id/events/:eventId/candidates", domainEventHandler.AddCandidate)
+	protected.POST("/domains/:id/events/:eventId/candidates/:candidateId/vote", domainEventHandler.VoteCandidate)
+	protected.DELETE("/domains/:id/events/:eventId/candidates/:candidateId/vote", domainEventHandler.UnvoteCandidate)
+	protected.POST("/domains/:id/events/:eventId/close", domainEventHandler.CloseEvent)
+	protected.DELETE("/domains/:id/events/:eventId", domainEventHandler.DeleteEvent)
 	protected.GET("/cross-refs/source-domains", crossRefHandler.ListSourceDomains)
 	protected.GET("/cross-refs/source-items", crossRefHandler.ListSourceItems)
 
@@ -315,6 +326,7 @@ func main() {
 	protected.POST("/agents/import-url", assetHandler.ImportAgentURL)
 	protected.GET("/assets/:id/agent/download", assetHandler.DownloadAgentPackage)
 
+	protected.GET("/kb/editable-targets", kbHandler.ListEditableTargets)
 	protected.POST("/kb/:id/folders", kbHandler.CreateFolder)
 	protected.POST("/kb/:id/files", kbHandler.CreateMarkdownFile)
 	protected.POST("/kb/:id/documents", kbHandler.UploadDocument)

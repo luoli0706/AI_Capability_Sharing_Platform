@@ -6,6 +6,7 @@ import { useMediaQuery } from '@vueuse/core'
 import {
   ArrowLeft,
   Box,
+  Calendar,
   ChatDotRound,
   Checked,
   Collection,
@@ -72,6 +73,7 @@ const domainNavItems = computed(() => {
     { path: `/domains/${id}/marketplace`, title: '域内能力广场', icon: Compass },
     { path: `/domains/${id}/assets`, title: '域内资产工作台', icon: Box },
     { path: `/domains/${id}/knowledge-bases`, title: '域内知识库', icon: Collection },
+    { path: `/domains/${id}/events`, title: '域内事件库', icon: Calendar },
     { path: `/domains/${id}/members`, title: '域成员管理', icon: UserFilled }
   ]
 })
@@ -144,7 +146,7 @@ onBeforeUnmount(() => {
 function handleSwitchDomain(newDomainId: number) {
   if (!newDomainId || newDomainId === activeDomainId.value) return
   const segment = route.path.split('/').pop() || 'marketplace'
-  const validSegments = ['marketplace', 'assets', 'knowledge-bases', 'members']
+  const validSegments = ['marketplace', 'assets', 'knowledge-bases', 'events', 'members']
   const target = validSegments.includes(segment) ? segment : 'marketplace'
   router.push(`/domains/${newDomainId}/${target}`)
 }

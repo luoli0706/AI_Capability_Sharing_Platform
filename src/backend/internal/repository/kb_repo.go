@@ -21,6 +21,7 @@ type KBRepository interface {
 	FindDocumentByID(kbAssetID, docID uint64) (*model.KBDocument, error)
 	FindDeletedDocumentByID(kbAssetID, docID uint64) (*model.KBDocument, error)
 	ListMatchingFiles(kbAssetID uint64, scope string, docID uint64, folderPath string) ([]model.KBDocument, error)
+	ListSubtreeDocuments(kbAssetID uint64, folderPath string) ([]model.KBDocument, error)
 	FileExistsInFolder(kbAssetID uint64, folderPath, fileName string, excludeDocID uint64) (bool, error)
 	FolderExists(kbAssetID uint64, folderPath string, excludeDocID uint64) (bool, error)
 	RenameFile(kbAssetID, docID uint64, newName, newExt string) error
@@ -216,6 +217,22 @@ func (r *kbRepository) ListMatchingFiles(kbAssetID uint64, scope string, docID u
 	}
 	var docs []model.KBDocument
 	if err := tx.Order("folder_path ASC, file_name ASC").Find(&docs).Error; err != nil {
+		return nil, err
+	}
+	if docs == nil {
+		docs = []model.KBDocument{}
+	}
+	return docs, nil
+}
+
+func (r *kbRepository) ListSubtreeDocuments(kbAssetID uint64, folderPath string) ([]model.KBDocument, error) {
+	escaped := escapeLikePattern(folderPath)
+	likePrefix := escaped + "/%"
+	var docs []model.KBDocument
+	if err := r.db.Where(
+		"kb_asset_id = ? AND ((is_folder = ? AND folder_path LIKE ? ESCAPE '!') OR (is_folder = ? AND (folder_path = ? OR folder_path LIKE ? ESCAPE '!')))",
+		kbAssetID, true, likePrefix, false, folderPath, likePrefix,
+	).Order("is_folder DESC, folder_path ASC, file_name ASC").Find(&docs).Error; err != nil {
 		return nil, err
 	}
 	if docs == nil {

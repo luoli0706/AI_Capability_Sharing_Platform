@@ -54,7 +54,9 @@ import {
   getDocumentInteractions,
   getDocumentMeta,
   getDocumentRawBlob,
+  getDocuments,
   listDocumentComments,
+  listEditableKbTargets,
   moveDocument,
   renameDocument,
   resolveVideoShortUrl,
@@ -66,10 +68,12 @@ import {
   uploadDocument
 } from '@/api/kb'
 import { useDomainStore } from '@/stores/domain'
+import { useKbClipboardStore } from '@/stores/kbClipboard'
 import { useKbTreeCacheStore } from '@/stores/kbTreeCache'
 import type {
   AssetItem,
   DomainCrossRefItem,
+  EditableKbTarget,
   KbChunk,
   KbCommentItem,
   KbContentResult,
@@ -106,6 +110,7 @@ import { renderMarkdown } from '@/utils/markdown'
 const route = useRoute()
 const router = useRouter()
 const domainStore = useDomainStore()
+const kbClipboardStore = useKbClipboardStore()
 const kbTreeCache = useKbTreeCacheStore()
 
 const domainId = computed(() => Number(route.params.domainId))
@@ -222,7 +227,6 @@ const treeRootReadyWaiters = new Set<() => void>()
 
 const selectedFolderPath = ref('')
 const selectedFileNode = ref<KbTreeNode | null>(null)
-const clipboardFile = ref<{ kbId: number; docId: number; fileName: string } | null>(null)
 const pasting = ref(false)
 const uploading = ref(false)
 const kbDragDepth = ref(0)
@@ -413,6 +417,46 @@ const moveDialogOpen = ref(false)
 const moveTargetNode = ref<KbTreeNode | null>(null)
 const moveTargetPath = ref('')
 const movingNode = ref(false)
+
+// Copy To Specified Location Modal
+interface CopyToFolderNode {
+  key: string
+  label: string
+  folderPath: string
+  isRoot?: boolean
+  isLeaf: boolean
+}
+const copyToDialogOpen = ref(false)
+const copyToSourceNode = ref<KbTreeNode | null>(null)
+const copyToSourceKbId = ref<number | null>(null)
+const copyToSourceRefDomainId = ref<number | undefined>(undefined)
+const copyToTargets = ref<EditableKbTarget[]>([])
+const loadingCopyToTargets = ref(false)
+const copyToDomainId = ref<number | null>(null)
+const copyToKbId = ref<number | null>(null)
+const copyToFolderPath = ref('')
+const copyToNewName = ref('')
+const copyingToTarget = ref(false)
+const copyToTreeSeed = ref(0)
+const copyToTreeProps = {
+  label: 'label',
+  children: 'children',
+  isLeaf: 'isLeaf'
+}
+const copyToDomainOptions = computed(() => {
+  const seen = new Set<number>()
+  const list: Array<{ domain_id: number; domain_name: string }> = []
+  for (const t of copyToTargets.value) {
+    if (!seen.has(t.domain_id)) {
+      seen.add(t.domain_id)
+      list.push({ domain_id: t.domain_id, domain_name: t.domain_name })
+    }
+  }
+  return list
+})
+const copyToKbOptions = computed(() =>
+  copyToTargets.value.filter((t) => t.domain_id === copyToDomainId.value)
+)
 
 // Novel Reading Mode (.txt only)
 const novelReaderOpen = ref(false)
@@ -2158,26 +2202,37 @@ async function handleNodeDrop(
 }
 
 function setClipboard(node: KbTreeNode) {
-  if (node.isFolder || !node.doc || !selectedKbId.value) return
-  clipboardFile.value = {
+  if (!node.doc || !selectedKbId.value) return
+  const domainName = selectedEntry.value?.sourceDomainName || currentDomain.value?.domain_name || undefined
+  kbClipboardStore.setItem({
     kbId: selectedKbId.value,
     docId: node.doc.id,
-    fileName: node.doc.file_name
-  }
-  ElMessage.success(`已复制「${node.doc.file_name}」，可选择目录后点击粘贴或按 Ctrl+V`)
+    fileName: node.doc.file_name,
+    isFolder: node.isFolder,
+    refDomainId: activeRefDomainId.value,
+    domainName
+  })
+  ElMessage.success(
+    `已复制${node.isFolder ? '文件夹' : '文件'}「${node.doc.file_name}」，可选择目录后点击粘贴或按 Ctrl+V`
+  )
 }
 
 async function handlePaste(targetFolder?: string) {
-  if (isReadOnlyKb.value || !clipboardFile.value || !selectedKbId.value) return
+  const clip = kbClipboardStore.item
+  if (isReadOnlyKb.value || !clip || !selectedKbId.value) return
   const targetPath = typeof targetFolder === 'string' ? targetFolder : selectedFolderPath.value
   const cleanTarget = (targetPath || '').replace(/^\/+|\/+$/g, '')
   pasting.value = true
   try {
     const copied = await copyDocument(
-      clipboardFile.value.kbId,
-      clipboardFile.value.docId,
-      targetPath || ''
+      clip.kbId,
+      clip.docId,
+      targetPath || '',
+      undefined,
+      selectedKbId.value,
+      clip.refDomainId
     )
+    const isFolder = Boolean(copied.is_folder || clip.isFolder)
     pushUndoAction({
       type: 'create',
       kbId: selectedKbId.value,
@@ -2188,6 +2243,11 @@ async function handlePaste(targetFolder?: string) {
     ElMessage.success(
       targetPath ? `已粘贴至目录 ${targetPath}` : '已粘贴至根目录'
     )
+    if (isFolder) {
+      const pastedFolderPath = cleanTarget ? `${cleanTarget}/${copied.file_name}` : copied.file_name
+      kbTreeCache.invalidateFolderPrefix(selectedKbId.value, pastedFolderPath, activeRefDomainId.value)
+      invalidateLocalFolderPrefix(pastedFolderPath)
+    }
     await refreshFolderInPlace(cleanTarget)
   } catch {
     // Handled by interceptor
@@ -2366,6 +2426,139 @@ async function handleConfirmMove() {
   }
 }
 
+async function openCopyToDialog(node: KbTreeNode) {
+  if (!node.doc || !selectedKbId.value) return
+  copyToSourceNode.value = node
+  copyToSourceKbId.value = selectedKbId.value
+  copyToSourceRefDomainId.value = activeRefDomainId.value
+  copyToNewName.value = node.doc.file_name
+  copyToFolderPath.value = ''
+  copyToDialogOpen.value = true
+  loadingCopyToTargets.value = true
+  try {
+    const res = await listEditableKbTargets()
+    const targets = Array.isArray(res) ? res : []
+    copyToTargets.value = targets
+    const currentMatch = !isReadOnlyKb.value
+      ? targets.find((t) => t.domain_id === domainId.value && t.kb_id === selectedKbId.value)
+      : undefined
+    const initial = currentMatch ?? targets[0] ?? null
+    copyToDomainId.value = initial ? initial.domain_id : null
+    copyToKbId.value = initial ? initial.kb_id : null
+    copyToTreeSeed.value++
+  } catch {
+    copyToTargets.value = []
+    copyToDomainId.value = null
+    copyToKbId.value = null
+  } finally {
+    loadingCopyToTargets.value = false
+  }
+}
+
+function handleCopyToDomainChange(nextDomainId: number | null) {
+  copyToDomainId.value = nextDomainId
+  const kbs = copyToTargets.value.filter((t) => t.domain_id === nextDomainId)
+  copyToKbId.value = kbs[0]?.kb_id ?? null
+  copyToFolderPath.value = ''
+  copyToTreeSeed.value++
+}
+
+function handleCopyToKbChange(nextKbId: number | null) {
+  copyToKbId.value = nextKbId
+  copyToFolderPath.value = ''
+  copyToTreeSeed.value++
+}
+
+async function loadCopyToFolderNode(
+  node: { level: number; data?: CopyToFolderNode },
+  resolve: (nodes: CopyToFolderNode[]) => void
+) {
+  if (node.level === 0) {
+    resolve([
+      {
+        key: '__root__',
+        label: '根目录 (/)',
+        folderPath: '',
+        isRoot: true,
+        isLeaf: false
+      }
+    ])
+    return
+  }
+  const targetKbId = copyToKbId.value
+  if (!targetKbId) {
+    resolve([])
+    return
+  }
+  const parentPath = node.data?.folderPath || ''
+  try {
+    const res = await getDocuments(targetKbId, {
+      lazy: true,
+      folder_path: parentPath,
+      limit: 200
+    })
+    const docs = Array.isArray(res) ? res : (res?.list ?? res?.items ?? [])
+    const folderDocs = docs.filter((d) => d.is_folder)
+    const folderNodes = buildImmediateKbTreeNodes(folderDocs, parentPath)
+      .filter((n) => n.isFolder)
+      .map<CopyToFolderNode>((n) => ({
+        key: `copy-folder:${n.folderPath}`,
+        label: n.label,
+        folderPath: n.folderPath,
+        isLeaf: false
+      }))
+    resolve(folderNodes)
+  } catch {
+    resolve([])
+  }
+}
+
+function handleCopyToFolderClick(data: CopyToFolderNode) {
+  copyToFolderPath.value = data.folderPath || ''
+}
+
+async function handleConfirmCopyTo() {
+  const sourceNode = copyToSourceNode.value
+  const sourceKbId = copyToSourceKbId.value
+  const targetKbId = copyToKbId.value
+  if (!sourceNode?.doc || !sourceKbId || !targetKbId) return
+  const cleanTargetFolder = (copyToFolderPath.value || '').replace(/^\/+|\/+$/g, '')
+  const trimmedName = copyToNewName.value.trim()
+  copyingToTarget.value = true
+  try {
+    const copied = await copyDocument(
+      sourceKbId,
+      sourceNode.doc.id,
+      cleanTargetFolder,
+      trimmedName || undefined,
+      targetKbId,
+      copyToSourceRefDomainId.value
+    )
+    const targetKbInfo = copyToTargets.value.find((t) => t.kb_id === targetKbId)
+    const targetDesc = targetKbInfo
+      ? `${targetKbInfo.domain_name} / ${targetKbInfo.kb_name}${cleanTargetFolder ? ` / ${cleanTargetFolder}` : ' / 根目录'}`
+      : cleanTargetFolder || '根目录'
+    ElMessage.success(`已拷贝「${copied.file_name}」至 ${targetDesc}`)
+    copyToDialogOpen.value = false
+    if (targetKbId === selectedKbId.value && !isReadOnlyKb.value) {
+      if (copied.is_folder || sourceNode.isFolder) {
+        const pastedFolderPath = cleanTargetFolder
+          ? `${cleanTargetFolder}/${copied.file_name}`
+          : copied.file_name
+        kbTreeCache.invalidateFolderPrefix(targetKbId, pastedFolderPath, activeRefDomainId.value)
+        invalidateLocalFolderPrefix(pastedFolderPath)
+      }
+      await refreshFolderInPlace(cleanTargetFolder)
+    } else {
+      kbTreeCache.invalidateKb(targetKbId)
+    }
+  } catch {
+    // Handled by interceptor
+  } finally {
+    copyingToTarget.value = false
+  }
+}
+
 async function copyPreviewText() {
   if (!previewDoc.value) return
   try {
@@ -2490,10 +2683,10 @@ function handleKeydown(e: KeyboardEvent) {
     return
   }
   if (isReadOnlyKb.value) return
-  if (key === 'c' && selectedFileNode.value && !selectedFileNode.value.isFolder) {
+  if (key === 'c' && selectedFileNode.value && selectedFileNode.value.doc) {
     e.preventDefault()
     setClipboard(selectedFileNode.value)
-  } else if (key === 'v' && clipboardFile.value) {
+  } else if (key === 'v' && kbClipboardStore.item) {
     e.preventDefault()
     handlePaste()
   } else if (
@@ -2504,6 +2697,7 @@ function handleKeydown(e: KeyboardEvent) {
     !createFolderOpen.value &&
     !createFileOpen.value &&
     !moveDialogOpen.value &&
+    !copyToDialogOpen.value &&
     !shareDialogOpen.value &&
     !lightboxOpen.value &&
     !document.querySelector('.el-message-box__wrapper') &&
@@ -2921,11 +3115,11 @@ onUnmounted(() => {
               </el-button>
               <el-button
                 :icon="DocumentCopy"
-                :disabled="!clipboardFile"
+                :disabled="!kbClipboardStore.item"
                 :loading="pasting"
                 @click="handlePaste()"
               >
-                {{ clipboardFile ? `粘贴 (${clipboardFile.fileName})` : '粘贴' }}
+                {{ kbClipboardStore.item ? `粘贴 (${kbClipboardStore.item.fileName})` : '粘贴' }}
               </el-button>
             </template>
             <el-button
@@ -3156,7 +3350,7 @@ onUnmounted(() => {
                       @click.stop="openShareDialogForNode(data)"
                     />
                     <el-button
-                      v-if="!isReadOnlyKb && data.isFolder && clipboardFile"
+                      v-if="!isReadOnlyKb && data.isFolder && kbClipboardStore.item"
                       link
                       type="success"
                       size="small"
@@ -3867,6 +4061,100 @@ onUnmounted(() => {
       </template>
     </el-dialog>
 
+    <!-- Copy To Specified Location Dialog -->
+    <el-dialog v-model="copyToDialogOpen" title="拷贝到指定位置" width="520px" destroy-on-close>
+      <div v-loading="loadingCopyToTargets" class="copy-to-dialog-body">
+        <el-form label-position="top" @submit.prevent="handleConfirmCopyTo">
+          <el-form-item label="源对象">
+            <el-input
+              :model-value="copyToSourceNode?.doc?.file_name || ''"
+              disabled
+              class="mono-text"
+            />
+          </el-form-item>
+          <div class="copy-to-selectors">
+            <el-form-item label="目标能力域" class="copy-to-select-item">
+              <el-select
+                :model-value="copyToDomainId"
+                placeholder="选择目标能力域"
+                style="width: 100%"
+                @change="handleCopyToDomainChange"
+              >
+                <el-option
+                  v-for="dom in copyToDomainOptions"
+                  :key="dom.domain_id"
+                  :label="dom.domain_name"
+                  :value="dom.domain_id"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="目标知识库" class="copy-to-select-item">
+              <el-select
+                :model-value="copyToKbId"
+                placeholder="选择目标知识库"
+                style="width: 100%"
+                :disabled="!copyToDomainId"
+                @change="handleCopyToKbChange"
+              >
+                <el-option
+                  v-for="kb in copyToKbOptions"
+                  :key="kb.kb_id"
+                  :label="kb.kb_name"
+                  :value="kb.kb_id"
+                />
+              </el-select>
+            </el-form-item>
+          </div>
+          <el-form-item label="目标目录">
+            <div v-if="copyToKbId" class="copy-to-tree-box">
+              <el-tree
+                :key="`${copyToKbId}-${copyToTreeSeed}`"
+                lazy
+                :load="loadCopyToFolderNode"
+                :props="copyToTreeProps"
+                node-key="key"
+                :default-expanded-keys="['__root__']"
+                current-node-key="__root__"
+                highlight-current
+                :expand-on-click-node="false"
+                @node-click="handleCopyToFolderClick"
+              >
+                <template #default="{ data }">
+                  <div class="copy-to-tree-node">
+                    <el-icon :size="15" color="#D97706"><Folder /></el-icon>
+                    <span>{{ data.label }}</span>
+                  </div>
+                </template>
+              </el-tree>
+            </div>
+            <el-empty v-else description="暂无可编辑的目标知识库" :image-size="48" />
+            <div class="copy-to-path-preview mono-text">
+              已选路径：{{ copyToFolderPath ? `/${copyToFolderPath}` : '/ (根目录)' }}
+            </div>
+          </el-form-item>
+          <el-form-item label="新名称（可选，默认保留原名称）">
+            <el-input
+              v-model="copyToNewName"
+              placeholder="输入新名称（留空则使用原名称）"
+              class="mono-text"
+              clearable
+            />
+          </el-form-item>
+        </el-form>
+      </div>
+      <template #footer>
+        <el-button @click="copyToDialogOpen = false">取消</el-button>
+        <el-button
+          type="primary"
+          :loading="copyingToTarget"
+          :disabled="!copyToKbId"
+          @click="handleConfirmCopyTo"
+        >
+          确认拷贝
+        </el-button>
+      </template>
+    </el-dialog>
+
     <!-- Tree Floating Context Menu -->
     <teleport to="body">
       <div
@@ -3913,17 +4201,25 @@ onUnmounted(() => {
             <el-icon><Share /></el-icon>
             <span>分享</span>
           </button>
+          <button
+            type="button"
+            class="kb-ctx-item"
+            @click="setClipboard(contextMenu.node); closeContextMenu()"
+          >
+            <el-icon><CopyDocument /></el-icon>
+            <span>复制</span>
+          </button>
+          <button
+            type="button"
+            class="kb-ctx-item"
+            @click="openCopyToDialog(contextMenu.node); closeContextMenu()"
+          >
+            <el-icon><DocumentCopy /></el-icon>
+            <span>拷贝到...</span>
+          </button>
 
           <template v-if="!isReadOnlyKb">
             <div class="kb-ctx-divider" />
-            <button
-              type="button"
-              class="kb-ctx-item"
-              @click="setClipboard(contextMenu.node); closeContextMenu()"
-            >
-              <el-icon><CopyDocument /></el-icon>
-              <span>复制</span>
-            </button>
             <button
               type="button"
               class="kb-ctx-item"
@@ -3999,6 +4295,24 @@ onUnmounted(() => {
             <el-icon><Share /></el-icon>
             <span>分享</span>
           </button>
+          <button
+            v-if="contextMenu.node.doc"
+            type="button"
+            class="kb-ctx-item"
+            @click="setClipboard(contextMenu.node); closeContextMenu()"
+          >
+            <el-icon><CopyDocument /></el-icon>
+            <span>复制</span>
+          </button>
+          <button
+            v-if="contextMenu.node.doc"
+            type="button"
+            class="kb-ctx-item"
+            @click="openCopyToDialog(contextMenu.node); closeContextMenu()"
+          >
+            <el-icon><DocumentCopy /></el-icon>
+            <span>拷贝到...</span>
+          </button>
 
           <template v-if="!isReadOnlyKb">
             <div class="kb-ctx-divider" />
@@ -4029,7 +4343,7 @@ onUnmounted(() => {
             <button
               type="button"
               class="kb-ctx-item"
-              :disabled="!clipboardFile"
+              :disabled="!kbClipboardStore.item"
               @click="handlePaste(contextMenu.node.folderPath); closeContextMenu()"
             >
               <el-icon><DocumentCopy /></el-icon>
@@ -4629,6 +4943,39 @@ onUnmounted(() => {
   height: 1px;
   margin: 4px 6px;
   background: var(--ascp-border);
+}
+
+.copy-to-selectors {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.copy-to-select-item {
+  margin-bottom: 12px;
+}
+
+.copy-to-tree-box {
+  width: 100%;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--ascp-border);
+  border-radius: 8px;
+  padding: 6px;
+  background: #fafafa;
+}
+
+.copy-to-tree-node {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.copy-to-path-preview {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--ascp-text-secondary);
 }
 
 .preview-placeholder {

@@ -1,6 +1,8 @@
 import request, { apiDelete, apiGet, apiPost, apiPut } from './request'
 import { deobfuscateBase64ToText, deobfuscateBytes } from '@/utils/obfuscate'
 import type {
+  CopyKbDocumentRequest,
+  EditableKbTarget,
   KbBilibiliPreview,
   KbChunk,
   KbCommentItem,
@@ -202,12 +204,28 @@ export function copyDocument(
   kbId: number,
   docId: number,
   target_folder_path: string,
-  new_name?: string
+  new_name?: string,
+  target_kb_id?: number,
+  ref_domain_id?: number
 ): Promise<KbDocument> {
-  return apiPost<KbDocument, { target_folder_path: string; new_name?: string }>(
+  const payload: CopyKbDocumentRequest = { target_folder_path }
+  if (new_name !== undefined && new_name !== '') {
+    payload.new_name = new_name
+  }
+  if (target_kb_id !== undefined) {
+    payload.target_kb_id = target_kb_id
+  }
+  if (ref_domain_id !== undefined) {
+    payload.ref_domain_id = ref_domain_id
+  }
+  return apiPost<KbDocument, CopyKbDocumentRequest>(
     `/kb/${kbId}/documents/${docId}/copy`,
-    { target_folder_path, new_name }
+    payload
   )
+}
+
+export function listEditableKbTargets(): Promise<EditableKbTarget[]> {
+  return apiGet<EditableKbTarget[]>('/kb/editable-targets')
 }
 
 export function searchKB(

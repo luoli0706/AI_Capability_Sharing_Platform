@@ -51,6 +51,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '域内知识库', requiresAuth: true, domainScoped: true }
       },
       {
+        path: 'domains/:domainId/events',
+        name: 'domain-events',
+        component: () => import('@/views/DomainEventsView.vue'),
+        meta: { title: '域内事件库', requiresAuth: true, domainScoped: true }
+      },
+      {
         path: 'domains/:domainId/members',
         name: 'domain-members',
         component: () => import('@/views/DomainMembersView.vue'),

@@ -98,6 +98,9 @@ func AutoMigrate(db *gorm.DB) error {
 		&model.DomainCrossRef{},
 		&model.UserConversation{},
 		&model.UserMessage{},
+		&model.DomainEvent{},
+		&model.DomainEventCandidate{},
+		&model.DomainEventVote{},
 	); err != nil {
 		return err
 	}

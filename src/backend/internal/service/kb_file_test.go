@@ -201,6 +201,32 @@ func (m *mockFileKBRepo) ListMatchingFiles(kbAssetID uint64, scope string, docID
 	}
 	return out, nil
 }
+func (m *mockFileKBRepo) ListSubtreeDocuments(kbAssetID uint64, folderPath string) ([]model.KBDocument, error) {
+	var out []model.KBDocument
+	prefix := folderPath + "/"
+	for _, d := range m.docs {
+		if d.KBAssetID != kbAssetID || d.DeletedAt.Valid {
+			continue
+		}
+		if d.IsFolder {
+			if strings.HasPrefix(d.FolderPath, prefix) {
+				out = append(out, *d)
+			}
+		} else if d.FolderPath == folderPath || strings.HasPrefix(d.FolderPath, prefix) {
+			out = append(out, *d)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].IsFolder != out[j].IsFolder {
+			return out[i].IsFolder
+		}
+		if out[i].FolderPath != out[j].FolderPath {
+			return out[i].FolderPath < out[j].FolderPath
+		}
+		return out[i].FileName < out[j].FileName
+	})
+	return out, nil
+}
 func (m *mockFileKBRepo) FileExistsInFolder(kbAssetID uint64, folderPath, fileName string, excludeDocID uint64) (bool, error) {
 	for _, d := range m.docs {
 		if d.KBAssetID == kbAssetID && !d.DeletedAt.Valid && !d.IsFolder && d.FolderPath == folderPath && d.FileName == fileName && d.ID != excludeDocID {

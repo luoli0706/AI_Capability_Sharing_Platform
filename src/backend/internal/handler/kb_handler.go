@@ -458,11 +458,21 @@ func (h *KBHandler) CopyDocument(c echo.Context) error {
 
 	userID := middleware.GetUserID(c)
 	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
-	doc, err := h.kbSvc.CopyDocument(userID, isSuperAdmin, kbID, docID, req.TargetFolderPath, req.NewName)
+	doc, err := h.kbSvc.CopyDocumentWithOptions(userID, isSuperAdmin, kbID, docID, req)
 	if err != nil {
 		return service.HandleError(c, err)
 	}
 	return response.Success(c, doc)
+}
+
+func (h *KBHandler) ListEditableTargets(c echo.Context) error {
+	userID := middleware.GetUserID(c)
+	isSuperAdmin := middleware.HasRole(c, model.RoleSuperAdmin)
+	targets, err := h.kbSvc.ListEditableKBTargets(userID, isSuperAdmin)
+	if err != nil {
+		return service.HandleError(c, err)
+	}
+	return response.Success(c, targets)
 }
 
 func (h *KBHandler) RenameDocument(c echo.Context) error {

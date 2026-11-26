@@ -751,3 +751,17 @@ export interface KbReadingProgress {
   updated_at: string | null
 }
 
+export interface CopyKbDocumentRequest {
+  target_folder_path: string
+  new_name?: string
+  target_kb_id?: number
+  ref_domain_id?: number
+}
+
+export interface EditableKbTarget {
+  domain_id: number
+  domain_name: string
+  kb_id: number
+  kb_name: string
+}
+
