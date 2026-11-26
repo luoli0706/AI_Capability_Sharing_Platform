@@ -65,7 +65,32 @@ func (s *authService) SetEmailService(emailSvc EmailService) {
 	s.emailSvc = emailSvc
 }
 
+func validateRegisterUsername(raw string) (string, error) {
+	username := strings.TrimSpace(raw)
+	if len(username) < 3 || len(username) > 64 {
+		return "", NewBadRequest("用户名长度需在 3 到 64 个字符之间")
+	}
+	if strings.EqualFold(username, "system") {
+		return "", NewBadRequest("该用户名不可使用")
+	}
+	for _, r := range username {
+		isLower := r >= 'a' && r <= 'z'
+		isUpper := r >= 'A' && r <= 'Z'
+		isDigit := r >= '0' && r <= '9'
+		if !isLower && !isUpper && !isDigit && r != '_' {
+			return "", NewBadRequest("用户名只能由大小写英文字母、数字和下划线组成")
+		}
+	}
+	return username, nil
+}
+
 func (s *authService) Register(req model.RegisterRequest) (*model.UserInfo, error) {
+	username, err := validateRegisterUsername(req.Username)
+	if err != nil {
+		return nil, err
+	}
+	req.Username = username
+
 	if err := validatePasswordComplexity(req.Password); err != nil {
 		return nil, err
 	}

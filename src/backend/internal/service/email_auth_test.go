@@ -581,3 +581,31 @@ func TestResetPasswordFlowAndGlobalQuota200(t *testing.T) {
 		t.Fatalf("expected global quota exhausted message, got: %v", err)
 	}
 }
+
+func TestRegister_UsernameValidation(t *testing.T) {
+	invalidNames := []string{
+		"ab",
+		"user-name",
+		"user name",
+		"中文名",
+		"user@mail",
+		"user.name",
+		"system",
+	}
+	for _, name := range invalidNames {
+		if _, err := validateRegisterUsername(name); err == nil {
+			t.Fatalf("expected username %q to be rejected", name)
+		}
+	}
+
+	validNames := []string{"Alice_01", "zhang_san", "USER123", "___"}
+	for _, name := range validNames {
+		got, err := validateRegisterUsername(name)
+		if err != nil {
+			t.Fatalf("expected username %q to be accepted, got %v", name, err)
+		}
+		if got != name {
+			t.Fatalf("expected %q, got %q", name, got)
+		}
+	}
+}

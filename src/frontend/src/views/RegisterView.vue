@@ -84,7 +84,7 @@ const rules: FormRules = {
   username: [
     { required: true, message: '请输入用户名', trigger: 'blur' },
     { min: 3, max: 32, message: '用户名长度需在 3 到 32 个字符之间', trigger: 'blur' },
-    { pattern: /^[a-zA-Z0-9_-]+$/, message: '仅支持字母、数字、下划线和连字符', trigger: 'blur' }
+    { pattern: /^[A-Za-z0-9_]+$/, message: '用户名只能由大小写英文字母、数字和下划线组成', trigger: 'blur' }
   ],
   nickname: [{ max: 32, message: '昵称不超过 32 个字符', trigger: 'blur' }],
   email: [{ required: true, validator: validateEmail, trigger: 'blur' }],
@@ -207,7 +207,7 @@ async function handleSubmit() {
           <el-form-item label="用户名" prop="username">
             <el-input
               v-model="form.username"
-              placeholder="例如：zhangsan"
+              placeholder="大小写字母、数字或下划线，如 zhang_san01"
               :prefix-icon="User"
               autocomplete="username"
             />
