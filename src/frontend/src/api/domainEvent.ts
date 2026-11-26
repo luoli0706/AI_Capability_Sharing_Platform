@@ -59,11 +59,16 @@ export interface AddDomainEventCandidateRequest {
   folder_doc_id: number
 }
 
-export function listDomainEvents(
+export async function listDomainEvents(
   domainId: number,
   params?: { status?: string; event_type?: string }
 ): Promise<DomainEventSummary[]> {
-  return apiGet<DomainEventSummary[]>(`/domains/${domainId}/events`, { params })
+  const res = await apiGet<DomainEventSummary[] | { list?: DomainEventSummary[] }>(
+    `/domains/${domainId}/events`,
+    { params }
+  )
+  if (Array.isArray(res)) return res
+  return Array.isArray(res?.list) ? res.list : []
 }
 
 export function createDomainEvent(
